@@ -1,0 +1,445 @@
+{
+  "count": 14,
+  "rates": {
+    "intent": 100,
+    "risk": 100,
+    "emotion": 100
+  },
+  "counts": {
+    "intent": [
+      14,
+      14
+    ],
+    "risk": [
+      14,
+      14
+    ],
+    "emotion": [
+      14,
+      14
+    ]
+  },
+  "highRecall": 100,
+  "highExp": 3,
+  "highTp": 3,
+  "highMiss": [],
+  "confusion": {
+    "high": {
+      "high": 3,
+      "medium": 0,
+      "low": 0
+    },
+    "medium": {
+      "high": 0,
+      "medium": 7,
+      "low": 0
+    },
+    "low": {
+      "high": 0,
+      "medium": 0,
+      "low": 4
+    }
+  },
+  "misses": [],
+  "rows": [
+    {
+      "scenario": "presale",
+      "name": "售前咨询 · 敏感肌抗老",
+      "i": 1,
+      "text": "你好，我28岁，脸上皮肤比较敏感，想找一款抗老的精华，你们家哪款比较合适？",
+      "expect": {
+        "intent": "产品咨询",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "产品咨询",
+        "risk": "low",
+        "riskScore": 0,
+        "signals": [],
+        "emotion": "平稳",
+        "emotionScore": 66
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "presale",
+      "name": "售前咨询 · 敏感肌抗老",
+      "i": 2,
+      "text": "我之前用含视黄醇的会泛红刺痛，有没有温和一点的成分推荐？",
+      "expect": {
+        "intent": "成分安全",
+        "risk": "medium",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "成分安全",
+        "risk": "medium",
+        "riskScore": 34,
+        "signals": [
+          "皮肤不良反应"
+        ],
+        "emotion": "不满",
+        "emotionScore": 38
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "presale",
+      "name": "售前咨询 · 敏感肌抗老",
+      "i": 3,
+      "text": "那这个玻色因的，孕妇能用吗？我朋友也在备孕，我帮她问一下。",
+      "expect": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "riskScore": 54,
+        "signals": [
+          "皮肤不良反应",
+          "医疗健康建议边界"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "presale",
+      "name": "售前咨询 · 敏感肌抗老",
+      "i": 4,
+      "text": "好的，那我就先加购物车了，主要就是想确认一下我这个肤质会不会过敏。",
+      "expect": {
+        "intent": "成分安全",
+        "risk": "medium",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "成分安全",
+        "risk": "medium",
+        "riskScore": 54,
+        "signals": [
+          "皮肤不良反应",
+          "医疗健康建议边界"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 51
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "allergy",
+      "name": "过敏投诉 · 舆情外溢",
+      "i": 1,
+      "text": "上周买的抗老精华，用了两天脸上开始刺痛发红，这是怎么回事？",
+      "expect": {
+        "intent": "过敏投诉",
+        "risk": "medium",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "过敏投诉",
+        "risk": "medium",
+        "riskScore": 34,
+        "signals": [
+          "皮肤不良反应"
+        ],
+        "emotion": "不满",
+        "emotionScore": 36
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "allergy",
+      "name": "过敏投诉 · 舆情外溢",
+      "i": 2,
+      "text": "我截图了，你们这个成分是不是有问题？我要发小红书。",
+      "expect": {
+        "intent": "内容舆情",
+        "risk": "high",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "内容舆情",
+        "risk": "high",
+        "riskScore": 60,
+        "signals": [
+          "皮肤不良反应",
+          "公开平台曝光倾向"
+        ],
+        "emotion": "不满",
+        "emotionScore": 38
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "allergy",
+      "name": "过敏投诉 · 舆情外溢",
+      "i": 3,
+      "text": "我现在整个脸颊都是红的，已经不敢出门了，这算不算毁容？",
+      "expect": {
+        "intent": "过敏投诉",
+        "risk": "high",
+        "emotion": "愤怒"
+      },
+      "got": {
+        "intent": "过敏投诉",
+        "risk": "high",
+        "riskScore": 76,
+        "signals": [
+          "皮肤不良反应",
+          "疑似皮肤损伤",
+          "公开平台曝光倾向"
+        ],
+        "emotion": "愤怒",
+        "emotionScore": 22
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "allergy",
+      "name": "过敏投诉 · 舆情外溢",
+      "i": 4,
+      "text": "我朋友说这种情况可以找消协，你们打算怎么赔？",
+      "expect": {
+        "intent": "监管投诉",
+        "risk": "high",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "监管投诉",
+        "risk": "high",
+        "riskScore": 100,
+        "signals": [
+          "皮肤不良反应",
+          "疑似皮肤损伤",
+          "公开平台曝光倾向",
+          "监管投诉路径",
+          "索偿诉求"
+        ],
+        "emotion": "不满",
+        "emotionScore": 44
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "logistics",
+      "name": "物流纠纷 · 退款施压",
+      "i": 1,
+      "text": "我下单一周了还没发货，页面写的是48小时内发出的。",
+      "expect": {
+        "intent": "物流履约",
+        "risk": "low",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "物流履约",
+        "risk": "low",
+        "riskScore": 12,
+        "signals": [
+          "履约时效问题"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 52
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "logistics",
+      "name": "物流纠纷 · 退款施压",
+      "i": 2,
+      "text": "算了，我不想要了，直接帮我退款吧。",
+      "expect": {
+        "intent": "退换货",
+        "risk": "low",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "退换货",
+        "risk": "low",
+        "riskScore": 26,
+        "signals": [
+          "退换诉求",
+          "履约时效问题"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 48
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "logistics",
+      "name": "物流纠纷 · 退款施压",
+      "i": 3,
+      "text": "你们这效率，我以后不会再来买了。",
+      "expect": {
+        "intent": "流失倾向",
+        "risk": "medium",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "流失倾向",
+        "risk": "medium",
+        "riskScore": 40,
+        "signals": [
+          "退换诉求",
+          "流失与口碑风险",
+          "履约时效问题"
+        ],
+        "emotion": "不满",
+        "emotionScore": 40
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "loyalty",
+      "name": "会员挽回 · 权益流失",
+      "i": 1,
+      "text": "你好，我发现我的会员积分突然少了两万，规则是什么时候改的？",
+      "expect": {
+        "intent": "会员权益",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "会员权益",
+        "risk": "low",
+        "riskScore": 10,
+        "signals": [
+          "高价值会员异议"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "loyalty",
+      "name": "会员挽回 · 权益流失",
+      "i": 2,
+      "text": "我一年在你们这儿买好几千，现在积分直接折半，说实话挺失望的。",
+      "expect": {
+        "intent": "会员权益",
+        "risk": "medium",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "会员权益",
+        "risk": "medium",
+        "riskScore": 22,
+        "signals": [
+          "情绪升级",
+          "高价值会员异议"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 52
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    },
+    {
+      "scenario": "loyalty",
+      "name": "会员挽回 · 权益流失",
+      "i": 3,
+      "text": "我刚看了下竞品，人家同等级的权益比你们好很多，我在考虑要不要换。",
+      "expect": {
+        "intent": "流失倾向",
+        "risk": "medium",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "流失倾向",
+        "risk": "medium",
+        "riskScore": 36,
+        "signals": [
+          "情绪升级",
+          "流失与口碑风险",
+          "高价值会员异议"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 58
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true
+      }
+    }
+  ],
+  "generatedAt": "2026-10-14T16:00:31.696Z",
+  "suite": "美妆客服场景标注集",
+  "version": "2026.1",
+  "engine": "local",
+  "riskPolicyVersion": "2026.1",
+  "levels": [
+    {
+      "key": "high",
+      "label": "高危",
+      "sla": "15 秒内"
+    },
+    {
+      "key": "medium",
+      "label": "关注",
+      "sla": "2 分钟内"
+    },
+    {
+      "key": "low",
+      "label": "安全",
+      "sla": "常规"
+    }
+  ]
+}

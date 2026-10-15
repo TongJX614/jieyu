@@ -1,0 +1,252 @@
+/* ==========================================================================
+   Harness Stages —— 默认分析管线的六个领域阶段
+
+   顺序即「一条顾客消息必须依次穿过的事」：
+
+     facts      先看清对方买了什么（订单事实包 + 落到模型输入）
+     generate   生成话术（走 provider 降级链：agent → llm → local）
+     vision     视觉观察（顾客上传的皮肤照片 → 结构化观察 → 叠加风险信号）
+     ground     接地校验（没引用订单事实的话术标出来，必要时用订单事实兜底）
+     compliance 出站合规（逐条检测，标等级 + 给净化文本）
+     emotion    逐句情绪（按标点拆句，一句一个采样点，曲线与指数统一口径）
+     context    前文体检（这一句是在看过多少前文之后判的）
+
+   每个阶段只做一件事，只通过 state 传递数据；不认识的依赖从 ctx.deps 取。
+   API 依赖全部注入，因此可以在 Node 里用 stub 依赖跑单测。
+   ========================================================================== */
+
+(function (factory) {
+  var api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (typeof window !== 'undefined') window.HarnessStages = api;
+})(function () {
+  'use strict';
+
+  function need(deps, key) {
+    if (!deps || !deps[key]) throw new Error('harness 依赖缺失：' + key);
+    return deps[key];
+  }
+
+  /* ① 订单事实层：任何引擎被调用之前，先把订单装配成事实包 */
+  function facts(state, ctx) {
+    var OC = need(ctx.deps, 'OrderContext');
+    var job = state.job || {};
+    var pack = OC.build(job.def, job.crm, job.priorIntent || '');
+    state.pack = pack;
+
+    /* 模型输入在这里成型：画像 + 订单事实包 + 冻结的前文 + 本轮消息 */
+    state.input = {
+      profile: job.profile,
+      pack: pack,
+      order: pack.order,
+      orderDetail: pack.detail,
+      orderTrace: pack.trace,
+      facts: pack.facts,
+      allOrders: job.allOrders || [],
+      history: (job.ctx && job.ctx.history) || [],
+      message: job.message,
+      prevScore: job.prevIndex,
+      turn: job.ctx ? job.ctx.turns : undefined,
+      carried: job.ctx ? job.ctx.carried : undefined,
+      /* 视觉观察也进模型输入：默认模型没有视觉能力，但结构化观察是可读文本；
+         换成多模态模型时，Vision.register() 注册的分析器产出的观察会走同一条路 */
+      image: job.image || null,
+    };
+
+    var n = (pack.facts || []).length;
+    ctx.set('orderAvailable', !!pack.available);
+    ctx.set('orderFacts', n);
+    ctx.set('orderNo', pack.available ? pack.order.orderNo : '');
+    ctx.decide(pack.available
+      ? '先核订单：' + pack.order.orderNo + ' · ' + pack.order.product + ' → 装配 ' + n + ' 项事实'
+      : '该客户无订单档案 → 话术退化为通用接待（不引用商品与物流结论）');
+  }
+
+  /* ② 生成：provider 降级链由 harness core 负责，这里只发起 */
+  async function generate(state, ctx) {
+    state.result = await ctx.generate();
+    ctx.set('provider', state.provider || '');
+    ctx.decide('话术提供者：' + (state.provider || '?') +
+      (state.degraded ? '（降级原因：' + state.degraded + '）' : ''));
+  }
+
+  /* ③ 视觉观察：顾客发的皮肤照片 → 结构化观察 → 并入风险判定
+     视觉信号与文本信号**共用同一份权重表**（RiskPolicy.SIGNALS），
+     所以「照片看出泛红」和「顾客说刺痛」走的是同一套计分与分级口径，
+     不存在第二套标准。没有图片时本阶段静默跳过（不产生降级告警）。 */
+  function vision(state, ctx) {
+    var img = (state.job && state.job.image) || null;
+    var obs = img && img.observation;
+    if (!obs) {
+      ctx.set('vision', 'none');
+      ctx.decide('本轮无图片 → 视觉通道未启用（不影响其余阶段）');
+      return;
+    }
+    var RP = need(ctx.deps, 'RiskPolicy');
+    var result = state.result;
+    if (result) result.vision = obs;
+
+    var added = 0;
+    if (result && result.risk) {
+      var sigs = (result.risk.signals || []).slice();
+      (obs.signals || []).forEach(function (name) {
+        if (sigs.indexOf(name) !== -1) return;   // 同一信号只计一次
+        sigs.push(name);
+        added += RP.weightOf(name);
+      });
+      if (added) {
+        var score = Math.max(0, Math.min(100, (result.risk.score || 0) + added));
+        result.risk.score = score;
+        result.risk.level = RP.applyFloors(RP.levelOf(score), sigs);
+        result.risk.signals = sigs;
+        result.risk.advice = RP.adviceFor(result.risk.level, sigs);
+        result.risk.visionBoost = added;
+      }
+    }
+
+    ctx.set('vision', obs.level);
+    ctx.set('visionRedness', obs.redness);
+    ctx.decide('视觉观察：' + obs.summary +
+      (added
+        ? ' → 叠加信号「' + obs.signals.join('、') + '」(+' + added + ')，风险分 ' + result.risk.score
+        : ' → 未达泛红阈值，不叠加信号'));
+  }
+
+  /* ④ 接地校验：话术必须落到订单事实上，否则标出未接地 */
+  function ground(state, ctx) {
+    var OC = need(ctx.deps, 'OrderContext');
+    var result = state.result;
+    if (!result || !Array.isArray(result.replies)) return;
+    var pack = state.pack;
+
+    var verdict = OC.verify(result.replies, pack);
+    for (var i = 0; i < result.replies.length; i++) result.replies[i].grounding = verdict[i];
+
+    var grounded = 0;
+    for (var k = 0; k < result.replies.length; k++) {
+      if (result.replies[k].grounding && result.replies[k].grounding.grounded) grounded++;
+    }
+
+    /* 模型若把话术写成了通用共情文案，就用订单事实生成一条顶到推荐位；
+       被挤下去的那条降为备选，不直接删除 */
+    result.orderFallbackApplied = false;
+    if (!grounded && pack && pack.available) {
+      var top = (result.intents && result.intents[0] && result.intents[0].name) || '常规咨询';
+      var fb = OC.localReplies(pack, top, 1)[0];
+      if (fb) {
+        if (result.replies.length >= 3) result.replies = result.replies.slice(0, 2);
+        result.replies.unshift(fb);
+        result.orderFallbackApplied = true;
+      }
+    }
+
+    result.orderContext = {
+      available: !!(pack && pack.available),
+      source: pack ? pack.source : '',
+      facts: (pack && pack.facts) || [],
+      detail: pack ? pack.detail : null,
+      trace: (pack && pack.trace) || [],
+      focus: (pack && pack.focus) || [],
+      fallbackApplied: result.orderFallbackApplied,
+    };
+
+    ctx.set('grounded', grounded);
+    ctx.set('replies', result.replies.length);
+    ctx.set('orderFallback', result.orderFallbackApplied);
+    ctx.decide(result.orderFallbackApplied
+      ? '接地校验：原始话术全部未引用订单 → 已用订单事实生成 1 条顶到推荐位'
+      : '接地校验：' + grounded + '/' + result.replies.length + ' 条引用了订单事实');
+  }
+
+  /* ⑤ 出站合规：只标注不删（发送环节还会再兜一次） */
+  function compliance(state, ctx) {
+    var RG = need(ctx.deps, 'ReplyGuard');
+    var result = state.result;
+    if (!result || !Array.isArray(result.replies)) return;
+
+    var summary = { blocked: 0, flagged: 0, level: 'none' };
+    for (var i = 0; i < result.replies.length; i++) {
+      var rp = result.replies[i];
+      var g = RG.check(rp.text);
+      /* 这里只落 guard 判定。曾经还写过一个 safeText（净化后的文本），
+         但全项目没有任何读取方 —— 真正的出站闸是 app.js 的 guardOutbound()，
+         它在发送那一刻重新 check 并按等级拦截。写一个没人读的字段只会让人
+         误以为「合规阶段已经产出了可直发的文本」，所以撤掉。 */
+      rp.guard = g;
+      if (g.level === 'block') summary.blocked++;
+      if (g.level !== 'none') summary.flagged++;
+      if (RG.rank(g.level) > RG.rank(summary.level)) summary.level = g.level;
+    }
+    result.compliance = summary;
+
+    ctx.set('compliance', summary.level);
+    ctx.set('blocked', summary.blocked);
+    ctx.decide('出站合规：' + (summary.level === 'none'
+      ? '全部通过'
+      : '最高等级 ' + summary.level + '（命中 ' + summary.flagged + ' 条，其中禁止发送 ' + summary.blocked + ' 条）'));
+  }
+
+  /* ⑥ 逐句情绪：本句 + 会话此前序列 → 新序列 + 综合指数 + 走势 */
+  function emotion(state, ctx) {
+    var EP = need(ctx.deps, 'EmotionPolicy');
+    var result = state.result;
+    if (!result || !result.emotion) return;
+    var job = state.job || {};
+
+    var series = (job.series || []).slice();
+    var sentScores = EP.scoresOf(job.message);
+
+    /* 大模型路径：模型给的分是「本轮这一句」的整体共情判断，用它盖掉最后一句；
+       同一消息内的其他分句仍走统一词典口径 —— 曲线不混尺度，也不丢掉模型的理解 */
+    if (result.engine === 'llm' && typeof result.emotion.score === 'number' && isFinite(result.emotion.score)) {
+      sentScores[sentScores.length - 1] = EP.clamp(Math.round(result.emotion.score), 6, 96);
+    }
+    for (var q = 0; q < sentScores.length; q++) series.push(sentScores[q]);
+
+    var lastScore = sentScores[sentScores.length - 1];
+    var index = EP.indexOf(series);
+    result.emotion.score = lastScore;
+    result.emotion.series = series.slice();
+    result.emotion.index = index;
+    result.emotion.label = EP.labelOf(lastScore);
+    result.emotion.indexLabel = EP.labelOf(index);
+    result.emotion.sentences = sentScores.length;
+
+    /* 走势 = 本句 vs 本句之前那一句（跨消息连续，保证「一句一个点」） */
+    var prevPos = series.length - sentScores.length - 1;
+    var prevMsg = prevPos >= 0 ? series[prevPos] : null;
+    result.emotion.trend = prevMsg === null ? 'flat' : EP.trendOf(lastScore, prevMsg);
+
+    state.series = series;
+    state.index = index;
+    ctx.set('sentences', sentScores.length);
+    ctx.set('emotionIndex', index);
+  }
+
+  /* ⑦ 前文体检：把「这一句判定的依据」挂到结果上，界面据此可核对 */
+  function context(state, ctx) {
+    var result = state.result;
+    if (!result) return;
+    var c = (state.job && state.job.ctx) || {};
+    result.context = {
+      turns: c.turns,
+      carried: c.carried,
+      dropped: c.dropped,
+      customerTurns: c.customerTurns,
+      intentSource: result.intentSource || 'current',
+      history: c.history || [],
+    };
+    ctx.set('intentSource', result.context.intentSource);
+  }
+
+  return {
+    facts: facts,
+    generate: generate,
+    vision: vision,
+    ground: ground,
+    compliance: compliance,
+    emotion: emotion,
+    context: context,
+    ORDER: ['facts', 'generate', 'vision', 'ground', 'compliance', 'emotion', 'context'],
+  };
+});

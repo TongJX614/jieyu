@@ -1,0 +1,17 @@
+{
+  "name": "beauty-cs-copilot",
+  "version": "1.2.0",
+  "private": true,
+  "description": "解语 Jieyu — 美妆客服共情副驾，面向消费者服务场景的实时坐席辅助工作台（赛道一：数据共情者）",
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node tests/run-all.js",
+    "eval": "node eval/run.js",
+    "eval:dump": "node eval/run.js --dump",
+    "demo:channels": "node tools/demo-channels.js",
+    "audit": "node tools/audit.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
