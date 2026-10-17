@@ -36,11 +36,14 @@ module.exports = function (t) {
   t.suite('careradar · 全量扫描');
   const rep = scan(S);
   t.eq(rep.now, NOW, '基准日回填到结果里（可核对）');
-  t.eq(rep.customers.length, 4, '扫描 4 位客户');
-  t.eq(rep.stats.customers, 4, '统计口径一致');
+  /* 客户数从 CRM 取，不写字面量 —— 加一位客户不该让「扫描完整性」这条断言变红，
+     真正要钉的是「档案里的每一位都被扫到、且统计口径与列表同宽」 */
+  const N_CUST = Object.keys(S.CRM.CUSTOMERS).length;
+  t.eq(rep.customers.length, N_CUST, '每位有档案的客户都被扫到（当前 ' + N_CUST + ' 位）');
+  t.eq(rep.stats.customers, N_CUST, '统计口径一致');
   t.eq(rep.stats.total, rep.stats.high + rep.stats.medium + rep.stats.low, '等级分档之和 = 总数');
   t.ok(rep.stats.high > 0, '存在高危关怀项');
-  t.eq(rep.stats.covered, 4, '4 位客户都命中至少一条');
+  t.eq(rep.stats.covered, N_CUST, N_CUST + ' 位客户都命中至少一条');
   t.ok(rep.notes.length >= 3, '口径声明随结果返回');
 
   t.suite('careradar · ① 复购周期');

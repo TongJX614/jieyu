@@ -9,7 +9,9 @@
     "eval": "node eval/run.js",
     "eval:dump": "node eval/run.js --dump",
     "demo:channels": "node tools/demo-channels.js",
-    "audit": "node tools/audit.js"
+    "audit": "node tools/audit.js",
+    "invariants": "node tools/invariants.js",
+    "check": "node tools/invariants.js --fast && node tests/run-all.js"
   },
   "engines": {
     "node": ">=18"

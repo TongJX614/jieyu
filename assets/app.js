@@ -65,6 +65,10 @@
     q: '',
     kbq: '',
     bubbleOpen: false,
+    /* 桌宠手上那件：品类 key（'' = 空手）与判定结果。
+       由 PropFit 从「本会话最近提到的商品 / 订单」提炼，不是剧本写死的 */
+    prop: '',
+    propInfo: null,
     ctxOpen: false,                // 话术小助手里「查看前文」是否展开
     caseOpen: '',                  // 看板里展开处置详情的工单号
     caseNotes: {},                 // 各工单的「处置结论」草稿（重渲染不丢）
@@ -91,6 +95,10 @@
     return {
       chat: [], series: [], analyzed: null, prevIndex: null,
       step: 0, awaitingReply: false, busy: false, pending: 0,
+      /* 坐席已发出的回复数（单调递增）。分析是异步的，它收尾时可能晚于坐席的手工回复；
+         靠它判断「这句顾客消息是不是已经被答过了」，才不会把迟到的分析结果
+         当成「顾客还在等回复」而永久停住剧本。 */
+      replySeq: 0,
       adoptedKeys: {}, riskKeys: {}, lastSource: '',
       orderPack: null,               // 本会话最近一次装配的订单事实包（供净化后重新校验）
       turnLog: [],                   // 复盘用逐轮记录：顾客轮带判定结论，客服轮带承诺原文
@@ -240,7 +248,9 @@
     if (active) renderChat();
     renderContacts();
 
-    enqueue({ idx: idx, mid: msg.id, message: msg.text, ctx: ctx, image: msg.image || null });
+    /* 连同「此刻已答复到第几轮」一起冻结：本句到达之后才发出的坐席回复，
+       不构成对它的答复，分析收尾时不能拿它当作「已答」的证据。 */
+    enqueue({ idx: idx, mid: msg.id, message: msg.text, ctx: ctx, image: msg.image || null, replySeq: S.replySeq });
   }, 'workbench');
 
   /* ==================== 分析队列（串行） ==================== */
@@ -334,7 +344,14 @@
       if (run.index != null) { S.prevIndex = run.index; c.score = run.index; }
 
       S.analyzed = result;
-      S.awaitingReply = result.replies.length > 0;
+      /* 「是否还在等坐席回复」不能只看这一轮有没有生成话术 —— 分析是异步的：
+         坐席完全可能在分析还没收尾时就手工回了一句，那时 sendAgent 已经把
+         awaitingReply 置 false 并预约了剧本推进。若这里无条件置回 true，
+         那次回复就被抹掉了：推进循环看到「还在等回复」直接返回、并且不再重试，
+         会话永久停在原地 —— 顾客的话明明已经答了，却再也不来下一句。
+         所以只有「这句消息到达之后确实没有新回复」才算仍在等待。 */
+      S.awaitingReply = result.replies.length > 0 &&
+        (job.replySeq == null || S.replySeq === job.replySeq);
       c.level = result.risk.level;
 
       /* 复盘逐轮记录：把本轮判定结论固化下来，换班交接时不用重放推理 */
@@ -1055,12 +1072,98 @@
     spritePos = { right: SPRITE_DEFAULT.right, bottom: SPRITE_DEFAULT.bottom };
   }
 
+  /** 桌宠本体的当前边长（--pet 会随断点变，别再写死 54） */
+  function spriteSize() {
+    return $('sprite').offsetWidth || 96;
+  }
+
   function spriteApply() {
     var el = $('sprite');
     el.style.right = spritePos.right + 'px';
     el.style.bottom = spritePos.bottom + 'px';
-    el.classList.toggle('side-right', window.innerWidth - spritePos.right - 54 < 352);
-    el.classList.toggle('drop-down', window.innerHeight - spritePos.bottom - 54 < 476);
+    /* 气泡要 348 宽 + 12 间距 = 360 才放得下。
+       原来只看「左边够不够就翻到右边」，可右边也未必够 ——
+       430px 的屏上两边都不够，翻过去等于把整块面板推出视口。
+       所以翻转的条件是「左不够 且 右够」；两边都不够时交给 CSS 的贴底面版兜底。 */
+    var size = spriteSize();
+    var roomLeft = window.innerWidth - spritePos.right - size;
+    var roomRight = spritePos.right - 12;
+    el.classList.toggle('side-right', roomLeft < 360 && roomRight >= 360);
+    el.classList.toggle('drop-down', window.innerHeight - spritePos.bottom - size < 476);
+  }
+
+  /* ==================== 手上那件 ====================
+     桌宠拿什么不该由剧本写死：顾客刚说完「这个眼影盘飞不飞粉」，手上就该
+     从口红换成眼影盘。判定的顺序是「本会话最近提到的商品」优先、「订单」
+     兜底 —— 只认订单的话，顾客话里临时提到的品类永远拿不到；只认原话的话，
+     一句「帮我退款」就会让它空手站着。品类词表集中在 propfit.js。 */
+  var propTimer = 0;
+
+  function sessionProp() {
+    if (!window.PropFit) return null;
+    var c = contactAt(state.si);
+    if (!c) return null;
+    var S = cur();
+    var msgs = [];
+    /* 只回看最近 6 句顾客原话：更早的商品早聊完了，手不该一直举着 */
+    for (var i = S.chat.length - 1; i >= 0 && msgs.length < 6; i--) {
+      if (S.chat[i].role === 'customer') msgs.push(S.chat[i].text);
+    }
+    msgs.reverse();
+    var orders = (c.crm && window.CRM) ? CRM.allOrdersOf(c.def.id) : [];
+    return window.PropFit.resolve({ messages: msgs, orders: orders });
+  }
+
+  /** 把「拿哪件」落到 DOM 上。品类没变就什么都不做 —— renderAll 调得很勤 */
+  function applyProp(hit) {
+    var el = $('sprite');
+    var key = hit ? hit.cat.key : '';
+    if (state.prop === key) { state.propInfo = hit; return; }
+    state.prop = key;
+    state.propInfo = hit;
+
+    if (!key) {
+      el.removeAttribute('data-prop');
+      el.classList.remove('pulling');
+      ['hold', 'prun', 'pin', 'pnod', 'pwave', 'pspin'].forEach(function (k) {
+        el.style.removeProperty('--' + k + '-src');
+      });
+      return;
+    }
+
+    var prop = hit.cat.prop;
+    el.setAttribute('data-prop', prop);
+    /* 路径相对 styles.css 写（img/…，不是 assets/img/…）：这几个变量最终被
+       styles.css 里的 background-image 消费，url 的基准是那张样式表，
+       写 assets/img/… 会解析成 assets/assets/img/…（404，而且不报错，只是空白） */
+    /* hold 持物待机 / prun 抱物跑 / pin 拿出来 / pnod 点头 / pwave 右手挥 / pspin 转圈 */
+    ['hold', 'prun', 'pin', 'pnod', 'pwave', 'pspin'].forEach(function (k) {
+      el.style.setProperty('--' + k + '-src', 'url("img/' + PropFit.spriteOf(prop, k) + '")');
+    });
+
+    /* 换品类时把这一款的三张图预热掉：不预热的话，拿到新品类的那一刻正好在拖，
+       跑动帧还在下载，画面上就是「东西拿着、腿不动」甚至整个空白一下 */
+    preheatProp(prop);
+
+    /* 换了一件就重播「拿出来」：同一件反复播会像卡住 */
+    el.classList.remove('pulling');
+    void el.offsetWidth;
+    el.classList.add('pulling');
+    clearTimeout(propTimer);
+    propTimer = setTimeout(function () { el.classList.remove('pulling'); }, 320);
+  }
+
+  /** 预热某一款道具的三张图。首屏只请求待机那张，其余等真正要播时再下载，
+      而「真正要播」往往正好是手指已经在拖的那一刻 —— 那一下就卡出一段空窗。 */
+  function preheatProp(prop) {
+    ['hold', 'prun', 'pin', 'pnod', 'pwave', 'pspin'].forEach(function (kind) {
+      var img = new Image();
+      img.src = 'assets/img/' + PropFit.spriteOf(prop, kind);
+    });
+  }
+
+  function syncProp() {
+    applyProp(sessionProp());
   }
 
   function replyKey() {
@@ -1091,8 +1194,12 @@
     var tip = $('spriteTip');
     var count = $('spriteCount');
 
-    el.classList.toggle('thinking', S.busy);
+    /* 手上有东西时不再切「思考」帧 —— 那套帧是空手的，一切换道具会当场消失 */
+    syncProp();
+    el.classList.toggle('thinking', S.busy && !state.prop);
     el.classList.toggle('ready', !S.busy && has && !state.bubbleOpen);
+    /* 窄屏上面板是贴底的整幅面板，桌宠继续站着只会压在内容上 —— 交给 CSS 藏 */
+    el.classList.toggle('open', state.bubbleOpen);
 
     if (S.busy) { tip.hidden = false; tip.textContent = '正在读这条消息…'; }
     else { tip.hidden = true; }
@@ -1122,6 +1229,20 @@
     }
 
     var html = '';
+
+    /* 手上那件 —— 不写这一行，「它为什么拿着口红」就只能靠猜。
+       写出来以后坐席能核对：这件是订单里的，还是顾客这句话里提到的。 */
+    var PH = state.propInfo;
+    if (PH) {
+      var rawSrc = PH.from === 'order'
+        ? (PH.product || '本单商品')
+        : '顾客原话：' + String(PH.text || '');
+      html += '<div class="sb-prop" title="' + esc(rawSrc) + '">' +
+        '<span class="sp-k">手上这件</span>' +
+        '<b>' + esc(PH.cat.name) + '</b>' +
+        '<span class="sp-src">' + esc(PH.from === 'order' ? '订单 ' + PH.orderNo : '顾客这句话里提到') + '</span>' +
+        '</div>';
+    }
 
     /* 前文体检条 —— 让「结合前文识别」这件事看得见、可核对 */
     var C = a.context;
@@ -1873,6 +1994,8 @@
     var st = CH.stats();
     badge.textContent = st.connected + '/' + st.total;
     badge.hidden = false;
+    /* 一个都没接上才算「要动的事」，其余只是覆盖率读数 —— 别让红色贬值 */
+    badge.className = 'rail-badge' + (st.connected === 0 ? ' warn' : '');
     badge.title = '已接入 ' + st.connected + ' 个渠道 · ' + st.available + ' 个待接入';
   }
 
@@ -2617,6 +2740,7 @@
     }
     S.chat.push({ role: 'agent', text: t, time: fmtTime(), via: '解语建议' });
     S.turnLog.push({ role: 'agent', text: t, time: fmtTime() });   // 复盘：承诺追踪要读原文
+    S.replySeq++;                    // 供迟到的分析结果核对「这轮已经答过了」
     S.awaitingReply = false;
     state.bubbleOpen = false;
     var c = contactAt(state.si);
@@ -2634,11 +2758,21 @@
     }
   }
 
+  /* 「顾客最后一句是否已被答复」以会话尾部为准。
+     awaitingReply 是个会被异步回写的标记，单信它就可能把「已经答过」误判成
+     「还在等回复」，推进循环随即永久退出、剧本再无下文。
+     尾部是坐席的话 = 已答；尾部是顾客的话 = 真的还在等。 */
+  function lastTurnIsCustomer(S) {
+    var last = S.chat[S.chat.length - 1];
+    return !!(last && last.role === 'customer');
+  }
+
   function deliverWhenIdle(si) {
     if (typeof si === 'number' && si !== state.si) return;
     var S = cur();
     if (S.busy || queue.length) { setTimeout(function () { deliverWhenIdle(si); }, 300); return; }
-    if (S.awaitingReply) return;
+    if (S.awaitingReply && lastTurnIsCustomer(S)) return;   // 确实还在等坐席回复，交给坐席
+    if (S.awaitingReply) S.awaitingReply = false;           // 会话事实说明已答 → 就地校正标记
     deliverNext();
   }
 
@@ -3271,17 +3405,71 @@
 
   /* ---------- 机灵拖拽 ---------- */
 
+  /* ==================== 桌宠的走与跳 ====================
+     原项目拖动时会长距离地「跑」起来：转身朝运动方向、双腿交替迈步、
+     摆臂联动、拖得越快步频越快，松手落地弹跳。这里用指针位移还原这套。
+     阈值照搬 desktop_pet.py（起跑 150px/s、停跑 70px/s、换向 170px/s），
+     速度用 EMA 平滑 —— 指针事件会被浏览器合并，原始差值抖得没法用。 */
+  var RUN_START = 150, RUN_STOP = 70, RUN_FLIP = 170;
+  var RUN_FREQ_MIN = 1.15, RUN_FREQ_MAX = 3.6;
+
   function bindSpriteDrag() {
     var el = $('sprite');
     var h = $('spriteHandle');
     var dragging = false, moved = false, sx = 0, sy = 0, sr = 0, sb = 0;
+    var size = 96;
+    var lastX = 0, lastT = 0, vx = 0, face = 0;
+    var landTimer = 0, walkDur = 0;
+
+    function setWalk(f) {
+      face = f;
+      el.classList.toggle('walk-l', f < 0);
+      el.classList.toggle('walk-r', f > 0);
+    }
+    function stopWalk() {
+      face = 0; vx = 0;
+      el.classList.remove('walk-l', 'walk-r');
+    }
+
+    /* 速度 → 朝向、步频。滞回阈值：起跑/停跑用两个不同的门槛，避免边界抖动 */
+    function updateWalk() {
+      var speed = Math.abs(vx);
+      if (!face) {
+        if (speed > RUN_START) setWalk(vx > 0 ? 1 : -1);
+        else return;
+      } else if (speed < RUN_STOP) {
+        stopWalk();
+        return;
+      } else if ((vx > 0) !== (face > 0) && speed > RUN_FLIP) {
+        setWalk(vx > 0 ? 1 : -1);
+      }
+      var freq = Math.min(RUN_FREQ_MAX, RUN_FREQ_MIN + speed / 480);
+      /* 抱物跑与空手跑共用同一套步频（原项目也如此）：帧数都是 12，
+         同频切换时脚步相位是接得上的，不会「拿了东西就慢半拍」 */
+      var dur = 1 / freq;
+      if (Math.abs(dur - walkDur) > 0.03) {
+        walkDur = dur;
+        el.style.setProperty('--walk-dur', dur.toFixed(3) + 's');
+      }
+    }
 
     h.addEventListener('pointerdown', function (e) {
+      /* 用户接管了：把自动小动作的计时器停掉，并摘掉正在播的一次性动作。
+         `.sprite.act-*` 与 `.sprite.walk-*` 特异性相等、写在后面，类还留着的话
+         拖动时会一直显示跳/挥的第一帧 —— 腿不动，像拖着一张图。 */
+      clearTimeout(idleActTimer);
+      ['act-jump', 'act-nod', 'act-wave', 'act-spin', 'act-bob'].forEach(function (c) {
+        el.classList.remove(c);
+      });
+      clearTimeout(actTimer);
       dragging = true;
       moved = false;
       sx = e.clientX; sy = e.clientY;
       sr = spritePos.right; sb = spritePos.bottom;
+      size = spriteSize();
+      lastX = e.clientX; lastT = performance.now(); vx = 0; walkDur = 0;
       el.classList.add('dragging');
+      el.classList.remove('landing');
       try { h.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       e.preventDefault();
     });
@@ -3290,22 +3478,123 @@
       if (!dragging) return;
       var dx = e.clientX - sx, dy = e.clientY - sy;
       if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
-      spritePos.right = clamp(sr - dx, 4, window.innerWidth - 58);
-      spritePos.bottom = clamp(sb - dy, 4, window.innerHeight - 58);
+      spritePos.right = clamp(sr - dx, 4, window.innerWidth - size - 4);
+      spritePos.bottom = clamp(sb - dy, 4, window.innerHeight - size - 4);
       spriteApply();
+
+      var now = performance.now();
+      var dt = Math.max(1, now - lastT);
+      var inst = (e.clientX - lastX) / dt * 1000;   /* 只看横向：竖着拖不转身 */
+      vx += (inst - vx) * 0.45;
+      lastX = e.clientX; lastT = now;
+      updateWalk();
     });
 
     function endDrag(e) {
       if (!dragging) return;
       dragging = false;
+      var wasWalking = !!face;
+      stopWalk();
       el.classList.remove('dragging');
       try { h.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       localStorage.setItem('beauty-cs-sprite', JSON.stringify(spritePos));
-      if (!moved) toggleBubble();
+      if (wasWalking) {
+        el.classList.add('landing');
+        clearTimeout(landTimer);
+        landTimer = setTimeout(function () { el.classList.remove('landing'); }, 430);
+      }
+      if (!moved) {
+        /* 单击：要开口说话了先打个招呼，收起来时点个头 */
+        spriteAct(state.bubbleOpen ? 'nod' : 'wave');
+        toggleBubble();
+      }
+      scheduleIdleAct();
     }
     h.addEventListener('pointerup', endDrag);
+    h.addEventListener('pointercancel', endDrag);
     h.addEventListener('dblclick', function () { spriteReset(); });
     window.addEventListener('resize', spriteApply);
+
+    /* 其余帧图延后预热：首屏只需要待机这一张，但拖动时才去下载会卡一下。
+       手上那件也一样 —— 三张图（待机/抱物跑/拿出）约 600KB，别塞进首屏。
+       转圈也在里面：平时用不到，但要是它自己转起来时才去下 600KB 的图，
+       前两帧就是空白。 */
+    setTimeout(function () {
+      ['sprite-run-l', 'sprite-run-r', 'sprite-jump', 'sprite-nod', 'sprite-wave',
+        'sprite-spin', 'sprite-think']
+        .forEach(function (n) {
+          var img = new Image();
+          img.src = 'assets/img/' + n + '.png';
+        });
+      if (state.propInfo) preheatProp(state.propInfo.cat.prop);
+      /* 首屏留 5 秒给它安静地喘气：一进来就动会显得很急 */
+      scheduleIdleAct(5000 + Math.random() * 2500);
+    }, 1200);
+  }
+
+  var actTimer = 0;
+  /* 摘类的时机必须和 styles.css 里的 @keyframes 时长对齐：
+     摘早了画面停在半途（转圈会停在侧背），摘晚了一帧定格。多给 30ms 兜定时器抖动。 */
+  var ACT_MS = { jump: 930, nod: 1080, wave: 1630, spin: 1530, bob: 1180 };
+  var ACT_CLASSES = ['act-jump', 'act-nod', 'act-wave', 'act-spin', 'act-bob'];
+
+  /** 播一个一次性动作（jump/nod/wave/spin/bob），播完摘类。
+   *  强制回流是为了同一个动作连点两次也能重播 —— 类没变，动画不会自己重启。 */
+  function spriteAct(name) {
+    var el = $('sprite');
+    /* 手上拿着东西时不能换成空手帧 —— 一切过去道具当场消失。所以：
+       · nod / wave / spin 各有专门的持物版（挥手换到右手，左臂拿着东西抬不起来）
+       · jump 没有持物版，退化成 bob：纯 2D 的轻轻一沉，道具跟着身体一起动 */
+    if (state.prop && name === 'jump') name = 'bob';
+    ACT_CLASSES.forEach(function (c) { el.classList.remove(c); });
+    void el.offsetWidth;
+    el.classList.add('act-' + name);
+    clearTimeout(actTimer);
+    actTimer = setTimeout(function () {
+      el.classList.remove('act-' + name);
+    }, ACT_MS[name] || 1000);
+  }
+
+  /* ---- 没人搭理它的时候，它得自己活着 ----
+     原项目就是这个思路（desktop_pet.py 里的 idle 计时器随机挑动作）。
+     三条约束：① 只在真的闲着时播 —— 不拖动、不在分析、页面可见；
+     ② 用户每交互一次就重新计时，否则刚拖完它自顾自转圈，像没接住操作；
+     ③ 不连播同一个动作，否则三分钟里看见两次转圈会显得很傻。 */
+  var idleActTimer = 0, lastIdleAct = '';
+  var IDLE_ACT_POOL = ['nod', 'wave', 'jump', 'spin'];
+  var IDLE_ACT_GAP_MIN = 9000, IDLE_ACT_GAP_MAX = 20000;
+
+  function spriteIdle() {
+    var el = $('sprite');
+    if (!el) return false;
+    if (state.busy || state.pending) return false;                 /* 正在分析，让它安静 */
+    if (el.classList.contains('dragging')) return false;
+    if (el.classList.contains('walk-l') || el.classList.contains('walk-r')) return false;
+    if (document.hidden) return false;
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
+    return true;
+  }
+
+  function scheduleIdleAct(delay) {
+    clearTimeout(idleActTimer);
+    function gap() { return IDLE_ACT_GAP_MIN + Math.random() * (IDLE_ACT_GAP_MAX - IDLE_ACT_GAP_MIN); }
+    idleActTimer = setTimeout(function tick() {
+      if (spriteIdle()) {
+        /* 持物时的动作池不一样：跳跃没有持物版，换成 2D 的轻沉 */
+        var pool = IDLE_ACT_POOL.slice();
+        if (state.prop) {
+          pool = pool.filter(function (n) { return n !== 'jump'; }).concat(['bob']);
+        }
+        pool = pool.filter(function (n) { return n !== lastIdleAct; });
+        var name = pool[Math.floor(Math.random() * pool.length)] || 'nod';
+        lastIdleAct = name;
+        spriteAct(name);
+        idleActTimer = setTimeout(tick, gap());
+      } else {
+        /* 不满足条件就过一会儿再看 —— 而不是把这次机会丢掉（用户可能正在拖） */
+        idleActTimer = setTimeout(tick, 3000);
+      }
+    }, delay == null ? gap() : delay);
   }
 
   function toggleBubble() {
@@ -3318,6 +3607,9 @@
     localStorage.removeItem('beauty-cs-sprite');
     spriteApply();
     renderSprite();
+    /* 归位 = 自己跳回原位，比直接闪现更像活的；手上拿着东西时改由「拿出」
+       那一下承担动作感，跳帧会把道具切没 */
+    if (!state.prop) spriteAct('jump');
     toast('话术小助手已归位', 'ok');
   }
 
@@ -3375,6 +3667,53 @@
       switchView(b.getAttribute('data-view'));
     });
 
+    /* ===== 窄屏会话抽屉（≤1040）=====
+       左列在窄屏从常驻列改成抽屉，但绝不允许「一收就没了」——
+       顶栏常驻入口 + Esc / 遮罩 / 选中会话三条关闭路径，
+       打开时登记现有的焦点陷阱，关闭时由 releaseOverlay 把焦点还给入口按钮。 */
+    var mqContacts = window.matchMedia('(max-width: 1040px)');
+
+    function contactsDrawerOpen() { return document.body.classList.contains('contacts-open'); }
+
+    function setContactsDrawer(open, instant) {
+      if (open === contactsDrawerOpen()) return;
+      var scrim = $('contactsScrim');
+      var btn = $('btnContacts');
+      var col = $('contactsCol');
+      if (open) {
+        document.body.classList.remove('contacts-no-anim');
+        scrim.hidden = false;
+        document.body.classList.add('contacts-open');
+        btn.setAttribute('aria-expanded', 'true');
+        /* 焦点归还的目标由 trapOverlay 在我之前记录的 activeElement 决定。
+           鼠标点按钮时它天然就是按钮，但键盘/程序化打开时可能还停在 body，
+           那样关闭后焦点会掉回文档开头 —— 所以先把焦点钉在触发按钮上。 */
+        if (document.activeElement !== btn) { try { btn.focus(); } catch (e) { /* ignore */ } }
+        trapOverlay(col);
+        return;
+      }
+      /* 从抽屉切回常驻列时不要播动画，否则会看到它从左边滑出去 */
+      if (instant) {
+        document.body.classList.add('contacts-no-anim');
+        window.setTimeout(function () { document.body.classList.remove('contacts-no-anim'); }, 0);
+      }
+      document.body.classList.remove('contacts-open');
+      btn.setAttribute('aria-expanded', 'false');
+      scrim.hidden = true;
+      releaseOverlay(col);
+    }
+
+    $('btnContacts').addEventListener('click', function () {
+      if (!mqContacts.matches) return;
+      setContactsDrawer(!contactsDrawerOpen());
+    });
+    $('contactsScrim').addEventListener('click', function () { setContactsDrawer(false); });
+    if (mqContacts.addEventListener) {
+      mqContacts.addEventListener('change', function (e) {
+        if (!e.matches) setContactsDrawer(false, true);
+      });
+    }
+
     $('contactsList').addEventListener('click', function (e) {
       /* 未读红点先拦一道：点它是「先看内容」，不是「进会话」 */
       var dot = e.target.closest ? e.target.closest('[data-peek]') : null;
@@ -3387,6 +3726,8 @@
       var card = e.target.closest ? e.target.closest('.contact') : null;
       if (!card) return;
       openContact(Number(card.getAttribute('data-ci')));
+      /* 窄屏：选完会话就把抽屉让开，否则会挡住刚切换过来的对话 */
+      if (mqContacts.matches) setContactsDrawer(false);
     });
 
     $('unreadPeek').addEventListener('click', function (e) {
@@ -3553,6 +3894,20 @@
         submitComposer();
       }
     });
+
+    /* 窄屏输入框只有 ~262px 宽，桌面那句 26 字的提示会折成三行、第三行被框裁掉。
+       换一句短的，并重算高度，保证占位文字永远完整可见。 */
+    var mqNarrow = window.matchMedia('(max-width: 720px)');
+    var phWide = $('composerInput').placeholder;
+    var phNarrow = '输入回复，或点「采用」填入…';
+    function syncComposerPh() {
+      var t = $('composerInput');
+      if (t) t.placeholder = mqNarrow.matches ? phNarrow : phWide;
+      autosize();
+    }
+    window.addEventListener('resize', syncComposerPh);
+    if (mqNarrow.addEventListener) mqNarrow.addEventListener('change', syncComposerPh);
+    syncComposerPh();
     $('composerGuard').addEventListener('click', function (e) {
       if (e.target.closest && e.target.closest('[data-guardfix]')) {
         var s = window.ReplyGuard.sanitize($('composerInput').value);
@@ -3732,6 +4087,7 @@
       if (!$('chWiz').hidden) closeWizard();
       else if (!$('recapRoot').hidden) closeRecap();
       else if (!$('drawerRoot').hidden) closeDrawer();
+      else if (contactsDrawerOpen()) setContactsDrawer(false);
       else if (peekIdx >= 0) closeUnreadPeek();
       else if (state.bandOpen) setBandOpen(false);
       else if (state.bubbleOpen) { state.bubbleOpen = false; renderSprite(); }

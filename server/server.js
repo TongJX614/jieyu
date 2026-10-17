@@ -27,6 +27,7 @@ const DEFAULT_MODEL = process.env.LLM_MODEL || 'deepseek-chat';
 
 const MAX_BODY = 512 * 1024;
 const MSG_BUFFER = 500;         // 服务端消息环形缓冲
+const MAX_DEDUPE = 2000;        // 幂等表上限（超出后淘汰最早插入的 id，防止长跑内存只增不减）
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -160,6 +161,15 @@ function handleIngest(req, res) {
       at: new Date().toISOString(),
     };
     msgIds.set(id, msgSeq);
+    /* 幂等表必须有上限：无上限的 Map 在长跑里只增不减，等同内存泄漏。
+       Map 保持插入顺序，从头淘汰即淘汰最早的 id。 */
+    if (msgIds.size > MAX_DEDUPE) {
+      let drop = msgIds.size - MAX_DEDUPE;
+      for (const k of msgIds.keys()) {
+        msgIds.delete(k);
+        if (--drop <= 0) break;
+      }
+    }
     msgBuffer.push(msg);
     if (msgBuffer.length > MSG_BUFFER) msgBuffer.shift();
 
@@ -318,7 +328,9 @@ function serveStatic(req, res, urlPath) {
   if (rel === '/' || rel === '') rel = '/index.html';
 
   const target = path.normalize(path.join(ROOT, rel));
-  if (!target.startsWith(ROOT)) {
+  /* 前缀比较必须带分隔符：否则 `beauty-cs-copilot-x` 这类同前缀的兄弟目录
+     会被 startsWith(ROOT) 误判成「在根内」，从而被当作静态资源读出去。 */
+  if (target !== ROOT && !target.startsWith(ROOT + path.sep)) {
     res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('403 禁止访问');
     return;
@@ -364,6 +376,7 @@ const server = http.createServer((req, res) => {
       keySource: API_KEY ? 'server' : 'client',
       sseClients: sseClients.size,
       msgSeq, buffered: msgBuffer.length,
+      dedupe: msgIds.size, dedupeLimit: MAX_DEDUPE,
       riskPolicy: 'server 由前端 policy.js 统一加载',
     });
     return;

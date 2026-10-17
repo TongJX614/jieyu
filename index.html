@@ -69,7 +69,7 @@
           </svg>
         </span>
         <span class="rl">看板</span>
-        <span class="rail-badge" id="navBadge" hidden>0</span>
+        <span class="rail-badge alert" id="navBadge" hidden>0</span>
       </button>
 
       <button class="rail-btn" data-view="kb" title="话术知识库">
@@ -98,8 +98,11 @@
       </button>
       <button class="rail-btn" id="btnSettings" title="模型与推理设置">
         <span class="ri">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="2.9"/><path d="M12 2.6v2.2M12 19.2v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.4 19.6L6 18M18 6l1.6-1.6"/>
+          <!-- 这里原来是一个「圆 + 八道射线」，和正上方的主题切换按钮（太阳）几乎一模一样，
+               19px 下两个按钮读成同一个东西。设置改推子/滑杆，语义直接对上「模型与推理参数」 -->
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <path d="M3.2 8.6h5.4M13.4 8.6h7.4M3.2 15.4h7.6M15.4 15.4h5.4"/>
+            <circle cx="11" cy="8.6" r="2.3"/><circle cx="13" cy="15.4" r="2.3"/>
           </svg>
         </span>
         <span class="rl">设置</span>
@@ -137,6 +140,13 @@
   <main class="work">
 
     <header class="work-bar">
+      <!-- 会话列表入口：只在 ≤1040 出现（此时左列变抽屉）。
+           没有它，窗口一拖窄坐席就再也切不了客户 —— 这是实测出来的死局 -->
+      <button id="btnContacts" type="button" aria-controls="contactsCol" aria-expanded="false" aria-label="会话列表">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+          <path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+      </button>
       <span class="avatar" id="curAvatar">客</span>
       <span class="cur-txt">
         <b id="curName">—</b>
@@ -326,15 +336,7 @@
   <div class="sprite-tip" id="spriteTip" hidden></div>
   <div class="sprite-bubble" id="spriteBubble" hidden>
     <div class="sb-head">
-      <span class="sb-avatar" aria-hidden="true">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 3.6v2.1"/><circle cx="12" cy="2.7" r="1.15" fill="currentColor" stroke="none"/>
-          <rect x="4.6" y="5.8" width="14.8" height="12" rx="3.5"/>
-          <circle cx="9.6" cy="11.6" r="1.1" fill="currentColor" stroke="none"/>
-          <circle cx="14.4" cy="11.6" r="1.1" fill="currentColor" stroke="none"/>
-          <path d="M9.8 15c1.3 1 3.1 1 4.4 0"/>
-        </svg>
-      </span>
+      <span class="sb-avatar" aria-hidden="true"></span>
       <span class="sb-title">
         <b>话术小助手</b>
         <span class="sb-sub" id="sbSub">待命中</span>
@@ -349,13 +351,8 @@
     </div>
   </div>
   <button class="sprite-handle" id="spriteHandle" aria-label="话术小助手，拖动可移动位置">
-    <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M12 3.6v2.1"/><circle cx="12" cy="2.7" r="1.15" fill="currentColor" stroke="none"/>
-      <rect x="4.6" y="5.8" width="14.8" height="12" rx="3.5"/>
-      <circle cx="9.6" cy="11.6" r="1.1" fill="currentColor" stroke="none"/>
-      <circle cx="14.4" cy="11.6" r="1.1" fill="currentColor" stroke="none"/>
-      <path d="M9.8 15c1.3 1 3.1 1 4.4 0"/>
-    </svg>
+    <!-- 桌宠本体：同一份 3D 模型离屏渲出的序列帧（10 帧待机 / 8 帧歪头思考） -->
+    <span class="sprite-pet" aria-hidden="true"></span>
     <span class="sprite-count" id="spriteCount" hidden>0</span>
   </button>
 </div>
@@ -513,6 +510,9 @@
   </aside>
 </div>
 
+<!-- 会话抽屉遮罩（仅 ≤1040 生效，桌面态被 CSS 强制隐藏） -->
+<div class="contacts-scrim" id="contactsScrim" hidden></div>
+
 <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
 
 <!-- ==================== 渠道接入向导 ====================
@@ -546,6 +546,7 @@
 <script src="assets/privacy.js"></script>
 <script src="assets/channels.js"></script>
 <script src="assets/scenarios.js"></script>
+<script src="assets/propfit.js"></script>
 <script src="assets/casefile.js"></script>
 <script src="assets/engine.js"></script>
 <script src="assets/llm.js"></script>

@@ -17,8 +17,11 @@ const SUITES = [
   'channels.test.js',
   'bus.test.js',
   'harness.test.js',
+  'llm.test.js',
+  'server.test.js',
   'bugfix.test.js',
   'domain.test.js',
+  'propfit.test.js',
 ];
 
 (async function () {

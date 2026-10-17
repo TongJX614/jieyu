@@ -245,6 +245,77 @@ const CHECKS = [
     })()`,
   },
   {
+    /* 坐席「抢跑」：还没等分析收尾就手工回复。
+       sendAgent 那一刻已把 awaitingReply 置 false 并预约了剧本推进；而分析是异步的，
+       它随后收尾时若再把该标记置回 true，推进循环会认为「顾客还在等坐席回复」，
+       直接返回且不再重试 —— 会话永久停在原地：顾客的话明明已经答了，
+       却再也不来下一句（界面上就是「一直停在 2 条」）。
+       这条只在真界面里、按「分析进行中」这一瞬间抢跑才暴露，单测碰不到：
+       它依赖的是「异步回写 vs 用户点击」的先后，属于端到端的时序缺陷。 */
+    name: 'workbench-early-reply',
+    url: '/?s=1&nolive=1',
+    /* 必须尽早开始轮询：本地引擎一轮分析只有几百毫秒，等太久会整轮错过窗口
+       （整套跑时缓存已热、启动更快，400ms 就已经晚了）。 */
+    wait: 30,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      /* 注意：这里一律现查现取，绝不缓存节点引用 —— 探针可能在「上一页」的文档里开始执行，
+         缓存了旧 #chatList 就会一直盯着一个已经不再更新的节点。 */
+      const typing = () => document.querySelectorAll('#chatList .bubble.typing').length;
+      /* 只数真实消息：打字指示器本身也是一个 .msg，混进来会把「没推进」误判成「已推进」 */
+      const realMsgs = () => document.querySelectorAll('#chatList .msg:not([data-typing])').length;
+      const out = {};
+
+      /* 等指示器真的出现再抢跑 —— 不然测的不是「分析进行中」。
+         抓不到窗口就如实报错，而不是静默返回一个空结果装作通过：
+         「没测到」和「测过且通过」是两件事。 */
+      for (let i = 0; i < 1600; i++) {
+        if (typing() > 0 && document.getElementById('composerInput')) { out.sawTyping = true; break; }
+        await sleep(5);
+      }
+      if (!out.sawTyping) {
+        throw new Error('没抓到「分析进行中」的窗口（首轮分析在探针启动前就收尾了）：' +
+          '本轮未验证抢跑场景，请确认本地引擎耗时是否异常偏短');
+      }
+
+      const input = document.getElementById('composerInput');
+      const mode = document.getElementById('btnComposerMode');
+      if (mode.classList.contains('on')) mode.click();     // 切回坐席回复模式
+      input.value = '我马上帮您核实';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.getElementById('btnSend').click();
+      out.typingAtSend = typing();
+      out.afterSend = realMsgs();
+
+      /* 顾客 + 坐席 + 下一条顾客 = 3 条真实消息，才算剧本真的续上了 */
+      for (let i = 0; i < 600; i++) {
+        await sleep(20);
+        if (realMsgs() >= 3) { out.advanced = true; out.advancedMs = i * 20; break; }
+      }
+      out.msgs = realMsgs();
+      out.residualTyping = typing();
+      const nodes = [...document.querySelectorAll('#chatList .msg:not([data-typing])')];
+      const last = nodes[nodes.length - 1];
+      out.lastMeta = last && last.querySelector('.meta') ? last.querySelector('.meta').textContent.trim().slice(0, 30) : '';
+      out.lastText = last ? last.textContent.trim().slice(0, 20) : '';
+
+      const bad = [];
+      const want = (cond, label) => { if (!cond) bad.push(label); };
+      want(out.typingAtSend > 0, '抢跑必须发生在分析进行中（此刻指示器应在），实为 ' + out.typingAtSend);
+      want(out.afterSend === 2, '抢跑后应是「顾客 + 坐席」两条消息，实为 ' + out.afterSend);
+      want(out.advanced === true,
+        '坐席已回复，分析收尾后剧本必须继续推进，不许把下一条顾客消息永久扣住（最终停在 ' + out.msgs + ' 条）');
+      want(out.msgs >= 3, '推进后至少应有 3 条真实消息，实为 ' + out.msgs);
+      want(out.lastMeta.indexOf('坐席') === -1,
+        '推进后最后一条应是顾客消息，实为「' + out.lastMeta + '」');
+      /* 注：这里不断言「无残留指示器」——推进后新到的顾客消息会立刻触发下一轮分析，
+         指示器本来就该再次出现（它是「正在读这条消息」）。指示器是否排在末位另有专条守。 */
+      if (bad.length) throw new Error('抢跑回复断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
     name: 'channel-wizard',
     url: '/?view=channels&nolive=1',
     wait: 2500,
@@ -869,6 +940,266 @@ const CHECKS = [
       return out;
     })()`,
   },
+  {
+    /* 手上那件：品类判定来自订单 / 顾客原话，落地是 data-prop + 三个 CSS 变量。
+       这条链路有三处会「静默坏掉」，肉眼都不容易发现：
+         · 变量指向不存在的图 → 浏览器不报错，只是什么都不画，看起来像桌宠空手
+         · CSS 选择器没命中 → 变量设了却没人用（只有 computedStyle 能抓到）
+         · 只在切会话时算一次 → 顾客接着说「这个眼影盘」时手上还举着口红
+       所以既看 data-prop，也看计算后的 backgroundImage，还要真的发一条消息。 */
+    name: 'sprite-prop',
+    url: '/?s=1&nolive=1',
+    wait: 3200,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const out = {};
+      const bad = [];
+      const want = (cond, label) => { if (!cond) bad.push(label); };
+      const sprite = document.getElementById('sprite');
+      const pet = sprite.querySelector('.sprite-pet');
+      const prop = () => sprite.getAttribute('data-prop') || '';
+      const bg = () => (getComputedStyle(pet).backgroundImage || '');
+
+      /* ① 首屏会话（林小满）主订单是玻色因紧致精华 → 手上拿精华 */
+      out.init = prop();
+      out.initBg = bg();
+      want(out.init === 'serum', '首屏应按主订单拿起精华，实为「' + out.init + '」');
+      want(bg().indexOf('sprite-hold-serum.png') >= 0,
+        '精华持物帧应真的被 CSS 用上（computed backgroundImage = ' + bg() + '）');
+
+      /* ② 那张图必须真的能加载 —— 文件名写错时浏览器不会报错 */
+      const loaded = await new Promise((res) => {
+        const url = (bg().match(/url\\("?(.+?)"?\\)/) || [])[1];
+        if (!url) return res({ ok: false, why: 'backgroundImage 里取不到 url' });
+        const img = new Image();
+        img.onload = () => res({ ok: img.naturalWidth > 0, w: img.naturalWidth });
+        img.onerror = () => res({ ok: false, why: '404 ' + url });
+        img.src = url;
+      });
+      out.img = loaded;
+      want(loaded.ok, '持物序列帧应能真正加载：' + (loaded.why || ''));
+
+      /* ③ 切到彩妆会话（沈知微）：订单里最近一单是口红 */
+      const row = [...document.querySelectorAll('#contactsList .contact')]
+        .find((n) => n.textContent.indexOf('沈知微') >= 0);
+      out.hasColorContact = !!row;
+      want(!!row, '左列应有彩妆会话（沈知微）');
+      if (row) { row.click(); await sleep(1200); }
+      out.afterSwitch = prop();
+      want(out.afterSwitch === 'lipstick', '切到彩妆会话应换成口红，实为「' + out.afterSwitch + '」');
+
+      /* ④ 顾客接着说眼影盘 → 手上就得换眼影盘。
+         这是「按原话提炼品类」唯一能自证的一步：同一个人、同一通会话里换过一次 */
+      const b = document.getElementById('btnComposerMode');
+      if (!b.classList.contains('on')) b.click();
+      const input = document.getElementById('composerInput');
+      input.value = '那这个眼影盘飞粉吗？我眼皮容易出油';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.getElementById('btnSend').click();
+
+      let seen = '';
+      for (let i = 0; i < 500; i++) {
+        if (prop() === 'palette') { seen = 'palette'; break; }
+        await sleep(15);
+      }
+      /* 换品类会先播 300ms 的「拿出来」，那期间 background-image 指向 pin-*。
+         不等它播完就取 computedStyle，测到的是过渡态而不是终态 */
+      await sleep(420);
+      out.afterMessage = prop();
+      out.afterMessageBg = bg();
+      want(seen === 'palette', '顾客提到眼影盘后应换成眼影盘，实为「' + out.afterMessage + '」');
+      want(bg().indexOf('sprite-hold-palette.png') >= 0,
+        '换成眼影盘后 computed backgroundImage 应指向 palette（实为 ' + bg() + '）');
+
+      /* ⑤ 拖起来必须真的在跑。持物时的走路是 sprite-prun-*（侧身抱物跑）。
+         这个缺陷的形态很有欺骗性：CSS 全对、变量全对、拖动位置也真的在移动，
+         唯独帧还是那张「站着抱东西」的 —— 看起来就是被拖着滑。
+         顺带钉帧数：CSS 写 steps(12)，序列帧若只有 8 格，画面里会露出半个人。 */
+      const handle = document.getElementById('spriteHandle');
+      const r0 = handle.getBoundingClientRect();
+      const hx = Math.round(r0.left + r0.width / 2), hy = Math.round(r0.top + r0.height / 2);
+      const pe = (t, x, btn) => handle.dispatchEvent(new PointerEvent(t, {
+        bubbles: true, cancelable: true, pointerId: 3, pointerType: 'mouse',
+        isPrimary: true, clientX: x, clientY: hy, button: 0, buttons: btn,
+      }));
+      pe('pointerdown', hx, 1);
+      for (let i = 1; i <= 10; i++) { pe('pointermove', hx - i * 26, 1); await sleep(16); }
+      const wcs = getComputedStyle(pet);
+      out.walkClass = sprite.className;
+      out.walkBg = wcs.backgroundImage;
+      out.walkAnim = wcs.animationName;
+      want(/walk-[lr]/.test(sprite.className), '拖动时应挂上 walk-l/walk-r（实为「' + sprite.className + '」）');
+      want(wcs.backgroundImage.indexOf('sprite-prun-palette.png') >= 0,
+        '持物拖动应播 sprite-prun-*，而不是站着那张持物帧（实为 ' + wcs.backgroundImage + '）');
+      want(wcs.animationName.indexOf('pet-prun') >= 0, '持物拖动应播 pet-prun（实为 ' + wcs.animationName + '）');
+      /* 往左拖必须真的朝左。镜像不能用 transform 写：拖动时指针压在把手上，hover 恒成立，
+         dragging:hover 那条 transform:none 的特异性更高，会把镜像整条清掉 ——
+         表现是「往左拖也朝右跑」。所以镜像用独立的 scale 属性，这里直接钉住它。 */
+      out.walkScale = wcs.scale || '';
+      want(String(wcs.scale).indexOf('-1') === 0,
+        '往左拖必须镜像（scale 应为 -1 1，实为「' + wcs.scale + '」）');
+
+      const sheet = await new Promise((res) => {
+        const url = (wcs.backgroundImage.match(/url\\("?(.+?)"?\\)/) || [])[1];
+        if (!url) return res({ w: 0, h: 0 });
+        const img = new Image();
+        img.onload = () => res({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => res({ w: 0, h: 0 });
+        img.src = url;
+      });
+      out.sheet = sheet;
+      want(sheet.h > 0 && Math.round(sheet.w / sheet.h) === 24,
+        '抱物跑序列帧应为 24 帧（实为 ' + sheet.w + '×' + sheet.h + '）');
+      pe('pointerup', hx - 260, 0);
+
+      /* ⑥ 拿着东西时的自主动作：点头 / 挥手 / 转圈 各有一张持物版。
+         少了这几张，道具就会在「自主动作」的那两秒里凭空消失 —— 而这恰好发生在
+         没人操作、最容易被看见的时候。缺陷形态是 CSS 里的变量没被写上（var() 空值
+         = background-image: none，画面直接空一片），所以这里必须钉 computed 值，
+         而不是钉 class 或变量名。顺带把帧数与 CSS 的 steps() 对上。 */
+      const acts = [
+        ['act-nod', 'sprite-pnod-palette.png', 20],
+        ['act-wave', 'sprite-pwave-palette.png', 28],
+        ['act-spin', 'sprite-pspin-palette.png', 28],
+      ];
+      out.acts = [];
+      for (let i = 0; i < acts.length; i++) {
+        const cls = acts[i][0], file = acts[i][1], n = acts[i][2];
+        sprite.classList.remove('act-nod', 'act-wave', 'act-spin', 'act-bob');
+        void sprite.offsetWidth;
+        sprite.classList.add(cls);
+        const st = getComputedStyle(pet);
+        const bgNow = st.backgroundImage || '';
+        const urlNow = (bgNow.match(/url\\("?(.+?)"?\\)/) || [])[1] || '';
+        const sh = await new Promise((res) => {
+          if (!urlNow) return res({ w: 0, h: 0 });
+          const img = new Image();
+          img.onload = () => res({ w: img.naturalWidth, h: img.naturalHeight });
+          img.onerror = () => res({ w: 0, h: 0 });
+          img.src = urlNow;
+        });
+        out.acts.push({ cls: cls, file: urlNow.split('/').pop(), anim: st.animationName,
+                        frames: sh.h ? Math.round(sh.w / sh.h) : 0 });
+        want(urlNow.split('/').pop() === file,
+          '持物 ' + cls + ' 应播 ' + file + '（实为「' + (urlNow.split('/').pop() || '空') + '」）');
+        want(sh.h > 0 && Math.round(sh.w / sh.h) === n,
+          '持物 ' + cls + ' 序列帧应为 ' + n + ' 格（实为 ' + sh.w + '×' + sh.h + '）');
+        sprite.classList.remove(cls);
+      }
+
+      if (bad.length) throw new Error('持物断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 帧率是「看起来卡不卡」的唯一硬指标：fps = 帧数 / 循环时长。
+       steps(N) 写大了会在格子尽头露出半个人，写小了动作整体变慢 ——
+       所以两个都要钉：图上的格子数，以及实测的帧切换频率。
+       上一版 idle 是 10 格 / 6.8s ≈ 1.5fps、跑步 12 格 / 0.87s ≈ 13.8fps，肉眼就是抽帧。 */
+    name: 'sprite-frames',
+    url: '/?s=1&nolive=1',
+    wait: 3000,
+    probe: () => `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const out = {}, bad = [];
+      const want = (cond, label) => { if (!cond) bad.push(label); };
+      const pet = document.querySelector('.sprite-pet');
+      const sprite = document.getElementById('sprite');
+      const info = () => {
+        const cs = getComputedStyle(pet);
+        const url = (cs.backgroundImage.match(/url\\("?(.+?)"?\\)/) || [])[1] || '';
+        return { url, file: url.split('/').pop(), size: cs.backgroundSize,
+                 anim: cs.animationName, dur: parseFloat(cs.animationDuration) };
+      };
+      const frames = (url) => new Promise((res) => {
+        const img = new Image();
+        img.onload = () => res(Math.round(img.naturalWidth / Math.max(1, img.naturalHeight)));
+        img.onerror = () => res(0);
+        img.src = url;
+      });
+      /* 每换一格 computed backgroundPosition 就变一次 —— 这就是实际帧率 */
+      const fps = (ms) => new Promise((res) => {
+        const t0 = performance.now();
+        let last = '', n = 0;
+        const loop = () => {
+          const v = getComputedStyle(pet).backgroundPosition;
+          if (v !== last) { n++; last = v; }
+          if (performance.now() - t0 < ms) requestAnimationFrame(loop);
+          else res(+(n / ((performance.now() - t0) / 1000)).toFixed(1));
+        };
+        requestAnimationFrame(loop);
+      });
+
+      /* 先等它从「分析中」的歪头帧回到待机 —— 那套是 16 格，会污染下面的断言 */
+      for (let i = 0; i < 120 && /pet-(think|pin)/.test(info().anim); i++) await sleep(150);
+
+      /* 这个检查量的是「空手那套底片」。但首屏这通会话在聊精华，桌宠一进页面就
+         拿着一件道具 —— 那时 idle 播的是 pet-hold（20 格），不摘掉的话下面
+         每一条「pet-idle / 28 格」都会莫名其妙地差 8 格，看起来像图渲坏了。
+         持物那条路径由 sprite-prop 单独钉，这里先显式还原成空手。 */
+      out.bootProp = sprite.getAttribute('data-prop') || '';
+      if (out.bootProp) {
+        sprite.removeAttribute('data-prop');
+        sprite.classList.remove('act-nod', 'act-wave', 'act-spin', 'act-bob');
+        void sprite.offsetWidth;
+      }
+      await sleep(120);
+
+      /* ① 待机：28 格 / 5.2s ≈ 5.4fps */
+      const idle = info();
+      out.idle = idle;
+      out.idleFrames = await frames(idle.url);
+      out.idleFps = await fps(2400);
+      want(/pet-idle/.test(idle.anim), '待机应播 pet-idle（实为 ' + idle.anim + '）');
+      want(out.idleFrames === 28, '待机序列帧应为 28 格（实为 ' + out.idleFrames + '）');
+      want(out.idleFps >= 4, '待机帧切换频率至少 4fps，否则读作「一顿一顿地喘」（实测 ' + out.idleFps + '）');
+
+      /* ② 转圈：没人动它时会自己转 —— 先卸掉 data-prop，否则持物那条规则特异性相同、
+         写在后面，会把 act-spin 的 background-image 盖回去 */
+      out.spinFrames = await frames(location.origin + '/assets/img/sprite-spin.png');
+      want(out.spinFrames === 28, '转圈序列帧应为 28 格（实为 ' + out.spinFrames + '）');
+      sprite.removeAttribute('data-prop');
+      sprite.classList.remove('act-jump', 'act-nod', 'act-wave', 'act-spin', 'act-bob');
+      void sprite.offsetWidth;
+      sprite.classList.add('act-spin');
+      const sp = info();
+      out.spinAnim = sp.anim;
+      out.spinFile = sp.file;
+      want(sp.anim.indexOf('pet-spin') >= 0, '挂 act-spin 后应播 pet-spin（实为 ' + sp.anim + '）');
+      want(sp.file === 'sprite-spin.png', 'act-spin 应取 sprite-spin.png（实为 ' + sp.file + '）');
+      sprite.classList.remove('act-spin');
+
+      /* ③ 拖动：24 格，切换频率必须上 20fps */
+      const handle = document.getElementById('spriteHandle');
+      const r0 = handle.getBoundingClientRect();
+      const hx = Math.round(r0.left + r0.width / 2), hy = Math.round(r0.top + r0.height / 2);
+      const pe = (t, x, btn) => handle.dispatchEvent(new PointerEvent(t, {
+        bubbles: true, cancelable: true, pointerId: 9, pointerType: 'mouse',
+        isPrimary: true, clientX: x, clientY: hy, button: 0, buttons: btn,
+      }));
+      pe('pointerdown', hx, 1);
+      let x = hx, dir = -1;
+      const pump = setInterval(() => {
+        x += dir * 18;
+        if (x < 260 || x > window.innerWidth - 140) dir *= -1;
+        pe('pointermove', x, 1);
+      }, 16);
+      await sleep(260);
+      const run = info();
+      out.run = run;
+      out.runFrames = await frames(run.url);
+      out.runFps = await fps(1200);
+      clearInterval(pump);
+      want(/pet-run|pet-prun/.test(run.anim), '拖动应播奔跑帧（实为 ' + run.anim + '）');
+      want(out.runFrames === 24, '奔跑序列帧应为 24 格（实为 ' + out.runFrames + '）');
+      want(out.runFps >= 20, '奔跑帧切换频率至少 20fps（实测 ' + out.runFps + '）');
+      pe('pointerup', x, 0);
+
+      if (bad.length) throw new Error('帧率断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
 ];
 
 /* ------------------------------------------------------------------ CDP */
@@ -953,8 +1284,16 @@ function cdp(ws) {
       await new Promise((r) => setTimeout(r, chk.wait || 2000));
       let probe = null, probeErr = null;
       try {
+        /* probe 可以是模板字符串，也可以是个返回字符串的函数（要按参数拼源码的用后者）。
+           直接把它塞进 expression 时，函数会被 JSON 序列化丢掉字段 → CDP 回一句
+           「Invalid parameters」，看起来像浏览器出了问题，其实是探针没生成。
+           所以这里显式求值，并且把「探针不是非空字符串」本身判成失败。 */
+        const src = typeof chk.probe === 'function' ? chk.probe() : chk.probe;
+        if (typeof src !== 'string' || !src.trim()) {
+          throw new Error('探针源码为空（probe 返回了 ' + Object.prototype.toString.call(src) + '）');
+        }
         const r = await c.send('Runtime.evaluate', {
-          expression: chk.probe, returnByValue: true, awaitPromise: true,
+          expression: src, returnByValue: true, awaitPromise: true,
         });
         if (r.exceptionDetails) probeErr = (r.exceptionDetails.exception || {}).description || r.exceptionDetails.text;
         else probe = r.result.value;

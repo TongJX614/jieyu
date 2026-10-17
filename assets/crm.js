@@ -116,6 +116,34 @@
       ],
       cart: [],
     },
+
+    /* 彩妆线客户：订单里是口红与眼影盘 —— 品类跨度最大的一位，
+       用来验证「AI 从订单/原话提炼品类 → 桌宠拿起对应那件」不是只对精华有效 */
+    color: {
+      crmId: 'C-100640',
+      name: '沈知微',
+      member: 'V4 金卡',
+      memberSince: '2022-06',
+      phone: '135****7742',
+      skin: '中性 · 彩妆爱好者',
+      channel: '微信小程序',
+      city: '广州',
+      tags: ['彩妆复购', '色号敏感', '唇炎史'],
+      sources: ['会员中心', '订单中心', '试色记录', '历史工单'],
+      orders: [
+        {
+          orderNo: 'WX2026092011447', product: '丝绒哑光口红 玫瑰豆沙', sku: 'LS-07',
+          amount: 260, qty: 1, paidAt: '2026-09-20 20:14', status: '已签收',
+          logistics: '顺丰 SF6155****', productUrl: 'https://example.com/p/LS-07',
+        },
+        {
+          orderNo: 'WX2026100210338', product: '四色眼影盘 大地色', sku: 'PL-04',
+          amount: 320, qty: 1, paidAt: '2026-10-02 21:03', status: '已签收',
+          logistics: '顺丰 SF6402****', productUrl: 'https://example.com/p/PL-04',
+        },
+      ],
+      cart: [{ product: '绒雾唇泥 冷茶色', sku: 'LM-03', productUrl: 'https://example.com/p/LM-03' }],
+    },
   };
 
   /* ---------------------------------------------------------------------
@@ -199,6 +227,26 @@
       trace: [
         { time: '2026-08-05 09:30', text: '已发出' },
         { time: '2026-08-06 13:47', text: '已签收' },
+      ],
+    },
+    WX2026092011447: {
+      batch: 'LS22026-0912', factory: '上海四厂',
+      ingredients: ['角鲨烷', '维生素 E', '着色剂 CI 15850', '无香精'],
+      returnBy: '2026-10-20', returnable: true,
+      returnNote: '在退换期内 · 未拆封可退 · 唇部不适可走无忧退换',
+      trace: [
+        { time: '2026-09-21 10:12', text: '上海仓已发出' },
+        { time: '2026-09-22 16:40', text: '本人签收' },
+      ],
+    },
+    WX2026100210338: {
+      batch: 'PL22026-0928', factory: '上海四厂',
+      ingredients: ['滑石粉', '云母', '氧化铁着色剂', '无香精'],
+      returnBy: '2026-11-01', returnable: true,
+      returnNote: '在退换期内 · 已拆封可退（不影响二次销售）',
+      trace: [
+        { time: '2026-10-03 09:26', text: '上海仓已发出' },
+        { time: '2026-10-04 14:08', text: '本人签收' },
       ],
     },
   };
