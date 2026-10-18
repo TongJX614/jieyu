@@ -399,7 +399,7 @@ check('ST17', '静态结构', '阈值不在 policy 之外重复（退化兜底�
     : true;
 });
 
-check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权 / 慢哈希 / 代理闸门 / 协商缓存', () => {
+check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权 / 慢哈希 / 代理闸门 / 协商缓存 / 视觉代理', () => {
   const bad = [];
 
   /* ① 静态托管必须是「默认拒绝 + 显式白名单」。
@@ -456,6 +456,38 @@ check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权
   }
   if (!/req\.method === 'HEAD'/.test(SERVER)) bad.push('HEAD 未单独收尾（照样把整个文件读一遍再丢掉）');
   if (!/, 304,/.test(read('tests/server.test.js'))) bad.push('协商缓存没有真 HTTP 断言（钉不住，只能靠肉眼）');
+
+  /* ⑧ 视觉代理 /api/vlm：这是本项目里唯一一条「服务端替客户端把原图发到第三方」的口。
+     闸门只要松一条，后果都不是「功能坏了」而是「承诺没了」：
+       · 放行 http(s) 图片链接 → 这台机器变成替任意客户端抓任意地址的代理（内网也算），
+         而且照片的逐张授权被整条绕过（浏览器没见过这张图， consent 无从谈起）；
+       · 采信客户端的 model → 任何人拿这台机器配的钱跑最贵的那一档；
+       · 透传客户端 Authorization → 密钥从「服务端持有」退化成「谁问到给谁」。
+     这些删掉都不会报错，只会安静地把边界让出去，所以逐条钉。 */
+  const TEST_SRV = read('tests/server.test.js');
+  if (!/function vlmGuard\(/.test(SERVER)) bad.push('缺 /api/vlm 出站闸门（前端 consent 检查谁都绕得过，能约束的只有服务端这一关）');
+  if (!/vlmGuard\(payload\)/.test(SERVER)) bad.push('/api/vlm 未调用出站闸门');
+  if (!/VLM_DATA_URL\.test\(url\)/.test(SERVER)) bad.push('图片未做「只收本机 data URL」白名单（外链 = SSRF 代理 + 绕过授权）');
+  if (!/reason: 'image_not_local'/.test(SERVER)) bad.push('外部图片链接没有专属 reason（客户端要能分清「换一张本地图」和「请求写错了」）');
+  /* 模型名要在 vlmGuard 自己那一段里查 —— 整份 SERVER 里 /api/chat 那侧
+     本来就有 `model: payload.model || DEFAULT_MODEL`，全文匹配会把那条算进来，
+     变成「聊天代理可以选模型」把视觉代理的闸门也一并判红（假红，且指错地方）。 */
+  const vlmGuardFn = /function vlmGuard\([\s\S]*?\n(?:async )?function /.exec(SERVER);
+  if (!vlmGuardFn || !/model: VLM_MODEL/.test(vlmGuardFn[0]) || /payload\.model/.test(vlmGuardFn[0])) {
+    bad.push('/api/vlm 的模型名未由服务端定死（客户端能选模型 = 这台机器成了别人账上的付费出口）');
+  }
+  if (!/vlmRateOk\(/.test(SERVER)) bad.push('/api/vlm 无频控');
+  if (!/reason: 'unconfigured'/.test(SERVER)) bad.push('未配上游时要用 503 + reason=unconfigured 说清楚（不能拿 500 让人以为坏了）');
+  const vlmFn = /async function handleVlm\([\s\S]*?\nfunction /.exec(SERVER);
+  if (!vlmFn) bad.push('handleVlm 函数体抓不到（闸门顺序无从校验）');
+  else if (/req\.headers\.authorization/i.test(vlmFn[0])) bad.push('/api/vlm 透传了客户端 Authorization（密钥必须只在服务端补）');
+  if (!new RegExp('vlm\\s*:\\s*\\{').test(SERVER)) bad.push('/api/health 未自述视觉通道（configured / model / 限额）');
+  if (!/"'\/api\/vlm'"|'\/api\/vlm'/.test(TEST_SRV)) bad.push('/api/vlm 没有真 HTTP 断言');
+  if (!/, 413,/.test(TEST_SRV)) bad.push('体积超限没有真 413 断言（旧写法 req.destroy() 会让 413 一个字节都送不出去）');
+  const TEST_VIS = read('tests/vision.test.js');
+  if (!/_vlmSkipped/.test(TEST_VIS)) bad.push('视觉代理缺「未授权一次请求都不发」的断言');
+  if (!/headers\.Authorization, undefined/.test(TEST_VIS)) bad.push('缺「同源代理不带 Authorization」的断言（密钥不进浏览器这条全靠它）');
+  if (!/data-vlm-consent/.test(read('assets/app.js'))) bad.push('界面没有逐张授权控件（通道一接，默认外发就等于改了合规口径）');
 
   return bad.length ? { status: 'fail', detail: bad.join('；') }
     : { status: 'pass', detail: '白名单 ' + dirs.concat(files).join('/') };

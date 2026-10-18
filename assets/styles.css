@@ -2935,7 +2935,7 @@ html[data-density="loose"] .std-row { padding: 9px 0; }
 .composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 2px 8px; }
 /* 命中区下限 28px：以前这里被单独压到 26/24/23，鼠标要瞄准才能点中 */
 .composer-tools .mini { height: 28px; }
-.ct-hint { font-size: 11px; color: var(--tx-3); margin-left: 2px; }
+.ct-hint { font-size: 11px; color: var(--tx-3); margin-left: 2px; flex: 1 1 200px; min-width: 0; }
 .composer-attach { display: flex; gap: 10px; align-items: flex-start; padding: 9px 10px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-2); border-left: 2px solid var(--tx-3); }
 .composer-attach.lv-medium { border-left-color: var(--warn); }
 .composer-attach.lv-high { border-left-color: var(--danger); }
@@ -2991,6 +2991,18 @@ html[data-density="loose"] .std-row { padding: 9px 0; }
 .ca-sec-k { color: var(--tx-3); }
 .ca-sec-v { color: var(--tx-2); }
 .ca-sec-v.muted { color: var(--tx-3); font-style: italic; }
+.ca-sec-v.warn { color: var(--warn); }
+/* 逐张授权：勾的是「这一张图可以离开浏览器」，所以它必须挨着缩略图，
+   而不是躲在设置弹窗里 —— 授权出现在动作旁边，才谈得上是知情同意。 */
+.ca-consent { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 8px; margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--line); font-size: 11px; color: var(--tx-2); }
+.ca-consent label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; min-height: 20px; }
+.ca-consent input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent-solid); cursor: pointer; }
+.ca-consent input:disabled { cursor: not-allowed; }
+.ca-consent b { font-weight: 500; color: var(--tx-1); }
+.ca-consent-note { color: var(--tx-3); }
+/* 结论来源标注（模型看图 / 本机看图）——与风险等级用不同色，别抢注意力 */
+.mi-tag.src.vlm { color: var(--accent); border-color: var(--line-strong); }
+.mi-tag.src.local { border-style: dashed; }
 
 /* ---------- 主动关怀雷达（复购 / 权益 / 成分冲突） ---------- */
 

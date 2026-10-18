@@ -371,7 +371,18 @@
          直接降级回离线像素统计结论，原图不出浏览器。
        · cfg.key 从 localStorage / 服务端取，**禁止硬编码**（与 LLM 同约定）。
      默认按 OpenAI 兼容接口（GPT-4o / 通义千问-VL 等）发图 + 收 JSON；
-     也可用 cfg.buildMessages / cfg.parse 自定义任意 VLM。 */
+     也可用 cfg.buildMessages / cfg.parse 自定义任意 VLM。
+
+     两种接法，密钥的落点不一样，这是本模块的核心区分：
+       A) cfg.endpoint = '/api/vlm'（同源代理，**推荐、也是 app.js 唯一用的那条**）
+          不传 cfg.key —— Authorization 由服务端补，密钥不进浏览器、不进 localStorage、
+          不进任何一次 front-end 打包产物。服务端还会挡来源、限频、限体积、
+          只放行 data:image URL（见 server/server.js 的 vlmGuard）。
+       B) cfg.endpoint = 'https://api.xxx/v1/chat/completions' + cfg.key
+          浏览器直连第三方。留着是为了「用户明确要把图直接发去自己买的模型」，
+          代价是密钥存在于本机 localStorage，而且第三方收到原图这件事不受服务端约束。
+     没配 cfg.key 就**不发 Authorization 头**：原来无条件拼 `'Bearer ' + (cfg.key||'')`
+     会发一个空 Bearer，同源代理那侧看了只会困惑，某些网关还会直接判 401。 */
 
   /**
    * VLM 响应 → 视觉观察（纯函数，抽出来便于单测）。
@@ -388,12 +399,19 @@
     var a = String(txt).indexOf('{');
     var b = String(txt).lastIndexOf('}');
     var parsed = {};
-    if (a !== -1 && b > a) { try { parsed = JSON.parse(String(txt).slice(a, b + 1)); } catch (e) { /* 解析失败则保留离线结论 */ } }
+    var gotJson = false;
+    if (a !== -1 && b > a) {
+      try { parsed = JSON.parse(String(txt).slice(a, b + 1)); gotJson = true; } catch (e) { /* 解析失败则保留离线结论 */ }
+    }
+    /* 「HTTP 200 但模型没按格式回答」不等于「模型看过并认了」：
+       结论确实还是离线的，必须在观察上留一个标记，
+       否则界面只能二选一地把这条说成「模型看图」或「本机看图」，两句都不实。 */
     var base = asset && asset.observation ? JSON.parse(JSON.stringify(asset.observation))
       : (asset && asset.stats ? observe(asset.stats) : null);
     if (!base) base = { provider: 'offline', signals: [], detail: [] };
     var o = base;
     o.provider = name;
+    if (!gotJson) o._vlmUnparsed = true;
     if (parsed.kind) o.kind = parsed.kind;
     if (parsed.object) o.object = parsed.object;
     if (parsed.makeup) o.makeup = parsed.makeup;
@@ -435,25 +453,65 @@
       };
     }
     function analyzer(asset) {
-      /* 未授权：绝不外发原图，降级回离线结论 */
-      if (!cfg.consent) {
+      /* 未授权：绝不外发原图，降级回离线结论。
+         cfg.consent 可以是布尔，也可以是**每次分析现读的函数**（收到当前 asset）。
+         授权是「这一张图」的事实，而注册一辈子只发生一次 ——
+         把 consent 读成注册时的快照，就等于「切一次开关，之后所有图都算授权过」，
+         那不是逐张授权。所以界面侧一律传函数。 */
+      /* 授权判不出来就当作「没授权」：这里抛错的方向必须是**不发**，
+         让一个坏掉的 consent 函数把顾客照片发出去，是不可接受的失败模式。 */
+      var granted = false;
+      try {
+        granted = typeof cfg.consent === 'function' ? !!cfg.consent(asset) : !!cfg.consent;
+      } catch (e) { granted = false; }
+      if (!granted) {
         var fb = asset && asset.observation ? JSON.parse(JSON.stringify(asset.observation)) : (asset && asset.stats ? observe(asset.stats) : null);
         if (fb) { fb.provider = 'offline'; fb._vlmSkipped = true; }
         return Promise.resolve(fb || { provider: 'offline', signals: [], summary: '未授权，离线分析', detail: [] });
       }
       var dataUrl = asset && asset.dataUrl;
       if (!dataUrl) return Promise.resolve({ provider: 'offline', signals: [], summary: '无图像数据', detail: [] });
-      var body = (cfg.buildMessages || defaultMessages)(dataUrl);
-      return fetch(cfg.endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (cfg.key || '') },
-        body: JSON.stringify(body),
-      }).then(function (r) { return r.json(); }).then(function (j) {
+      var body = null, headers = null;
+      /* 整段外发都放进 promise 链**之后**再执行：fetch、自定义 buildMessages、
+         JSON.stringify 都可能**同步抛**（浏览器对非法 header 名就是同步 TypeError），
+         而下面那个 catch 挂在链上 —— 链是 fetch 返回之后才建起来的，
+         同步抛错会直接穿过它。那时「VLM 不可用也不阻塞主流程」这句话
+         就变成「整个分析当场炸掉」。这条是写测试时用 fetch 桩撞出来的。 */
+      return Promise.resolve().then(function () {
+        body = (cfg.buildMessages || defaultMessages)(dataUrl);
+        headers = { 'Content-Type': 'application/json' };
+        /* 同源代理模式下不给密钥（也不该有密钥）：这一行就是「密钥只在服务端」的落点 */
+        if (cfg.key) headers.Authorization = 'Bearer ' + cfg.key;
+        return fetch(cfg.endpoint, {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify(body),
+        });
+      }).then(function (r) {
+        /* 非 2xx 必须当成失败：429 / 503 的响应体是 {"ok":false,...}，
+           直接喂给 parseVlm 会被读成「模型说这是 unknown」—— 那既是假结论，
+           又会把「通道没配好」伪装成「图片本身看不出来」。 */
+        if (!r.ok) {
+          return r.text().then(function (txt) {
+            var j = null;
+            try { j = JSON.parse(txt); } catch (e) { /* 上游可能回 HTML */ }
+            var why = (j && (j.message || (j.error && j.error.message))) || txt.slice(0, 120) || ('HTTP ' + r.status);
+            var err = new Error('视觉通道 ' + r.status + '：' + why);
+            err.httpStatus = r.status;
+            err.reason = (j && j.reason) || 'http_' + r.status;
+            throw err;
+          });
+        }
+        return r.json();
+      }).then(function (j) {
         /* 自定义解析器签名保持 (j, asset)；默认解析器需要知道分析器名（写进 provider） */
         return (cfg.parse || function (jj, aa) { return parseVlm(jj, aa, name); })(j, asset);
       }).catch(function (e) {
-        /* VLM 不可用：降级回离线像素统计，不阻塞主流程 */
-        var fb = asset && asset.stats ? observe(asset.stats) : (asset && asset.observation) || null;
+        /* VLM 不可用：降级回离线像素统计，不阻塞主流程。
+           回退到入参 observation 时必须复制一份 —— 直接在它上面写 provider / _vlmError，
+           等于把「这一次通道失败」写进调用方那份长期结论里（同一张图重跑一次就洗不掉了）。 */
+        var fb = (asset && asset.stats) ? observe(asset.stats)
+          : (asset && asset.observation ? JSON.parse(JSON.stringify(asset.observation)) : null);
         if (fb) { fb.provider = 'offline'; fb._vlmError = String((e && e.message) || e); }
         return fb || { provider: 'offline', signals: [], summary: 'VLM 不可用，已降级离线', detail: [] };
       });

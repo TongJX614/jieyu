@@ -97,6 +97,89 @@ const CHECKS = [
     })()`,
   },
   {
+    name: 'vision-consent',
+    url: '/?s=1&nolive=1',
+    wait: 3000,
+    screenshot: true,
+    /* 逐张授权必须在真浏览器里证一遍：默认不勾、不勾就一个 POST 都发不出去。
+       这里只证「装配没断 + 默认态正确」（UI 事实），
+       密钥落点、闸门顺序、模型名定死这些语义由 vision 单测 + server 真 HTTP 用例钉。 */
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const posts = [];
+      const origFetch = window.fetch;
+      window.fetch = function (u, o) {
+        const m = String((o && o.method) || 'GET').toUpperCase();
+        if (m === 'POST' && String(u).indexOf('/api/vlm') !== -1) {
+          posts.push(Object.keys((o && o.headers) || {}));
+        }
+        return origFetch.apply(this, arguments);
+      };
+      const out = { posts: posts };
+      const health = await (await origFetch('/api/health', { cache: 'no-store' })).json();
+      out.configured = !!(health.vlm && health.vlm.configured);
+
+      /* 必须先切「模拟顾客」，否则整条图片工具条都是隐藏的 */
+      document.getElementById('btnComposerMode').click();
+      await sleep(250);
+      document.getElementById('btnSynthSevere').click();
+      await sleep(900);
+
+      const box = document.querySelector('#composerAttach [data-vlm-consent]');
+      const hint = document.getElementById('ctVisionHint');
+      const prov = document.querySelector('#composerAttach .ca-sec');
+      out.hasBox = !!box;
+      out.checked = box ? box.checked : null;
+      out.disabled = box ? box.disabled : null;
+      out.hint = hint ? hint.textContent : '';
+      out.provenance = prov ? prov.textContent : '';
+
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(!!box, '待发送预览条里要有「这一张图」的授权勾选框（没有它，通道一接就等于默认外发）');
+      want(out.checked === false, '勾选框默认必须是未勾选，实为 ' + out.checked);
+      want(posts.length === 0, '放图 + 渲染预览这段时间里一次 /api/vlm 都没该发，实发 ' + posts.length);
+      want(/本机像素统计/.test(out.provenance), '未授权时来源必须写「本机像素统计」，实为「' + out.provenance + '」');
+      want(/图片未外发/.test(out.provenance), '未授权时来源必须明说「图片未外发」，实为「' + out.provenance + '」');
+      want(out.configured ? /已配/.test(out.hint) : /未配置/.test(out.hint),
+        '工具条那句通道说明要跟着服务端自述走（configured=' + out.configured + '），实为「' + out.hint + '」');
+
+      if (!out.configured) {
+        want(out.disabled === true, '服务端没配视觉模型时勾选框必须禁用（不给一个注定失败的承诺），实为 disabled=' + out.disabled);
+        box.click();
+        await sleep(600);
+        want(posts.length === 0, '禁用态下点击也不该发出任何图片，实发 ' + posts.length);
+      } else {
+        /* 每次点击都重新取节点：勾选会触发一次重渲染，缓存住的那个 checkbox
+           当场变成游离节点 —— 点它什么事件都不会发，探针却以为「撤回没生效」。
+           （这条踩过：不缓存节点引用对 checkbox 同样成立） */
+        const cb = () => document.querySelector('#composerAttach [data-vlm-consent]');
+        const provText = () => (document.querySelector('#composerAttach .ca-sec') || {}).textContent || '';
+        want(out.disabled === false, '已配置时勾选框可用');
+        cb().click();                      // 勾上：这一张允许外发
+        await sleep(2500);
+        want(posts.length >= 1, '勾选这一张之后才允许外发，实发 ' + posts.length);
+        want(/视觉模型/.test(provText()), '勾上之后来源要写成「视觉模型」，实为「' + provText() + '」');
+        want(posts.every((h) => h.indexOf('Authorization') === -1),
+          '同源代理请求必须由服务端补密钥，浏览器侧头部里不许有 Authorization：' + JSON.stringify(posts));
+        const afterGrant = posts.length;
+        cb().click();                      // 取消：当场收回，且不许再发
+        await sleep(800);
+        want(cb() && cb().checked === false, '取消勾选后 checkbox 应回到未勾选态');
+        want(posts.length === afterGrant, '撤回授权之后不该再发新的图，实发 ' + posts.length);
+        want(/本机像素统计/.test(provText()), '撤回后来源要退回「本机像素统计」，实为「' + provText() + '」');
+        cb().click();                      // 再勾上：应当再发一次（授权不是「勾过一次就永久有效」）
+        await sleep(2500);
+        want(posts.length === afterGrant + 1,
+          '重新勾选必须重新发一次（证明每次现读授权），实为 ' + posts.length + '，期望 ' + (afterGrant + 1));
+      }
+
+      if (bad.length) throw new Error('逐张授权断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      out.ok = true;
+      return out;
+    })()`,
+  },
+  {
     name: 'eval-view',
     url: '/?view=eval&nolive=1',
     wait: 3000,

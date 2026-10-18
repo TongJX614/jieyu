@@ -18,6 +18,9 @@
   var CRM = window.CRM;
   var CF = window.Casefile;        // 风险闭环（工单状态机）
   var VIS = window.Vision;         // 视觉通道（皮肤照片 → 结构化观察）
+  /* 视觉模型分析器在 Vision 注册表里的名字。只有一个，
+     所以「哪条通道发的图」不需要参数，也不需要界面去猜。 */
+  var VLM_SLOT = 'vlm-relay';
   var CARE = window.CareRadar;     // 主动关怀雷达
   var RECAP = window.Recap;        // 会话复盘 · 交接摘要
   var CH = window.Channels;        // 多渠道接入 · 跨渠道用户合并
@@ -75,6 +78,11 @@
     caseNotes: {},                 // 各工单的「处置结论」草稿（重渲染不丢）
     composerMode: 'agent',
     pendingImage: null,            // 待发送的图片附件（含视觉观察）
+    /* 视觉模型通道的自述（来自 /api/health.vlm，服务端说是什么就是什么）。
+       checked=false 表示「还没问过」—— 没问过就绝不可能已授权，
+       所以初始 configured=false 是 fail-closed：/api/health 挂了也只会退回本机像素统计。
+       注意这里**没有 consent**：授权属于「那一张图」，挂在 asset.consent 上，不放全局。 */
+    vlm: { checked: false, configured: false, model: null, maxImages: 0, maxBodyKb: 0 },
     careFold: {},                  // 关怀条目展开态（键 idx|id）：默认只展开第一条，其余当目录
     careSel: '',                   // 关怀雷达左侧索引里选中的客户
     careFilter: 'all',             // 关怀等级筛选：all / high / medium / low
@@ -1036,6 +1044,12 @@
         '<img src="' + esc(m.image.dataUrl) + '" alt="顾客上传的图片">' +
         (vo ? '<span class="mi-tag lv-' + vo.level + '" title="' + esc(vTip) + '">视觉 · ' +
           esc(visionKindLabel(vo)) + '</span>' : '') +
+        /* 结论来源跟着消息走：气泡上必须分得清「模型看过这张图」和「本机算了一遍像素」，
+           否则坐席会把像素统计当成模型结论复述给顾客 */
+        (vo ? '<span class="mi-tag src ' + (m.image.viaVlm ? 'vlm' : 'local') + '" title="' +
+          esc(m.image.viaVlm ? '这张图经坐席逐张授权，由服务端代理交给视觉模型'
+            : '这张图没有外发，结论来自本机像素统计') + '">' +
+          (m.image.viaVlm ? '模型看图' : '本机看图') + '</span>' : '') +
         (m.image.synthetic ? '<span class="mi-tag synth">合成示例</span>' : '') +
         '</span>';
     }
@@ -3463,7 +3477,172 @@
     return h;
   }
 
-  /** 待发送图片的预览条：缩略图 + 本机视觉分析结论（发送前就能看到 AI 会怎么读这张图） */
+  /* ==================== 视觉模型通道（同源代理 · 逐张授权） ====================
+     离线像素统计只答得出「有多红」，答不出「这是什么 / 妆面如何」—— 后者必须让
+     多模态模型看一眼。但「看一眼」等于**顾客的原图离开浏览器**，
+     所以这条链路里两个闸门比功能本身重要，写在代码里的顺序就是它们的优先级：
+
+       1) 默认关，且**授权挂在图上，不挂在全局**。
+          consent 存在 asset.consent 里：换一张图就是新对象，发送 / 切会话 / 刷新
+          都会把对象丢掉 → 授权跟着消失。这是「一次一张」最省事的实现，
+          也正因为如此，绝不能把它写进 localStorage
+          （那等于「勾过一次，以后所有顾客的照片都算授权过」）。
+       2) 密钥不进浏览器。endpoint 固定 '/api/vlm'（同源），
+          Authorization 由服务端补；界面上也没有密钥输入框。
+          服务端那侧还会挡来源、限频、限体积、只放行 data:image（server.js 的 vlmGuard）。
+
+     通道没配好时服务端回 503 + reason=unconfigured，这里一律如实退回「本机像素统计」，
+     不假装看过图，也不把「没配通道」伪装成「这张图看不出来」。 */
+
+  /** 这张图是否已被坐席明确授权外发（授权只在 asset 上，没有全局开关） */
+  function vlmConsentFor(asset) { return !!(asset && asset.consent); }
+
+  /** 注册同源代理分析器（幂等）。Vision 未加载 / 无 DOM 时安静返回 false。 */
+  function vlmRegister() {
+    if (!VIS || !VIS.available || !VIS.available()) return false;
+    if (!VIS.registerVLM) return false;
+    if (VIS.analyzers && VIS.analyzers().indexOf(VLM_SLOT) !== -1) return true;
+    try {
+      VIS.registerVLM(VLM_SLOT, {
+        endpoint: '/api/vlm',
+        /* 每次分析现读，不读注册时的快照：注册一辈子一次，授权一张一次 */
+        consent: function (asset) { return vlmConsentFor(asset) && !!state.vlm.configured; },
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+
+  /** 问服务端「视觉通道现在认什么」——由它自己说，界面不猜 */
+  function vlmLoadStatus() {
+    return fetch('/api/health', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : {}; })
+      .then(function (j) {
+        var v = (j && j.vlm) || null;
+        state.vlm.configured = !!(v && v.configured);
+        state.vlm.model = v && v.model ? String(v.model) : null;
+        state.vlm.maxImages = v && v.maxImages ? Number(v.maxImages) : 0;
+        state.vlm.maxBodyKb = v && v.maxBodyKb ? Number(v.maxBodyKb) : 0;
+        state.vlm.checked = true;
+        vlmRegister();
+        renderVisionHint();
+        renderComposerAttach();
+        return state.vlm;
+      })
+      .catch(function () {
+        /* 服务端不可达 = 通道不可用，保持 fail-closed；界面照常显示「本机像素统计」 */
+        state.vlm.checked = true;
+        state.vlm.configured = false;
+        state.vlm.model = null;
+        renderVisionHint();
+        return state.vlm;
+      });
+  }
+
+  /** 工具条上的那句说明：三态（还没问过 / 已配置 / 未配置）必须是三种不同的话 */
+  function renderVisionHint() {
+    var el = $('ctVisionHint');
+    if (!el) return;
+    el.textContent = !state.vlm.checked
+      ? '视觉通道：未确认 · 默认只做本机像素统计'
+      : (state.vlm.configured
+        ? '视觉通道：已配 ' + state.vlm.model + ' · 默认不外发，逐张授权'
+        : '视觉通道：未配置 · 图片只做本机像素统计（识图 / 妆容需设 VLM_BASE_URL）');
+  }
+
+  /** 结论来源必须说实话：本机像素统计 ≠ 模型看懂了 */
+  function vlmProvenance(img) {
+    var o = img.observation || {};
+    if (o._vlmError) return '<span class="ca-sec-v warn">视觉模型没答上，已退回本机结论</span>';
+    if (img.viaVlm) {
+      return '<span class="ca-sec-v">视觉模型 ' + esc(state.vlm.model || o.provider || VLM_SLOT) +
+        ' · 本张已授权，经服务端代理外发</span>';
+    }
+    /* HTTP 成功但模型没吐 JSON：图**确实**发出去了，只是结论还是本机算的。
+       这条既不能写成「未外发」（对授权撒了谎），也不能写成「模型看图」（对结论撒了谎）。 */
+    if (o._vlmUnparsed) {
+      return '<span class="ca-sec-v warn">本张已授权外发，但模型未按格式回答 · 结论仍来自本机像素统计</span>';
+    }
+    return '<span class="ca-sec-v muted">本机像素统计 · 图片未外发</span>';
+  }
+
+  function vlmConsentRow(img) {
+    var dis = state.vlm.configured ? '' : ' disabled';
+    var note = state.vlm.configured
+      ? '只这一张，不记住；密钥在服务端，服务端限 ' + (state.vlm.maxImages || 3) + ' 张 / 次、' +
+        (state.vlm.maxBodyKb || 0) + 'KB / 次'
+      : '服务端没有配置视觉模型，这张图只会做本机像素统计';
+    return '<div class="ca-consent">' +
+      '<label><input type="checkbox" data-vlm-consent="1"' + (img.consent ? ' checked' : '') + dis + '>' +
+      ' 允许把<b>这一张</b>图交给视觉模型（识图 / 妆容）</label>' +
+      '<span class="ca-consent-note">' + esc(note) + '</span>' +
+      '</div>';
+  }
+
+  /**
+   * 以离线结论为底，按「这一张的授权」走一遍视觉模型。
+   * 未授权 / 未配置 / 通道没加载 → 原样返回，一次 fetch 都不会发。
+   * 每次重跑都从 baseObservation 起：否则「取消授权」后界面上还留着
+   * 上一次模型写的识图结果，那是模型说过、但已经不该再显示的话。
+   */
+  function vlmEnhance(asset) {
+    if (!asset || !asset.observation) return Promise.resolve(asset);
+    asset.baseObservation = asset.baseObservation || asset.observation;
+    if (!vlmConsentFor(asset) || !state.vlm.configured || !vlmRegister()) {
+      asset.observation = asset.baseObservation;
+      asset.viaVlm = false;
+      return Promise.resolve(asset);
+    }
+    var probe = {
+      dataUrl: asset.dataUrl, name: asset.name, stats: asset.stats,
+      /* 授权事实要跟着这一张图一起传进分析器：模块里那道 consent 闸门读的是
+         **传进来的 asset**，不是界面上的 state.pendingImage。不带过来它只会判成
+         「没授权」，于是外面已经勾了、里面一次都不发 —— 这条是浏览器实测撞出来的。
+         走到这一行本来就已经过了 vlmConsentFor(asset)，所以 true 是如实转述。 */
+      consent: true,
+      observation: JSON.parse(JSON.stringify(asset.baseObservation)),
+    };
+    return Promise.resolve(VIS.analyzeWith(VLM_SLOT, probe)).then(function (r) {
+      asset.observation = (r && r.observation) || asset.baseObservation;
+      /* provider 由 Vision 负责（失败时它保留 'offline'），这里只记「这次是不是模型给的」 */
+      asset.viaVlm = !!(asset.observation && !asset.observation._vlmError &&
+        !asset.observation._vlmUnparsed && asset.observation.provider === VLM_SLOT);
+      return asset;
+    }).catch(function (e) {
+      asset.observation = asset.baseObservation;
+      asset.viaVlm = false;
+      toast('视觉通道异常，已退回本机结论：' + ((e && e.message) || e), 'warn');
+      return asset;
+    });
+  }
+
+  /** 勾选 / 取消勾选：改的是「这一张」的事实，然后立刻重跑，让结论当场换掉 */
+  function setVlmConsent(on) {
+    var img = state.pendingImage;
+    if (!img) return;
+    if (on && !state.vlm.configured) {
+      toast('服务端未配置视觉模型（VLM_BASE_URL / VLM_API_KEY），这张图仍走本机像素统计', 'warn');
+      renderComposerAttach();
+      return;
+    }
+    img.consent = !!on;
+    if (!on) {
+      img.observation = img.baseObservation || img.observation;
+      img.viaVlm = false;
+      renderComposerAttach();
+      toast('已撤回本张授权 · 结论退回本机像素统计', 'ok');
+      return;
+    }
+    toast('已授权这一张 · 正在交给视觉模型…', 'ok');
+    vlmEnhance(img).then(function () {
+      renderComposerAttach();
+      var o = img.observation || {};
+      if (o._vlmError) toast('视觉模型没答上，已退回本机结论：' + o._vlmError, 'warn');
+      else if (o._vlmUnparsed) toast('模型未按格式回答 · 结论仍是本机像素统计（图已按你的授权发出）', 'warn');
+      else toast('视觉模型已改写观察结论（' + (state.vlm.model || 'VLM') + '）', 'ok');
+    });
+  }
+
+  /** 待发送图片的预览条：缩略图 + 视觉分析结论（发送前就能看到 AI 会怎么读这张图） */
   function renderComposerAttach() {
     var el = $('composerAttach');
     if (!el) return;
@@ -3490,8 +3669,9 @@
           (o.makeup && o.makeup.style
             ? '<span class="ca-sec-k">妆容</span><span class="ca-sec-v">' + esc(o.makeup.style) + '</span>'
             : '') +
-          (o.provider === 'offline' ? '<span class="ca-sec-v muted">离线：识图/妆容需视觉模型</span>' : '') +
+          vlmProvenance(img) +
         '</div>' +
+        vlmConsentRow(img) +
         '<div class="ca-detail">' + (o.detail || []).map(function (d) {
           return '<span>' + esc(d.key) + ' ' + esc(d.v) + '</span>';
         }).join('') +
@@ -3504,6 +3684,10 @@
   function attachSynth(kind) {
     if (!VIS || !VIS.available()) { toast('视觉通道未加载', 'danger'); return; }
     VIS.analyzeSynth(kind).then(function (asset) {
+      /* 新对象 = 没有 consent。示例图也是图，不会因为「反正是合成的」就默认外发 */
+      state.pendingImage = asset;
+      return vlmEnhance(asset);
+    }).then(function (asset) {
       state.pendingImage = asset;
       renderComposerAttach();
       toast('已放入合成示例图 · 视觉观察：' + asset.observation.summary,
@@ -5318,15 +5502,19 @@
 
     $('btnEvalRerun').addEventListener('click', function () { renderEval(true); });
 
-    /* 图片通道：上传文件 / 合成示例图，两条路走同一个本机视觉分析 */
+    /* 图片通道：上传文件 / 合成示例图，两条路都先走**本机**视觉分析。
+       选完文件不等于同意外发 —— 顾客的原图要等预览条上那一个勾。 */
     $('btnAttach').addEventListener('click', function () { $('fileInput').click(); });
     $('fileInput').addEventListener('change', function () {
       var f = this.files && this.files[0];
       this.value = '';
       if (!f) return;
       if (!VIS || !VIS.available()) { toast('视觉通道未加载，无法分析图片', 'danger'); return; }
-      toast('正在分析图片…', 'ok');
+      toast('正在本机分析图片…', 'ok');
       VIS.analyzeFile(f).then(function (asset) {
+        state.pendingImage = asset;
+        return vlmEnhance(asset);
+      }).then(function (asset) {
         state.pendingImage = asset;
         renderComposerAttach();
         toast('视觉观察：' + asset.observation.summary, asset.observation.level === 'low' ? 'ok' : 'warn');
@@ -5334,6 +5522,11 @@
     });
     $('btnSynthMild').addEventListener('click', function () { attachSynth('mild'); });
     $('btnSynthSevere').addEventListener('click', function () { attachSynth('severe'); });
+    /* 逐张授权：checkbox 的事实要看 change（点 label 也会触发 change，click 会漏） */
+    $('composerAttach').addEventListener('change', function (e) {
+      var t = e.target;
+      if (t && t.getAttribute && t.getAttribute('data-vlm-consent')) setVlmConsent(t.checked);
+    });
     $('composerAttach').addEventListener('click', function (e) {
       if (e.target.closest && e.target.closest('[data-detach]')) {
         state.pendingImage = null;
@@ -5787,6 +5980,11 @@
     spriteApply();
     bind();
     bindSpriteDrag();
+    /* 视觉通道先注册插槽（空转，不 fetch），再问服务端「现在认什么」。
+       顺序反过来也没关系，但**默认态必须是不外发**：configured 由这一次读取决定，
+       读不到就保持 false，界面只会显示「本机像素统计」。 */
+    vlmRegister();
+    vlmLoadStatus();
 
     /* 深链：?view=dashboard|kb|eval|care|channels，?s=N，?play=1，?demo=1，?settings=1，?sprite=1，?band=1，?today=YYYY-MM-DD */
     var q = String(location.search || '');

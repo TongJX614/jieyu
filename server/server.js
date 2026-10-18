@@ -43,6 +43,28 @@ const MAX_BODY = 512 * 1024;
 const MSG_BUFFER = 500;         // 服务端消息环形缓冲
 const MAX_DEDUPE = 2000;        // 幂等表上限（超出后淘汰最早插入的 id，防止长跑内存只增不减）
 
+/* 视觉模型（VLM）通道：顾客照片要让多模态模型「看一眼」才能回答「这是什么 / 妆面如何」。
+   这条口的设计前提有四个，都写在这里，因为它们是**行为约定**不是实现细节：
+     · 密钥只在服务端：浏览器调 `/api/vlm` 时**不带** Authorization，
+       由这里补 `VLM_API_KEY`（没单独设就沿用 `DEEPSEEK_API_KEY`）。
+       原来 `Vision.registerVLM` 是浏览器直连第三方、key 存在 localStorage 里 ——
+       那是把密钥交给「任何一个能打开这个页面的人」。
+     · 只有配了 `VLM_BASE_URL` 才算启用（默认没配）。没配就 503 + reason=unconfigured，
+       界面据此诚实显示「离线」，而不是显示一个「分析失败」。
+     · 出网的东西必须是浏览器本机生成的 data URL：只放行 `data:image/...;base64,`，
+       拒掉任何 http(s) 图片链接。否则这条代理就成了「替任意客户端去抓任意地址」的工具，
+       而且客户照片的授权链路（consent 在前端）也会被绕过。
+     · 频控与体积单独一档：一次带图请求 = 几百 KB + 一次多模态推理，
+       比文本聊天贵一个量级，绝不能跟 /api/chat 共用一个窗口。 */
+const VLM_UPSTREAM = process.env.VLM_BASE_URL ? normalizeUpstream(process.env.VLM_BASE_URL) : '';
+const VLM_KEY = String(process.env.VLM_API_KEY || (VLM_UPSTREAM ? API_KEY : '') || '').trim();
+const VLM_MODEL = String(process.env.VLM_MODEL || 'gpt-4o').trim();
+const VLM_WINDOW_MS = 60 * 1000;
+const VLM_MAX_PER_WINDOW = Number(process.env.VLM_MAX_RPM || 6);
+const VLM_MAX_BODY = Math.round(Number(process.env.VLM_MAX_BODY_KB || 4096) * 1024);
+const VLM_MAX_IMAGES = Number(process.env.VLM_MAX_IMAGES || 3);
+const VLM_MAX_MESSAGES = Number(process.env.VLM_MAX_MESSAGES || 8);
+
 /* 静态托管白名单。
    注意这里是「默认拒绝」：过去的写法是「只要解析后还在仓库根里就放行」，
    而仓库根里正好放着 .git（全量源码历史）与 server/data/db.json（坐席 salt+pinHash）。
@@ -82,12 +104,12 @@ const MIME = {
 
 /* ------------------------------ 通用工具 ------------------------------ */
 
-function sendJson(res, code, obj) {
+function sendJson(res, code, obj, extra) {
   const body = JSON.stringify(obj);
-  res.writeHead(code, {
+  res.writeHead(code, Object.assign({
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
-  });
+  }, extra || {}));
   res.end(body);
 }
 
@@ -117,23 +139,30 @@ function safeEqual(a, b) {
 }
 
 /* 极简令牌桶：按来源地址计窗口，超了就 429。
-   内存态即可 —— 它要挡的是「脚本对着 /api/chat 循环打」，不是跨进程风控。 */
-const chatWindows = new Map();      // key -> { n, until }
-function chatRateOk(key) {
+   内存态即可 —— 它要挡的是「脚本对着 /api/chat 循环打」，不是跨进程风控。
+   窗口本身通用（store / max / windowMs 由调用方给），文本与视觉各用一个 store：
+   共用一个格子的话，「多刷了几次照片」会把文本聊天的额度一起吃掉。 */
+function rateLimitOk(store, key, max, windowMs) {
   const now = Date.now();
-  const w = chatWindows.get(key);
+  const w = store.get(key);
   if (!w || w.until <= now) {
-    chatWindows.set(key, { n: 1, until: now + CHAT_WINDOW_MS });
-    if (chatWindows.size > 500) {                       // 来源数也封顶，别让它自己长成泄漏
-      const oldest = chatWindows.keys().next().value;
-      chatWindows.delete(oldest);
+    store.set(key, { n: 1, until: now + windowMs });
+    if (store.size > 500) {                           // 来源数也封顶，别让它自己长成泄漏
+      const oldest = store.keys().next().value;
+      store.delete(oldest);
     }
     return true;
   }
-  if (w.n >= CHAT_MAX_PER_WINDOW) return false;
+  if (w.n >= max) return false;
   w.n++;
   return true;
 }
+
+const chatWindows = new Map();      // key -> { n, until }
+function chatRateOk(key) { return rateLimitOk(chatWindows, key, CHAT_MAX_PER_WINDOW, CHAT_WINDOW_MS); }
+
+const vlmWindows = new Map();
+function vlmRateOk(key) { return rateLimitOk(vlmWindows, key, VLM_MAX_PER_WINDOW, VLM_WINDOW_MS); }
 
 function corsHeaders(req) {
   const origin = String(req.headers.origin || '');
@@ -157,18 +186,23 @@ function normalizeUpstream(raw) {
 function readBody(req, limit) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let over = false;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
       if (size > (limit || MAX_BODY)) {
-        reject(new Error('请求体过大'));
-        req.destroy();
+        /* 超限后**继续收但不攒**，也不再 destroy 连接。
+           原来是 reject 之后立刻 req.destroy()：调用方写好的 413 一个字节都送不出去，
+           浏览器只看到一个网络错误 —— 而「我这张图太大了」和「服务端挂了」
+           在界面上必须是两句话（前者要提示换小图，后者要退回本机像素统计）。
+           上限本身不变（内存不随请求体增长），配合响应上的 Connection: close 收口。 */
+        if (!over) { over = true; reject(new Error('请求体过大')); }
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => { if (!over) resolve(Buffer.concat(chunks).toString('utf8')); });
+    req.on('error', (e) => { if (!over) reject(e); });
   });
 }
 
@@ -745,6 +779,134 @@ async function handleChat(req, res) {
   }
 }
 
+/* ------------------------------ 视觉模型代理 /api/vlm ------------------------------ */
+
+/* 出站内容闸门（纯函数，便于逐条断言）。返回 {ok:true, body} 或 {ok:false, reason, message}。
+   为什么要在服务端再判一遍：前端的 consent 检查谁都绕得过（改一行 JS、直接 curl），
+   真正能约束「这张机器会替你把什么发到外网」的，只有服务端这一关。 */
+const VLM_DATA_URL = /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/;
+const VLM_ROLES = ['system', 'user', 'assistant'];
+
+function vlmGuard(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, reason: 'bad_request', message: '请求体必须是一个 JSON 对象' };
+  }
+  const msgs = payload.messages;
+  if (!Array.isArray(msgs) || msgs.length === 0) {
+    return { ok: false, reason: 'no_messages', message: 'messages 不能为空' };
+  }
+  if (msgs.length > VLM_MAX_MESSAGES) {
+    return { ok: false, reason: 'too_many_messages', message: 'messages 最多 ' + VLM_MAX_MESSAGES + ' 条' };
+  }
+  let images = 0;
+  let textBytes = 0;
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (!m || typeof m !== 'object' || VLM_ROLES.indexOf(String(m.role)) === -1) {
+      return { ok: false, reason: 'bad_role', message: '第 ' + (i + 1) + ' 条的 role 只能是 ' + VLM_ROLES.join(' / ') };
+    }
+    const c = m.content;
+    if (typeof c === 'string') { textBytes += c.length; continue; }
+    if (!Array.isArray(c)) {
+      return { ok: false, reason: 'bad_content', message: '第 ' + (i + 1) + ' 条的 content 只能是字符串或部件数组' };
+    }
+    for (const part of c) {
+      const type = String((part && part.type) || '');
+      if (type === 'text') {
+        const txt = String((part && part.text) || '');
+        if (txt.length > 4000) {
+          return { ok: false, reason: 'text_too_long', message: '单段文本最长 4000 字' };
+        }
+        textBytes += txt.length;
+        continue;
+      }
+      if (type === 'image_url') {
+        const raw = part && part.image_url && part.image_url.url;
+        const url = String(raw || '');
+        /* 只放行浏览器本机生成的 data URL。
+           http(s) 图片链接在这里必须拒：一是这条口会变成「替客户端抓任意地址」的代理
+           （内网地址也在同一个「任意」里），二是照片授权（consent）发生在前端，
+           让服务器去取一张浏览器没见过的图，等于绕过授权链路。 */
+        if (!VLM_DATA_URL.test(url)) {
+          return { ok: false, reason: 'image_not_local',
+            message: '只接受浏览器本机的 data:image/(png|jpeg|webp);base64 图片，不接受外部图片链接' };
+        }
+        images++;
+        continue;
+      }
+      return { ok: false, reason: 'bad_part', message: '不认识的部件类型：' + (type || '(空)') };
+    }
+  }
+  if (images === 0) {
+    return { ok: false, reason: 'no_image', message: '视觉通道必须带至少一张图片' };
+  }
+  if (images > VLM_MAX_IMAGES) {
+    return { ok: false, reason: 'too_many_images', message: '一次最多 ' + VLM_MAX_IMAGES + ' 张图片' };
+  }
+  /* 模型由服务端定：否则任何客户端都能拿这台机器配的钱去跑最贵的那一档 */
+  return { ok: true, body: { model: VLM_MODEL, messages: msgs, temperature: 0.2 }, stats: { images, textBytes } };
+}
+
+async function handleVlm(req, res) {
+  if (!isSameOriginOrLocal(req)) {
+    sendJson(res, 403, { ok: false, reason: 'origin', error: { message: '来源不允许：/api/vlm 仅接受同源或本机来源' } });
+    return;
+  }
+  if (!vlmRateOk(String(req.socket.remoteAddress || ''))) {
+    sendJson(res, 429, {
+      ok: false, reason: 'rate_limited',
+      error: { message: '视觉通道频率超限（每分钟 ' + VLM_MAX_PER_WINDOW + ' 次），已改用离线像素统计' },
+    });
+    return;
+  }
+  /* 没配上游时**先说清楚**，不要拿一个 500 让人以为坏了：
+     界面按这个 reason 显示「离线」，判定仍走本机像素统计，功能不缺、来源标注诚实。 */
+  if (!VLM_UPSTREAM || !VLM_KEY) {
+    sendJson(res, 503, {
+      ok: false, reason: 'unconfigured',
+      error: { message: '未配置视觉模型（VLM_BASE_URL / VLM_API_KEY），图片走本机像素统计的离线结论' },
+    });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse((await readBody(req, VLM_MAX_BODY)) || '{}');
+  } catch (e) {
+    /* 体积超限单独给 413：客户端要能区分「我传太大了」和「JSON 写坏了」 */
+    const tooBig = /请求体过大/.test(String(e.message || ''));
+    sendJson(res, tooBig ? 413 : 400, {
+      ok: false, reason: tooBig ? 'too_large' : 'bad_request',
+      error: { message: tooBig ? '图片过大（单次上限 ' + Math.round(VLM_MAX_BODY / 1024) + 'KB）' : '请求体不是合法 JSON：' + e.message },
+      /* 体积超限就把连接收掉：body 还在往里灌的时候，留着连接等于留给对方一个
+         可以一直占着这台机器的口子 */
+    }, tooBig ? { Connection: 'close' } : null);
+    return;
+  }
+
+  const guarded = vlmGuard(payload);
+  if (!guarded.ok) {
+    sendJson(res, 400, { ok: false, reason: guarded.reason, error: { message: guarded.message } });
+    return;
+  }
+
+  try {
+    const upstream = await fetch(VLM_UPSTREAM + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + VLM_KEY },
+      body: JSON.stringify(guarded.body),
+    });
+    const text = await upstream.text();
+    res.writeHead(upstream.status, Object.assign({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(text),
+    }, corsHeaders(req)));
+    res.end(text);
+  } catch (e) {
+    sendJson(res, 502, { ok: false, reason: 'upstream', error: { message: '视觉模型上游调用失败：' + e.message } });
+  }
+}
+
 /* ------------------------------ 静态资源 ------------------------------ */
 
 function serveStatic(req, res, urlPath) {
@@ -874,6 +1036,18 @@ const server = http.createServer((req, res) => {
       ingestMode: INGEST_TOKEN ? 'token' : 'loopback',
       chatLimit: { windowMs: CHAT_WINDOW_MS, max: CHAT_MAX_PER_WINDOW },
       staticAllow: { dirs: STATIC_ALLOW_DIRS, files: STATIC_ALLOW_FILES },
+      /* 视觉通道的自述：界面靠 configured 决定显示「VLM 已接」还是「离线像素统计」，
+         绝不允许界面自己猜（猜错的代价是把离线结论说成模型结论）。
+         这一格**不含密钥**，只有地址与模型名。 */
+      vlm: {
+        configured: !!(VLM_UPSTREAM && VLM_KEY),
+        endpoint: VLM_UPSTREAM || null,
+        model: VLM_UPSTREAM ? VLM_MODEL : null,
+        keySource: VLM_UPSTREAM && VLM_KEY ? 'server' : 'none',
+        limit: { windowMs: VLM_WINDOW_MS, max: VLM_MAX_PER_WINDOW },
+        maxBodyKb: Math.round(VLM_MAX_BODY / 1024),
+        maxImages: VLM_MAX_IMAGES,
+      },
     });
     return;
   }
@@ -967,6 +1141,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (p === '/api/vlm') {
+    if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST' } }); return; }
+    handleVlm(req, res);
+    return;
+  }
+
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     sendJson(res, 405, { error: { message: '方法不被支持' } });
     return;
@@ -990,6 +1170,9 @@ server.listen(PORT, () => {
     ? 'INGEST_TOKEN 已启用，请求须带 x-ingest-token'
     : '仅接受本机（127.0.0.1）请求；跨机器对接请设 INGEST_TOKEN'));
   console.log('  代理频控   : 每来源 ' + CHAT_MAX_PER_WINDOW + ' 次 / ' + Math.round(CHAT_WINDOW_MS / 1000) + 's');
+  console.log('  视觉通道   : ' + (VLM_UPSTREAM && VLM_KEY
+    ? '已启用（' + VLM_UPSTREAM + ' · ' + VLM_MODEL + ' · 密钥在服务端 · 每来源 ' + VLM_MAX_PER_WINDOW + ' 次 / ' + Math.round(VLM_WINDOW_MS / 1000) + 's）'
+    : '未配置（图片走本机像素统计，界面显示「离线」；要启用请设 VLM_BASE_URL + VLM_API_KEY）'));
   console.log('  静态白名单 : ' + STATIC_ALLOW_DIRS.join('/') + ' + ' + STATIC_ALLOW_FILES.join('/'));
   console.log('  实时推送   : GET  http://localhost:' + PORT + '/api/events');
   console.log('  订单查询   : GET  http://localhost:' + PORT + '/api/orders/allergy');

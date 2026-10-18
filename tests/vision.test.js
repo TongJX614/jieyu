@@ -20,6 +20,33 @@ function makePixels(w, h, redRatio, base) {
   return data;
 }
 
+/* 造一个「装了 fetch 桩」的沙箱：同源代理那条链路必须能数清
+   ——到底发没发、发到哪、头上带没带密钥。桩返回什么由每条断言自己定。 */
+function relayBox(responder) {
+  const calls = [];
+  const S = load(['assets/vision.js'], {
+    fetch: function (url, opts) {
+      calls.push({ url: url, opts: opts || {}, body: opts && opts.body });
+      return Promise.resolve(responder(url, opts));
+    },
+  });
+  return { V: S.Vision, calls: calls };
+}
+
+function vlmResponse(status, obj, rawText) {
+  const body = rawText == null ? JSON.stringify(obj) : rawText;
+  return {
+    ok: status >= 200 && status < 300,
+    status: status,
+    json: function () { return Promise.resolve(obj); },
+    text: function () { return Promise.resolve(body); },
+  };
+}
+
+const RELAY_OK = {
+  choices: [{ message: { content: '{"kind":"product","object":{"name":"红色面霜瓶身","confidence":0.88},"makeup":{"style":"无妆面（这是商品图）"},"summary":"这是一支护手霜，不是皮肤照片"}' } }],
+};
+
 module.exports = function (t) {
   const S = load(['assets/vision.js']);
   const V = S.Vision;
@@ -151,5 +178,95 @@ module.exports = function (t) {
     t.eq(g.observation.provider, 'offline', '未授权时 VLM 不覆盖 provider（原图不出浏览器）');
     t.eq(g.observation._vlmSkipped, true, '未授权标记已置位');
     t.eq(g.observation.kind, 'skin', '未授权仍回退到离线观察（保留 skin 判定）');
+
+    /* ---------- 同源代理适配器：密钥不进浏览器 + 逐张授权 ----------
+       这一段只信一件事：fetch 桩被叫了几次、参数是什么。
+       「没外发」是这产品对客户的承诺，承诺只能靠数调用次数来钉。 */
+    t.suite('vision · 同源视觉代理（闸门关着就一次 fetch 都不发）');
+    const A = relayBox(() => vlmResponse(200, RELAY_OK));
+    A.V.registerVLM('vlm-relay', {
+      endpoint: '/api/vlm',
+      consent: function (asset) { return !!(asset && asset.consent); },
+    });
+    const baseObs = A.V.observe(clean);
+    const silent = await A.V.analyzeWith('vlm-relay',
+      { dataUrl: 'data:image/png;base64,AAA=', observation: JSON.parse(JSON.stringify(baseObs)) });
+    t.eq(A.calls.length, 0, 'consent 函数判 false → 一次请求都没发（原图确实没出浏览器）');
+    t.eq(silent.observation.provider, 'offline', '未授权时 provider 保持 offline');
+    t.eq(silent.observation._vlmSkipped, true, '未授权标记区分「没授权」与「模型失败」');
+
+    const granted = await A.V.analyzeWith('vlm-relay', {
+      dataUrl: 'data:image/png;base64,AAA=', consent: true,
+      observation: JSON.parse(JSON.stringify(baseObs)),
+    });
+    t.eq(A.calls.length, 1, '同一分析器、换一张勾了授权的图 → 就发了这一张');
+    t.eq(A.calls[0].url, '/api/vlm', '打的是同源代理，不是第三方域名');
+    t.eq(A.calls[0].opts.headers.Authorization, undefined, '同源代理不带 Authorization（密钥只在服务端）');
+    t.eq('Authorization' in A.calls[0].opts.headers, false, '连空头 Bearer 都不发（空值会被网关判 401）');
+    t.eq(A.calls[0].opts.headers['Content-Type'], 'application/json', '照常声明 JSON');
+    const sentBody = JSON.parse(A.calls[0].body);
+    t.eq(sentBody.messages.length, 2, '默认发 system + user 两条');
+    t.includes(JSON.stringify(sentBody.messages[1].content), 'data:image/png;base64,AAA=', '待分析图作为 data URL 带在消息里');
+    t.eq(granted.observation.provider, 'vlm-relay', '授权后模型结论覆盖离线结论');
+    t.eq(granted.observation.object.name, '红色面霜瓶身', '识图结果来自模型');
+    t.not(granted.observation._vlmUnparsed, '按 JSON 回答时不打「未解析」标记');
+
+    t.suite('vision · 直连模式仍然带密钥（两种接法的区别钉住）');
+    const B = relayBox(() => vlmResponse(200, RELAY_OK));
+    B.V.registerVLM('vlm-direct', {
+      endpoint: 'https://api.example.invalid/v1/chat/completions',
+      key: 'sk-from-localstorage', consent: true,
+    });
+    await B.V.analyzeWith('vlm-direct', { dataUrl: 'data:image/png;base64,BBB=', observation: B.V.observe(clean) });
+    t.eq(B.calls.length, 1, '直连模式确实把图发出去了（这是模式 B 的代价，界面上不许默认走这条）');
+    t.eq(B.calls[0].opts.headers.Authorization, 'Bearer sk-from-localstorage', '模式 B 由客户端自己补密钥');
+
+    t.suite('vision · 通道失败要说「没答上」，不许说「看不出来」');
+    const C = relayBox(() => vlmResponse(503, {
+      ok: false, reason: 'unconfigured',
+      error: { message: '未配置视觉模型（VLM_BASE_URL / VLM_API_KEY），图片走本机像素统计的离线结论' },
+    }));
+    C.V.registerVLM('vlm-relay', { endpoint: '/api/vlm', consent: true });
+    const cObs = C.V.observe(severe);
+    const degraded = await C.V.analyzeWith('vlm-relay', { dataUrl: 'data:image/png;base64,CCC=', observation: cObs });
+    t.eq(degraded.observation.provider, 'offline', '503 不当成模型结论（否则「没配通道」伪装成「图看不出来」）');
+    t.includes(degraded.observation._vlmError, '503', '错误里带上 HTTP 状态，界面能区分限流与未配置');
+    t.includes(degraded.observation._vlmError, '未配置视觉模型', '把服务端那句原因原样带回来，不自己编');
+    t.eq(degraded.observation.kind, 'skin', '降级后保留离线判定，不静默改成 unknown');
+    t.eq(degraded.observation.signals.length, 1, '降级不新增信号');
+
+    const D = relayBox(() => vlmResponse(429, {
+      ok: false, reason: 'rate_limited', error: { message: '视觉通道频率超限（每分钟 6 次），已改用离线像素统计' },
+    }));
+    D.V.registerVLM('vlm-relay', { endpoint: '/api/vlm', consent: true });
+    const limited = await D.V.analyzeWith('vlm-relay', { dataUrl: 'data:image/png;base64,DDD=', observation: D.V.observe(severe) });
+    t.includes(limited.observation._vlmError, '429', '超频也是失败，不当成结论');
+    t.eq(limited.observation.provider, 'offline', '超频退回本机像素统计');
+
+    const E = relayBox(() => { throw new Error('网络不通'); });
+    E.V.registerVLM('vlm-relay', { endpoint: '/api/vlm', consent: true });
+    const eObs = E.V.observe(severe);
+    const netFail = await E.V.analyzeWith('vlm-relay', { dataUrl: 'data:image/png;base64,EEE=', observation: eObs });
+    t.includes(netFail.observation._vlmError, '网络不通', 'fetch 同步抛错也降级，不许穿过 catch 把分析炸掉');
+    t.eq(netFail.observation.provider, 'offline', '同步抛错同样退回本机结论');
+    t.eq(eObs.provider, 'offline', '离线的原始观察不是来自模型');
+    t.eq(eObs._vlmError, undefined, '降级不污染调用方那份观察（同一张图重跑要洗得掉）');
+
+    const G = relayBox(() => vlmResponse(200, RELAY_OK));
+    G.V.registerVLM('vlm-relay', {
+      endpoint: '/api/vlm',
+      consent: function () { throw new Error('授权读取失败'); },
+    });
+    const gateBroken = await G.V.analyzeWith('vlm-relay', { dataUrl: 'data:image/png;base64,GGG=', observation: G.V.observe(clean) });
+    t.eq(G.calls.length, 0, 'consent 函数抛错 → 当作没授权（失败方向必须是不发）');
+    t.eq(gateBroken.observation._vlmSkipped, true, '判不出授权时按未授权标注');
+
+    t.suite('vision · HTTP 200 但没按格式回答（诚实标注的第三条路）');
+    const F = relayBox(() => vlmResponse(200, { choices: [{ message: { content: '这张图我不太确定' } }] }));
+    F.V.registerVLM('vlm-relay', { endpoint: '/api/vlm', consent: true });
+    const unparsed = await F.V.analyzeWith('vlm-relay', { dataUrl: 'data:image/png;base64,FFF=', observation: F.V.observe(severe) });
+    t.eq(unparsed.observation._vlmUnparsed, true, '没有 JSON → 打「未按格式回答」标记');
+    t.eq(unparsed.observation.kind, 'skin', '结论仍是离线的（模型没给出任何字段）');
+    t.eq(unparsed.observation._vlmError, undefined, '它不是失败：图确实发出去了，只是没答上格式');
   })();
 };

@@ -48,6 +48,15 @@ const request = (method, p, body, headers) => requestAt(BASE, method, p, body, h
 const json = (r) => { try { return JSON.parse(r.text); } catch (e) { return null; } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* /api/vlm 的最小合法身体：一段文字 + 一张浏览器本机的 data URL 图 */
+const vlmMsg = (url, extra) => Object.assign({
+  messages: [{ role: 'user', content: [
+    { type: 'text', text: '这是同一张图吗' },
+    { type: 'image_url', image_url: { url: url || 'data:image/png;base64,iVBORw0KGgo=' } },
+  ] }],
+}, extra || {});
+const VLM_JSON = { 'Content-Type': 'application/json' };
+
 async function waitHealth(timeoutMs, base) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -357,6 +366,42 @@ module.exports = async function (t) {
       { 'Content-Type': 'application/json', Origin: 'http://localhost:' + PORT });
     t.not(rLocal.status === 403, '同源 Origin 放行（本机演示不受影响）');
 
+    /* -------------------------------------------------- 视觉通道（默认关） */
+
+    /* /api/vlm 会把顾客的原图转发到第三方模型，所以它默认必须是「不能用」：
+       没配 VLM_BASE_URL / VLM_API_KEY 时，这台机器一张图都不该往外发。 */
+    t.suite('server · /api/vlm 默认关闭（没配上游就不外发）');
+    const hVlm = await request('GET', '/api/health');
+    const vh = json(hVlm).vlm;
+    t.ok(vh, 'health 自述里有视觉通道这一段');
+    t.eq(vh.configured, false, '未配置时 configured=false（界面据此显示「本机像素统计」）');
+    t.eq(vh.keySource, 'none', '没密钥就明说 none，不写一个看起来像配置的字符串');
+    t.eq(vh.endpoint, null, '未配置时不回显任何上游地址');
+    t.ok(typeof vh.maxBodyKb === 'number' && vh.maxBodyKb > 0, '自述里有单次体积上限');
+    t.ok(typeof vh.maxImages === 'number' && vh.maxImages > 0, '自述里有单次图片数上限');
+
+    const vGet = await request('GET', '/api/vlm');
+    t.eq(vGet.status, 405, 'GET /api/vlm 不接受（这条口只接受 POST，方法闸在闸门之前）');
+    const vEvil = await request('POST', '/api/vlm',
+      { messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAA=' } }] }] },
+      { 'Content-Type': 'application/json', Origin: 'http://evil.example' });
+    t.eq(vEvil.status, 403, '跨站 Origin 被拒：网页不能指挥这台机器替它上传顾客照片');
+    t.eq(json(vEvil).reason, 'origin', 'reason=origin');
+
+    const vNoUp = await request('POST', '/api/vlm',
+      { messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAA=' } }] }] },
+      { 'Content-Type': 'application/json' });
+    t.eq(vNoUp.status, 503, '本机来源、结构合法，但没配上游 → 503 而不是 500（要说清是「没配」不是「坏了」）');
+    t.eq(json(vNoUp).reason, 'unconfigured', 'reason=unconfigured（界面按它显示「离线」，不是按它报错）');
+
+    /* 闸门顺序：来源 → 频控 → 是否配置 → 读体 → 结构。
+       「没配上游」要在挑客户端毛病之前说清楚，否则同一句 400 会让人以为
+       是自己的请求写错了，而真正的原因是这台机器根本没有视觉通道。 */
+    const vJunk = await request('POST', '/api/vlm', '{ 这不是合法 JSON',
+      { 'Content-Type': 'application/json' });
+    t.eq(vJunk.status, 503, '坏 JSON 在未配置的通道前拿不到 400（先说「这里没通道」）');
+    t.eq(json(vJunk).reason, 'unconfigured', '未配置这条理由不会被结构错误盖掉');
+
     /* -------------------------------------------------- 幂等表淘汰（真发满一轮） */
 
     t.suite('server · 幂等表淘汰（真发满一轮）');
@@ -390,7 +435,7 @@ module.exports = async function (t) {
       cwd: ROOT,
       env: Object.assign({}, process.env, {
         PORT: String(PORT2), DEEPSEEK_API_KEY: '', LLM_API_KEY: '',
-        INGEST_TOKEN: INGEST_TOK, LLM_MAX_RPM: '2',
+        INGEST_TOKEN: INGEST_TOK, LLM_MAX_RPM: '2', VLM_MAX_RPM: '1',
       }),
       stdio: 'ignore',
     });
@@ -420,9 +465,121 @@ module.exports = async function (t) {
         t.not(q1.status === 429, '窗口内第 1 次不限量');
         t.not(q2.status === 429, '窗口内第 2 次不限量');
         t.eq(q3.status, 429, '第 3 次超窗口上限 → 429（本机来源也限）');
+
+        /* 视觉通道的闸门顺序：来源 → 频控 → 「没配上游」。
+           这台 VLM_MAX_RPM=1，正好一次钉两条：
+             · 第二次拿到的是 429 而不是 503 —— 未配置的通道也不许被无限探测；
+             · 已经限流之后，跨站仍然拿到 403 而不是 429 —— 来源闸排在计次之前，
+               否则网页只要多刷几下，就能把「你不许用」刷成「这台机器忙」。 */
+        t.eq(h2.vlm.limit.max, 1, 'health 自述视觉通道频控上限');
+        const vA = await requestAt(BASE2, 'POST', '/api/vlm', vlmMsg(), VLM_JSON);
+        t.eq(vA.status, 503, '第二台上视觉通道同样未配置 → 503（说清是「没配」）');
+        const vB = await requestAt(BASE2, 'POST', '/api/vlm', vlmMsg(), VLM_JSON);
+        t.eq(vB.status, 429, '第 2 次就超窗 → 429，未配置的通道也要限量');
+        t.includes(json(vB).error.message, '离线', '限流那句要把退路说清楚（退回本机像素统计）');
+        const vC = await requestAt(BASE2, 'POST', '/api/vlm', vlmMsg(),
+          Object.assign({ Origin: 'http://evil.example' }, VLM_JSON));
+        t.eq(vC.status, 403, '来源闸排在频控之前：跨站请求不计次，也不会被限流掩盖');
       }
     } finally {
       child2.kill();
+      await sleep(150);
+    }
+
+    /* ---------- 第三台：真配了视觉上游（本地假上游），密钥只在服务端 ----------
+       这一段钉三件「只看代码看不出来、必须真发一次才知道」的事：
+         1) Authorization 由服务端补，而且**不会**出现在回给客户端的任何字节里；
+         2) 模型名是服务端定死的 —— 客户端传 gpt-5 也换不走，
+            否则这台机器就成了别人账上的免费付费出口；
+         3) 出站闸门逐条生效：外部图片链接（SSRF / 绕过 consent）、图片张数、
+            role、部件类型、文本长度，全部在出网**之前**挡下。 */
+    t.suite('server · /api/vlm 代理（密钥不出服务端 + 出站闸门逐条）');
+    const UP_PORT = PORT + 2;
+    const PORT3 = PORT + 3;
+    const BASE3 = 'http://127.0.0.1:' + PORT3;
+    const VLM_SECRET = 'sk-server-only-should-never-leave';
+    const seen = [];
+    const upSrv = http.createServer((rq, rs) => {
+      let buf = '';
+      rq.on('data', (c) => { buf += c; });
+      rq.on('end', () => {
+        seen.push({ path: rq.url, auth: String(rq.headers.authorization || ''), raw: buf });
+        rs.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        rs.end(JSON.stringify({ choices: [{ message: { content: '{"kind":"skin","summary":"上游说：轻度泛红"}' } }] }));
+      });
+    });
+    await new Promise((resolve, reject) => {
+      upSrv.once('error', reject);
+      upSrv.listen(UP_PORT, '127.0.0.1', resolve);
+    });
+    const child3 = spawn(process.execPath, [path.join('server', 'server.js')], {
+      cwd: ROOT,
+      env: Object.assign({}, process.env, {
+        PORT: String(PORT3), DEEPSEEK_API_KEY: '', LLM_API_KEY: '',
+        VLM_BASE_URL: 'http://127.0.0.1:' + UP_PORT + '/v1',
+        VLM_API_KEY: VLM_SECRET, VLM_MODEL: 'qa-vlm',
+        VLM_MAX_RPM: '40', VLM_MAX_BODY_KB: '8',
+      }),
+      stdio: 'ignore',
+    });
+    try {
+      const h3 = await waitHealth(12000, BASE3);
+      t.ok(h3, '第三台在 12s 内起来并返回 /api/health');
+      if (!h3) return;
+      t.eq(h3.vlm.configured, true, '配了上游 + 密钥才叫 configured');
+      t.eq(h3.vlm.model, 'qa-vlm', 'health 自述当前会用哪个模型');
+      t.eq(h3.vlm.keySource, 'server', '密钥来源标明在服务端（不是「客户端透传」）');
+      t.eq(h3.vlm.maxBodyKb, 8, 'health 自述单次体积上限');
+      const h3raw = await requestAt(BASE3, 'GET', '/api/health');
+      t.eq(h3raw.text.indexOf(VLM_SECRET), -1, 'health 的原文里不含密钥（自述不能变成泄密口）');
+
+      const ok = await requestAt(BASE3, 'POST', '/api/vlm',
+        vlmMsg('data:image/png;base64,iVBORw0KGgo=', { model: 'gpt-5-max', stream: true, user: 'whoever' }), VLM_JSON);
+      t.eq(ok.status, 200, '同源本机、结构合法的请求转给上游并原样回传');
+      t.eq(seen.length, 1, '上游真的被调用了一次');
+      t.eq(seen[0].path, '/v1/chat/completions', '按 OpenAI 兼容路径拼上游（VLM_BASE_URL 带 /v1 不重复）');
+      t.eq(seen[0].auth, 'Bearer ' + VLM_SECRET, 'Authorization 是服务端补的');
+      t.eq(ok.text.indexOf(VLM_SECRET), -1, '回给客户端的响应里没有密钥');
+      const fwd = JSON.parse(seen[0].raw);
+      t.eq(fwd.model, 'qa-vlm', '模型由服务端定：客户端传 gpt-5-max 也换不走（这条口不是付费出口）');
+      t.eq(Object.keys(fwd).sort().join(','), 'messages,model,temperature', '客户端多余字段不转发（stream / user 都丢掉）');
+      t.eq(fwd.messages[0].content[1].image_url.url, 'data:image/png;base64,iVBORw0KGgo=', '图片本体确实转给了上游');
+
+      /* 出站闸门逐条 */
+      const gates = [
+        ['no_messages', {}, '没带 messages'],
+        ['no_messages', { messages: [] }, 'messages 是空数组'],
+        ['too_many_messages', { messages: [0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => ({ role: 'user', content: 'x' + i })) }, '条数超上限（默认 8 条）'],
+        ['bad_role', { messages: [{ role: 'tool', content: 'x' }] }, 'role 不在白名单'],
+        ['bad_content', { messages: [{ role: 'user', content: 5 }] }, 'content 既不是串也不是数组'],
+        ['bad_part', { messages: [{ role: 'user', content: [{ type: 'audio', audio: { data: 'x' } }] }] }, '不认识的部件类型'],
+        ['no_image', { messages: [{ role: 'user', content: '只说话没图' }] }, '一条图片都没有'],
+        ['image_not_local', vlmMsg('https://evil.example/customer.jpg'), '外部图片链接（SSRF + 绕过逐张授权）'],
+        ['image_not_local', vlmMsg('http://169.254.169.254/latest/meta-data'), '内网元数据地址也当外部链接拒掉'],
+        ['image_not_local', vlmMsg('data:text/plain;base64,AAAA'), '不是图片的 data URL'],
+        ['too_many_images', { messages: [{ role: 'user', content: [0, 1, 2, 3, 4].map((i) => ({ type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' + i } })) }] }, '图片张数超上限'],
+        ['text_too_long', { messages: [{ role: 'user', content: [{ type: 'text', text: new Array(4002).join('a') }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA=' } }] }] }, '单段文本超长'],
+      ];
+      for (const [reason, payload, label] of gates) {
+        const g = await requestAt(BASE3, 'POST', '/api/vlm', payload, VLM_JSON);
+        t.eq(g.status, 400, label + ' → 400');
+        t.eq(json(g).reason, reason, label + ' 的 reason=' + reason);
+      }
+      const arrBody = await requestAt(BASE3, 'POST', '/api/vlm', [1, 2, 3], VLM_JSON);
+      t.eq(json(arrBody).reason, 'bad_request', '顶层是数组不是对象 → bad_request');
+      t.eq(seen.length, 1, '上面这些闸门没有一个真的出网（上游只见过那一次正向请求）');
+
+      const junk = await requestAt(BASE3, 'POST', '/api/vlm', '{ 坏 JSON', VLM_JSON);
+      t.eq(junk.status, 400, '坏 JSON → 400 bad_request（这次通道是配好的，才轮到挑结构的错）');
+      t.eq(json(junk).reason, 'bad_request', 'reason=bad_request');
+
+      const big = 'data:image/png;base64,' + new Array(11000).join('A');
+      const oversize = await requestAt(BASE3, 'POST', '/api/vlm', vlmMsg(big), VLM_JSON).catch((e) => ({ status: 0, text: String(e.message) }));
+      t.eq(oversize.status, 413, '超过 VLM_MAX_BODY_KB 的请求拿到的是 413，不是连接被抽走（客户端要能分辨「太大了」和「挂了」）');
+      t.eq((json(oversize) || {}).reason, 'too_large', 'reason=too_large（正文也得真送出来了，不只是一个状态码）');
+    } finally {
+      child3.kill();
+      upSrv.close();
       await sleep(150);
     }
   } finally {
