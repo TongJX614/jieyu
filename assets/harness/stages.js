@@ -350,5 +350,13 @@
     emotion: emotion,
     context: context,
     ORDER: ['facts', 'generate', 'riskfloor', 'vision', 'ground', 'compliance', 'emotion', 'context'],
+
+    /* 必须以「拦住」而不是「跳过」回应异常的阶段。
+       core 的默认是「单阶段抛错就跳过」—— 对增强类阶段（补上下文、算情绪）这是对的，
+       它们坏了不该毁掉一整轮。但 riskfloor 是**安全闸**：它自己失效时若继续往下走，
+       送进界面的就是模型自报的等级，上一轮修的那个缺陷会从这扇门重新走进来。
+       闸的默认方向必须和增强项相反 —— fail-closed。
+       这里只声明「哪些阶段是闸」，由组装根去查，避免顺序表和 fatal 标记各写一份。 */
+    FATAL: ['riskfloor'],
   };
 });

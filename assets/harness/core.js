@@ -101,6 +101,7 @@
       traces: traces,
       lastTrace: lastTrace,
       stageNames: stageNames,
+      fatalStages: fatalStages,
       providerNames: providerNames,
       report: report,
       counters: snapshotCounters,
@@ -234,6 +235,13 @@
     function traces() { return traceLog.map(function (t) { return t.summary(); }); }
     function lastTrace() { return traceLog.length ? traceLog[traceLog.length - 1].summary() : null; }
     function stageNames() { return stageList.map(function (s) { return s.name; }); }
+    /** 被声明为「闸」（fatal: true）的阶段名。
+        stageNames() 只给顺序，看不出**默认方向**，而安全闸的意义就在默认方向上：
+        闸自己抛错时拦住还是放行。装配漏标 fatal 时管线照样跑、结果照样出，只是
+        从此带病出话术 —— 所以这一格必须能在运行时读出来核对（浏览器探针 + ST21）。 */
+    function fatalStages() {
+      return stageList.filter(function (s) { return s.fatal; }).map(function (s) { return s.name; });
+    }
     function providerNames() { return effectiveChain(); }
     function snapshotCounters() {
       return { runs: counters.runs, failedStages: counters.failedStages, fallbacks: counters.fallbacks, providerHits: Object.assign({}, counters.providerHits) };

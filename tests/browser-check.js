@@ -1726,6 +1726,8 @@ const CHECKS = [
       S.riskfloor({ provider: 'llm', job: { message: '我脸过敏烂脸了，你们这是要毁容，我要投诉12315' }, result: { risk: risk } }, ctx);
       const out = {
         order: stages.join('>'),
+        gates: H.fatalStages().join('>'),
+        declared: (S.FATAL || []).join('>'),
         score: risk.score,
         level: risk.level,
         alias: (risk.recheck.alias || []).map((p) => p.from + '→' + p.to).join(','),
@@ -1737,6 +1739,10 @@ const CHECKS = [
       const bad = [];
       const want = (c, l) => { if (!c) bad.push(l); };
       want(stages.indexOf('riskfloor') === stages.indexOf('generate') + 1, '浏览器里的管线没装配 riskfloor：' + out.order);
+      /* 声明了 FATAL 但组装漏标 fatal，页面不报错、结果照样出，只是闸退回「跳过并继续」：
+         静态正则在 ST21 里比的是源码文本，这一条比的是**真实加载后的装配结果**。 */
+      want(out.gates === out.declared, '真实装配的闸名单与 stages.FATAL 不一致：装配 ' + (out.gates || '(空)') + ' vs 声明 ' + out.declared);
+      want(out.declared === 'riskfloor', 'stages.FATAL 不是只有 riskfloor：' + out.declared);
       want(out.score === 80, '低报没被词典抬回，分数是 ' + out.score);
       want(out.level === 'high', '等级没抬到高危，实为 ' + out.level);
       want(out.alias.indexOf('皮肤刺激→皮肤不良反应') !== -1, '非标准信号名没被归一：' + out.alias);

@@ -111,23 +111,83 @@ module.exports = async function (t) {
        两轮分析一旦重叠，第二轮覆盖第一轮，第一轮收尾时又把第二轮刚设好的清成 0 ——
        表现是「没配超时，第二句却秒降级本地引擎」，而界面上查不到任何原因。
        当时靠「调用方是串行队列」兜着；队列改成跨会话并行之后这个前提就没了，
-       所以预算改成挂在每一轮的 job 上、随参数传下去 —— 谁也覆盖不了谁。 */
-    const seen = [];
+       所以预算改成挂在每一轮的 job 上、随参数传下去 —— 谁也覆盖不了谁。
+
+       这里跑的是**真组装根**（`H.run` 那条生产入口，因为只有它会盖 deadlineAt），
+       所以依赖必须给全。以前只塞一个 LLMClient，riskfloor / ground / emotion 全因
+       `need()` 抛错被 core「跳过并继续」，测试绿的，但那两轮没走过任何判定阶段 ——
+       把安全闸改成 fail-closed 之后这个空转才藏不住（闸会直接把「依赖缺失」抛出来）。
+
+       依赖给全之后还有一层坑要如实写下来：`resolveAgent()` 在 Node 下走 require，
+       不看 window，所以链路第一步是 **agent 而不是 llm**。上一版把 HarnessAgent 当
+       「不给」处理是无效的，反而让 `analyze` 一次都没被调到、记账数组恒空。
+       现在把 stub 做成**协议完整**的模型客户端（chat / SYSTEM_PROMPT / buildUserPrompt
+       / normalize / remainingFor），让 agent 真的走模型规划，
+       「每轮各得一份预算」就落在 `chat` 实际收到的 `opts.deadlineAt` 上 —— 数的是真往返。 */
+    const AG = require('../assets/harness/agent.js');
+    const modelCalls = [];   // 每一次真实的模型往返：拿到什么截止时刻、是什么时候拿的
     let globalSetDeadlineUsed = false;
     const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+    const BUDGET_MS = 20000;  // 给够：本轮剩余 ×60% 才会被 9s 上限截住，子预算 ≥ 单步下限
+    /* 「满份额子预算」的判据从 agent 的常量算出来，不手抄数字：
+       本轮剩余 × 比例，被上限截住。留出的余量按**份额本身**算（不是减去单步下限 ——
+       那样预算一小就会变成负数，「剩 -1ms」都能算通过，负向实测就是这个现象）。 */
+    const FULL_SUB_BUDGET = Math.min(BUDGET_MS * AG.SUB_BUDGET_RATIO, AG.SUB_BUDGET_CAP_MS);
+    const AGENT_FLOOR_MS = Math.max(0, FULL_SUB_BUDGET - AG.STEP_SLACK_MS * 2);
+    /* 前提自检：预算给得小到连一次往返都不够时，这一组压根测不到模型通道。
+       把它写成断言，是为了让「测试设定错了」显式报红，而不是安静地空转。 */
+    t.ok(FULL_SUB_BUDGET > AG.MIN_STEP_MS,
+      '测试前提：本轮预算划出的子份额要够一次模型往返（份额 ' + Math.round(FULL_SUB_BUDGET) +
+      'ms vs 单步下限 ' + AG.MIN_STEP_MS + 'ms）');
+    const finalResult = () => ({
+      engine: 'llm',
+      emotion: { score: 50 },
+      intents: [{ name: '常规咨询', tone: 'muted', confidence: 0.6 }],
+      risk: { level: 'low', score: 7, signals: [], advice: '按常规接待流程处理' },
+      replies: [{ text: '亲，这边先帮您核实一下订单情况哦～', confidence: 0.9 }],
+    });
     const stubLLM = {
-      readConfig: function () { return { budgetMs: 5000, mode: 'auto' }; },
+      readConfig: function () { return { budgetMs: BUDGET_MS, mode: 'auto' }; },
       remainingFor: function (until) { return until ? Math.max(0, until - Date.now()) : Infinity; },
       setDeadline: function () { globalSetDeadlineUsed = true; },
-      analyze: async function (input, opts) {
-        seen.push({ until: (opts && opts.deadlineAt) || 0, at: Date.now() });
+      /* Agent 的 ReAct 循环用 chat；一次性推理用 analyze。两条都记账，
+         这样以后链路换通道（agent 不加载 / 模型规划失败）也不会把断言变成空转。 */
+      SYSTEM_PROMPT: 'stub',
+      buildUserPrompt: function () { return 'stub'; },
+      normalize: function (raw) { return raw || finalResult(); },
+      chat: async function (messages, opts) {
+        modelCalls.push({ channel: 'chat', until: (opts && opts.deadlineAt) || 0, at: Date.now() });
         await delay(30);                            // 让两轮在时间上真的重叠
-        throw new Error('stub：不发真请求');
+        return { content: JSON.stringify({ thought: '事实已核实', final: finalResult() }) };
+      },
+      analyze: async function (input, opts) {
+        modelCalls.push({ channel: 'analyze', until: (opts && opts.deadlineAt) || 0, at: Date.now() });
+        await delay(30);
+        return finalResult();
       },
     };
     const hadWindow = Object.prototype.hasOwnProperty.call(global, 'window');
     const prevWindow = global.window;
-    global.window = { LLMClient: stubLLM };
+    const P = load([
+      'assets/policy.js', 'assets/engine.js', 'assets/crm.js',
+      'assets/orderctx.js', 'assets/guard.js', 'assets/vision.js', 'assets/bus.js',
+    ]);
+    global.window = {
+      LLMClient: stubLLM,
+      RiskPolicy: P.RiskPolicy,
+      EmotionPolicy: P.EmotionPolicy,
+      OrderContext: P.OrderContext,
+      ReplyGuard: P.ReplyGuard,
+      LocalEngine: P.LocalEngine,
+      CRM: P.CRM,
+      Vision: P.Vision,
+      MessageBus: P.MessageBus,
+    };
+
+    const settle = (p) => p.then(
+      (v) => ({ status: 'fulfilled', value: v }),
+      (e) => ({ status: 'rejected', reason: e })
+    );
 
     try {
       const H = require('../assets/harness/index.js');
@@ -135,24 +195,60 @@ module.exports = async function (t) {
       const j1 = { message: '第一轮' };
       const j2 = { message: '第二轮' };
       /* 两次调用之间**不能** await：必须同步连发，才能制造出重叠的两轮 */
-      const p1 = H.run(j1);
-      const p2 = H.run(j2);
-      await Promise.allSettled([p1, p2]);
+      const [r1, r2] = await Promise.allSettled([H.run(j1), H.run(j2)]);
 
-      t.eq(seen.length, 2, '重叠的两轮各自都走到了模型通道（不是一轮把另一轮挤掉）');
-      t.ok(seen[0].until > 0 && seen[1].until > 0, '每轮都拿到自己的截止时刻');
+      /* 先钉「两轮真的跑完了」：riskfloor 现在是 fail-closed 的闸，依赖一缺整轮会 reject。
+         不先断这一步就往下读 value.trace，报出来的是 TypeError 而不是「哪一轮没跑完」——
+         负向验证（把本轮预算压到 4000ms）时就是这个现象：一条崩掉，后面的断言全没执行。 */
+      t.eq(r1.status + ',' + r2.status, 'fulfilled,fulfilled',
+        '两轮都跑完整条管线（失败原因：' +
+        [r1, r2].map((r) => String((r.reason && r.reason.message) || '—')).join(' / ') + '）');
+
+      const factsOf = (r) => ((r.value && r.value.trace && r.value.trace.facts) || {});
+      const f1 = factsOf(r1);
+      const f2 = factsOf(r2);
+
+      t.eq(f1.agentMode, 'model', '第一轮真的走了模型规划（不是规则规划的空转）');
+      t.eq(f2.agentMode, 'model', '第二轮也真的走了模型规划');
+
+      /* 长度先行：下面每一条 every / 下标读数都依赖「确实有两次往返」。
+         少了这一条，空数组上的 every 会**真空为真** —— 负向实测评 4000ms 预算时，
+         模型一次都没被调用，「每次往返都拿到自己的截止时刻」照样打勾。那是假绿。 */
+      const two = modelCalls.slice(0, 2);
+      t.eq(modelCalls.length, 2, '重叠的两轮各自都发了一次模型往返（不是一轮把另一轮挤掉）');
+      const hasTwo = two.length === 2;
+      t.ok(hasTwo && two.every((c) => c.until > 0),
+        '每次往返都拿到自己的截止时刻：' + two.map((c) => c.until).join(' / '));
+      t.ok(hasTwo && two.every((c) => c.until - c.at > AGENT_FLOOR_MS),
+        '每轮开工时拿到的是满份额子预算（没有被别的轮次挤成零头）：' +
+        two.map((c) => Math.round(c.until - c.at) + 'ms').join(' / '));
       t.eq(globalSetDeadlineUsed, false, '组装根不再写 LLMClient 的全局格子（那一格只留给直调方与硬闸）');
       t.eq(j1.deadlineAt, undefined, '组装根不改动调用方传进来的 job');
 
-      const leftAfter = stubLLM.remainingFor(seen[1].until);
+      const leftAfter = hasTwo ? stubLLM.remainingFor(two[1].until) : -1;
       t.ok(leftAfter > 0, '先结束的那一轮没把后一轮的预算清零：仍剩 ' + Math.round(leftAfter) + 'ms');
 
-      /* 隔一会儿再开一轮：必须是「从现在起重新算的一整份预算」，不是沿用谁的余量 */
+      /* 隔一会儿再开第三轮：必须是「从现在起重新算的一整份预算」，不是沿用谁的余量。
+         前两轮是重叠发出的（盖的章几乎在同一毫秒），所以「间隔」只能拿第三轮去比。 */
       await delay(70);
-      await H.run({ message: '第三轮' });
-      t.ok(seen[2].until >= seen[0].until + 50,
-        '每一轮各得一份完整预算（' + (seen[2].until - seen[0].until) + 'ms 的间隔体现在截止时刻上）');
-      t.ok(stubLLM.remainingFor(seen[2].until) > 4000, '第三轮开工时预算是满的');
+      const r3 = await settle(H.run({ message: '第三轮' }));
+      t.eq(r3.status, 'fulfilled',
+        '第三轮跑完（失败原因：' + String((r3.reason && r3.reason.message) || '—') + '）');
+      const f3 = factsOf(r3);
+      t.eq(f3.agentMode, 'model', '第三轮同样走模型规划');
+
+      const third = modelCalls[2];
+      t.eq(modelCalls.length, 3, '第三轮也发了一次真实往返（没有复用前两轮的记账）');
+      const gap = (third && hasTwo) ? third.until - two[0].until : -1;
+      t.ok(gap >= 50, '每一轮各得一份完整预算（' + gap + 'ms 的间隔体现在截止时刻上）');
+      const left3 = third ? stubLLM.remainingFor(third.until) : -1;
+      t.ok(left3 > AGENT_FLOOR_MS,
+        '第三轮开工时预算是满的：剩 ' + Math.round(left3) + 'ms');
+
+      /* 空转守卫：这一组跑的是**真管线**，判定阶段必须真的执行过。
+         上一版只塞了一个 LLMClient，八阶段里六个被静默跳过还照样绿。 */
+      t.ok([f1, f2, f3].every((f) => typeof f.riskScore === 'number'),
+        '三轮都真的过了风险对账闸（依赖给全，判定阶段不再被静默跳过）');
     } finally {
       if (hadWindow) global.window = prevWindow;
       else delete global.window;

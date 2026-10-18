@@ -139,10 +139,15 @@
       return LE.analyze(state.input);
     });
 
-    /* ---- 默认管线（顺序即语义） ---- */
+    /* ---- 默认管线（顺序即语义）----
+       fatal 由 stages.FATAL 给，不在这里手抄：闸的名单只有一份，
+       否则「加了 FATAL 声明但组装没标」会安静地退回 fail-open。 */
+    var isFatal = function (name) {
+      return Array.isArray(stages.FATAL) && stages.FATAL.indexOf(name) !== -1;
+    };
     h.use({ name: 'facts', run: stages.facts });
     h.use({ name: 'generate', run: stages.generate });
-    h.use({ name: 'riskfloor', run: stages.riskfloor });
+    h.use({ name: 'riskfloor', run: stages.riskfloor, fatal: isFatal('riskfloor') });
     h.use({ name: 'vision', run: stages.vision });
     h.use({ name: 'ground', run: stages.ground });
     h.use({ name: 'compliance', run: stages.compliance });
@@ -187,6 +192,9 @@
     report: function () { return singleton.report(); },
     stageNames: function () { return singleton.stageNames(); },
     providerNames: function () { return singleton.providerNames(); },
+    /* 运行时核对「闸有没有真的装上」：stages.FATAL 是声明，这一格是装配结果。
+       两者不等 = 组装根漏标 fatal = 安全闸退回 fail-open。 */
+    fatalStages: function () { return singleton.fatalStages(); },
 
     /** 暴露单例本体，便于调试与扩展（如临时 use() 一个探针阶段） */
     _default: singleton,

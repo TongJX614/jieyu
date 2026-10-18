@@ -106,6 +106,7 @@ const HTML = read('index.html');
 const SERVER = read('server/server.js');
 const APP = read('assets/app.js');
 const STAGES = read('assets/harness/stages.js');
+const HARNESS_CORE = read('assets/harness/core.js');
 const HARNESS_INDEX = read('assets/harness/index.js');
 const LLM_JS = read('assets/llm.js');
 const AGENT_JS = read('assets/harness/agent.js');
@@ -510,6 +511,44 @@ check('ST20', '静态结构', '模型预算按轮传递 · 分析队列按会话
 
   return bad.length ? { status: 'fail', detail: bad.join('；') }
     : { status: 'pass', detail: '预算按轮 · Agent 步数按预算 · 队列按会话分桶（桶内 FIFO / 桶间并行）' };
+});
+
+check('ST21', '静态结构', '安全闸必须 fail-closed（riskfloor 抛错不许等于放行）', () => {
+  /* 这条钉的是一类「改回去不会报错、只是变危险」的约定。
+     core 对阶段异常的默认是「跳过并继续」—— 对补上下文、算情绪这类**增强阶段**是对的，
+     它们坏了不该毁掉一整轮；但风险对账闸相反：闸失效时若继续走，送进界面的就是模型自报的等级，
+     上一轮 P1-1 修掉的缺陷会从这扇门重新进来，而界面上只多一条红色 stage，看起来像小瑕疵。
+     三段都要成立：名单只有一份（stages.FATAL）· 组装真按名单接线 · core 保留中止语义。
+     只加第一段是半个修复，也是最常见的假完成。 */
+  const bad = [];
+
+  const fatalM = /FATAL:\s*\[([^\]]*)\]/.exec(STAGES);
+  const orderM = /ORDER:\s*\[([^\]]*)\]/.exec(STAGES);
+  const names = (m) => (m ? m[1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean) : []);
+  if (!fatalM) bad.push('stages.js 未导出 FATAL（闸的名单全项目只该有这一份）');
+  const fatal = names(fatalM);
+  const order = names(orderM);
+  if (fatal.indexOf('riskfloor') === -1) bad.push("FATAL 里没有 'riskfloor'");
+  fatal.forEach((n) => { if (order.indexOf(n) === -1) bad.push('FATAL 里的 ' + n + ' 不在 ORDER 中（标了也不会被注册）'); });
+
+  if (!/stages\.FATAL/.test(HARNESS_INDEX)) bad.push('harness/index.js 没读 stages.FATAL（手抄一份名单必然漂移）');
+  if (!/name:\s*'riskfloor'[^}]*\bfatal:/.test(HARNESS_INDEX)) bad.push("harness/index.js 注册 riskfloor 时没带 fatal");
+
+  if (!/fatal:\s*stage\.fatal\s*===\s*true/.test(HARNESS_CORE)) bad.push('core.use 未记录 fatal 标记');
+  if (!/if\s*\(st\.fatal\)/.test(HARNESS_CORE)) bad.push('core 运行循环未对 fatal 阶段中止整轮');
+
+  /* ④ 「装没装上」必须能在运行时读出来核对。只有静态正则的话，浏览器里那条装配偏差
+        （脚本顺序错、index.js 被缓存的旧版覆盖）照不出来 —— 管线照样跑完，只是闸退回放行。 */
+  if (!/\bfunction fatalStages\b/.test(HARNESS_CORE) || !/fatalStages:\s*fatalStages/.test(HARNESS_CORE)) {
+    bad.push('core 没把装配好的 fatal 名单暴露成 fatalStages()（闸装没装只剩读源码能确认）');
+  }
+  if (!/fatalStages:\s*function/.test(HARNESS_INDEX)) bad.push('harness/index.js 没转发 fatalStages()');
+  if (!/fatalStages\(\)/.test(read('tests/browser-check.js'))) {
+    bad.push('浏览器检查没核对 fatalStages()（声明与真实装配的一致只有静态正则在看）');
+  }
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: '闸名单在 stages.FATAL · 组装按名单接线 · core 对 fatal 阶段中止整轮 · fatalStages() 可在运行时核对' };
 });
 
 /* ============================== 运行时契约 ============================== */

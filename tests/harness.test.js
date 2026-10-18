@@ -19,12 +19,18 @@ const deps = {
   CRM: S.CRM,
 };
 
+/* 与生产组装根同源：fatal 由 stages.FATAL 决定，不在测试里手抄一份，
+   否则「测试绿但组装没标 fatal」这种最要命的偏差照不出来。 */
+function isFatal(name) {
+  return Array.isArray(stages.FATAL) && stages.FATAL.indexOf(name) !== -1;
+}
+
 function buildHarness(chain) {
   const h = core.create({ name: 'test', providerChain: chain || ['local'] });
   h.provide('local', (state) => deps.LocalEngine.analyze(state.input));
   h.use({ name: 'facts', run: stages.facts });
   h.use({ name: 'generate', run: stages.generate });
-  h.use({ name: 'riskfloor', run: stages.riskfloor });
+  h.use({ name: 'riskfloor', run: stages.riskfloor, fatal: isFatal('riskfloor') });
   h.use({ name: 'vision', run: stages.vision });
   h.use({ name: 'ground', run: stages.ground });
   h.use({ name: 'compliance', run: stages.compliance });
@@ -407,5 +413,57 @@ module.exports = async function (t) {
     t.eq(early.calls, 1, '一步就出 final 时不多花往返');
     t.eq(resEarly.agent.mode, 'model', '模型规划成功就用自己的结果');
     t.eq(trEarly.facts.agentStepsAllowed, 2, '上限照样记账（界面上要能区分「收敛了」与「被截住」）');
+  }
+
+  /* ================= 安全闸的默认方向：闸自己坏了 ≠ 放行 ================= */
+  t.suite('harness · riskfloor 是 fail-closed 的闸（抛错必须中止整轮）');
+
+  {
+    /* 这是 P1-1 的另一半：对账闸修好了，但 core 对阶段异常的默认是「跳过继续」。
+       叠加起来就是 —— riskfloor 一旦内部抛错，模型自报的 low 会原样进界面，
+       而界面上只多一条红色 stage 记录，看起来像「小瑕疵」。
+       增强类阶段（补上下文、算情绪）跳过是对的；安全闸反过来：坏了就拦住。 */
+    t.ok(Array.isArray(stages.FATAL) && stages.FATAL.indexOf('riskfloor') !== -1,
+      'stages.FATAL 必须声明 riskfloor（组装根按这份名单标 fatal，不手抄）');
+
+    const MSG = '我脸过敏烂脸了，你们这是要毁容，我要投诉12315';
+    const boom = new Error('模拟对账闸内部异常');
+
+    function gateHarness(fatal) {
+      const h = core.create({ name: 'gate', providerChain: ['llm'] });
+      /* 只留 llm 一条通道：万一 fail-open，本地兜底会把等级「修正」成正确值，掩盖缺陷 */
+      h.provide('llm', () => ({
+        engine: 'llm', emotion: { score: 30 }, intents: [],
+        risk: { level: 'low', score: 8, signals: [], advice: '安抚一下就好' },
+        replies: [{ text: '好的亲，稍等哦' }],
+      }));
+      h.use({ name: 'facts', run: stages.facts });
+      h.use({ name: 'generate', run: stages.generate });
+      h.use({ name: 'riskfloor', run: () => { throw boom; }, fatal: fatal });
+      return h;
+    }
+
+    /* ① 生产形态（fatal 与 stages.FATAL 同源）→ 整轮中止，不出结果 */
+    let thrown = null;
+    try { await gateHarness(isFatal('riskfloor')).run(jobFor(MSG), deps); }
+    catch (e) { thrown = e; }
+    t.eq(thrown === boom, true, '对账闸抛错时整轮必须中止，而不是带着 low 继续走完');
+
+    /* ② 反面证据：把 fatal 去掉就会放行 —— 这条是给「以后有人手滑删 fatal」看的 */
+    const loose = await gateHarness(false).run(jobFor(MSG), deps);
+    t.eq(loose.result.risk.level, 'low', '去掉 fatal 后确实放行模型自报的 low（所以 fatal 不能删）');
+    t.eq(loose.result.risk.score, 8, '被放行的分数就是模型自己报的那一个（词典完全没参与）');
+
+    /* ③ 生产装配结果（不是测试自己拼的管线）：声明的闸 == 装上的闸。
+          上面两条用的是测试手搭的 gateHarness，所以「组装根漏标 fatal」这种偏差它们照不出来；
+          fatalStages() 把装配结果读出来比一遍，闭环才完整（浏览器那条同理）。 */
+    const ROOT = require(path.join('..', 'assets', 'harness', 'index.js'));
+    t.eq(ROOT.fatalStages().join('>'), stages.FATAL.join('>'),
+      '真实组装根装上的闸名单必须与 stages.FATAL 逐字一致：装配 ' + ROOT.fatalStages().join('>') +
+      ' vs 声明 ' + stages.FATAL.join('>'));
+    t.eq(ROOT.fatalStages().indexOf('riskfloor') !== -1, true, 'riskfloor 在生产管线里确实是闸');
+    /* 增强类阶段不许被顺手标成闸：情绪/前文坏了就毁掉一整轮，是把 fail-fast 用错了地方 */
+    t.eq(stages.FATAL.filter((n) => n !== 'riskfloor').length, 0,
+      '闸的名单目前只有 riskfloor（多加一个要先说明为什么它坏了不能继续）');
   }
 };

@@ -558,6 +558,7 @@
     SUB_BUDGET_RATIO: SUB_BUDGET_RATIO,
     SUB_BUDGET_CAP_MS: SUB_BUDGET_CAP_MS,
     MIN_STEP_MS: MIN_STEP_MS,
+    STEP_SLACK_MS: STEP_SLACK_MS,
     subBudgetUntil: subBudgetUntil,
     stepAllowance: stepAllowance,
     provider: provider,
