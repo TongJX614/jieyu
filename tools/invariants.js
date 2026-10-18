@@ -399,7 +399,7 @@ check('ST17', '静态结构', '阈值不在 policy 之外重复（退化兜底�
     : true;
 });
 
-check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权 / 慢哈希 / 代理闸门', () => {
+check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权 / 慢哈希 / 代理闸门 / 协商缓存', () => {
   const bad = [];
 
   /* ① 静态托管必须是「默认拒绝 + 显式白名单」。
@@ -444,6 +444,18 @@ check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权
   if (!/DB_FILE \+ '\.' \+ process\.pid \+ '\.tmp'/.test(SERVER)) {
     bad.push('saveDb 的临时文件没带 pid（多实例共用同名 tmp，rename 会互相搬走对方的半成品）');
   }
+
+  /* ⑦ 协商缓存：只写 Cache-Control 的静态响应，到点就是整份重传。
+     这条不许回潮 —— 删掉 ETag 分支不会报错，只是每 60 秒在局域网里重传一遍
+     首屏预加载的 2.8MB 精灵图（assets/img 实测 17.5MB / 54 个文件），
+     改版后的 60 秒窗口里界面还半新半旧。 */
+  if (!/req\.headers\['if-none-match'\]/.test(SERVER)) bad.push('静态响应没读 If-None-Match（校验器发了也没人能用上）');
+  if (!/writeHead\(304/.test(SERVER)) bad.push('静态响应没有 304 分支（命中校验器仍要传全文）');
+  if (!/Math\.floor\(st\.mtimeMs \/ 1000\)/.test(SERVER)) {
+    bad.push('mtime 没向下取整到秒（If-Modified-Since 只有秒级分辨率，毫秒值会让同一文件反复判成"变了"）');
+  }
+  if (!/req\.method === 'HEAD'/.test(SERVER)) bad.push('HEAD 未单独收尾（照样把整个文件读一遍再丢掉）');
+  if (!/, 304,/.test(read('tests/server.test.js'))) bad.push('协商缓存没有真 HTTP 断言（钉不住，只能靠肉眼）');
 
   return bad.length ? { status: 'fail', detail: bad.join('；') }
     : { status: 'pass', detail: '白名单 ' + dirs.concat(files).join('/') };

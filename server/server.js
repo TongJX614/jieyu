@@ -792,11 +792,53 @@ function serveStatic(req, res, urlPath) {
       return;
     }
     const ext = path.extname(target).toLowerCase();
+
+    /* 协商缓存：没有这一套，`max-age=60` 到点就是整份重传 ——
+       首屏 app.js 预加载 7 张桌宠精灵图共 2.8MB，道具态再按需拉 35 张 12.0MB
+       （assets/img 实测 17.5MB / 54 个文件），每分钟在局域网里重下一遍，
+       而文件其实一个字节都没改。`.html` 的 `no-cache` 同理：它不是「不许缓存」，
+       是「每次都得问服务器」，问了能给 304 才算省。 */
+
+    /* mtime 向下取整到秒：If-Modified-Since 的分辨率就是 1 秒，
+       拿带毫秒的值当 ETag，同一份文件改写前后可能生成两个不同的标记。 */
+    const mtimeMs = Math.floor(st.mtimeMs / 1000) * 1000;
+    /* 强校验器取 size + mtime，不取内容哈希：给 17.5MB 素材逐个算 SHA 要全读进内存，
+       省下来的带宽全花在 CPU 上。本地演示场景里「同尺寸同秒改写」不会发生，
+       真要内容级一致可以换成 hash，但那是服务端持久化那一轮的事。 */
+    const etag = '"' + st.size.toString(16) + '-' + mtimeMs.toString(16) + '"';
+    const cacheControl = ext === '.html' ? 'no-cache' : 'public, max-age=60';
+    const lastModified = new Date(mtimeMs).toUTCString();
+
+    const ims = req.headers['if-modified-since'];
+    const inm = req.headers['if-none-match'];
+    let notModified = false;
+    if (inm) {
+      /* If-None-Match 优先（RFC 7232 §3.3）：服务器换了实现、校验器口径变了，
+         条件只可能写在 IMS 上，这时拿 ETag 说话才算数。`*` = 只要存在就命中。 */
+      notModified = inm.trim() === '*'
+        || inm.split(',').some((c) => c.trim().replace(/^W\//, '') === etag);
+    } else if (ims) {
+      const since = Date.parse(ims);
+      notModified = !Number.isNaN(since) && mtimeMs <= since;   // 严格「不晚于」，等于也要 304
+    }
+
+    if (notModified) {
+      /* 304 不带 body，也不带 Content-Type / Content-Length：
+         浏览器拿它去拼自己缓存里的那份，多余的头部只会让链路误判长度。 */
+      res.writeHead(304, { ETag: etag, 'Last-Modified': lastModified, 'Cache-Control': cacheControl });
+      res.end();
+      return;
+    }
+
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Content-Length': st.size,
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=60',
+      'Cache-Control': cacheControl,
+      ETag: etag,
+      'Last-Modified': lastModified,
     });
+    /* HEAD 只给头部：pipe 一个大文件再被 Node 丢掉 body，等于白读一遍磁盘。 */
+    if (req.method === 'HEAD') { res.end(); return; }
     fs.createReadStream(target).pipe(res);
   });
 }

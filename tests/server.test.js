@@ -212,6 +212,97 @@ module.exports = async function (t) {
     t.ok(Array.isArray(rHealth.staticAllow.dirs) && rHealth.staticAllow.dirs.length > 0,
       'health 自述静态白名单（对接方不用读源码就知道能取什么）');
 
+    /* ---------- 协商缓存：ETag / If-None-Match → 304 ----------
+       原来的响应只有 `Cache-Control: public, max-age=60`：到点就整份重传。
+       实测体积：`assets/img` 17.5MB / 54 个文件（桌宠精灵图 51 张），首屏
+       `app.js` 预加载其中 7 张就是 2.8MB，道具态再按需拉 35 张 12.0MB ——
+       局域网里每分钟重下一遍，而文件一个字节都没改。更要紧的是 `.css`/`.js`
+       改版后 60 秒的窗口里界面会半新半旧 —— 那是「看不到最新版」，不是性能问题。
+       这里全程发真请求，读的是真响应头。 */
+    t.suite('server · 协商缓存（改了才重传，没改给 304）');
+    const PROBE = path.join(ROOT, 'assets', '__cache_probe__.txt');   // assets/ 在白名单内
+    const etagOf = (r) => String(r.headers['etag'] || '');
+    try {
+      fs.writeFileSync(PROBE, 'A', 'utf8');
+      const g1 = await request('GET', '/assets/__cache_probe__.txt');
+      t.eq(g1.status, 200, '探测文件首次 GET 给 200');
+      const e1 = etagOf(g1);
+      t.ok(/^"[0-9a-f]+-[0-9a-f]+"$/.test(e1), '强校验器形态为 "<size hex>-<mtime hex>"，实际 ' + e1);
+      const st1 = fs.statSync(PROBE);
+      const floorMs = Math.floor(st1.mtimeMs / 1000) * 1000;
+      t.eq(e1, '"' + st1.size.toString(16) + '-' + floorMs.toString(16) + '"',
+        '校验器确实由**磁盘上这份文件**的 size + 秒级 mtime 推出来（不是硬编码的常量）');
+      t.eq(g1.headers['last-modified'], new Date(floorMs).toUTCString(),
+        'Last-Modified 与 mtime 对得上');
+
+      /* ① 命中：没改 → 304，不带 body */
+      const c1 = await request('GET', '/assets/__cache_probe__.txt', null, { 'If-None-Match': e1 });
+      t.eq(c1.status, 304, '同一校验器再来一次 → 304（不重传正文）');
+      t.eq(c1.text, '', '304 的响应体是空的');
+      t.eq(c1.headers['content-type'], undefined, '304 不带 Content-Type（让客户端用自己缓存里那份）');
+      t.eq(etagOf(c1), e1, '304 仍然回带校验器');
+      t.eq(c1.headers['cache-control'], 'public, max-age=60', '304 也保留 Cache-Control');
+
+      /* ② 不命中：内容变了（同一秒内改写，只能靠 size 这一腿分辨）→ 必须 200 */
+      fs.writeFileSync(PROBE, 'BB', 'utf8');
+      const c2 = await request('GET', '/assets/__cache_probe__.txt', null, { 'If-None-Match': e1 });
+      const e2 = etagOf(c2);
+      t.eq(c2.status, 200, '改写后再拿旧校验器 → 200（不能把新内容判成没变）');
+      t.eq(c2.text, 'BB', '200 的正文是新内容');
+      t.not(e2 === e1, 'size 这一腿真的让校验器变了（只有 mtime 的话同一秒改写会漏）');
+
+      /* ③ mtime 这一腿也要单独钉住：把 mtime 拨到一个过去的固定时刻，尺寸不变 */
+      const FIXED = new Date(Date.UTC(2015, 0, 2, 3, 4, 5));
+      fs.utimesSync(PROBE, FIXED, FIXED);
+      const c3 = await request('GET', '/assets/__cache_probe__.txt', null, { 'If-None-Match': e2 });
+      t.eq(c3.status, 200, 'mtime 变了、size 没变 → 校验器也要变，不能判 304');
+      t.not(etagOf(c3) === e2, 'mtime 这一腿单独起作用（只按 size 算的话这里就漏了）');
+
+      /* ④ If-Modified-Since 双向，以及它只在没有 If-None-Match 时才说话 */
+      const imsNew = await request('GET', '/assets/__cache_probe__.txt', null,
+        { 'If-Modified-Since': new Date(FIXED.getTime() + 60000).toUTCString() });
+      t.eq(imsNew.status, 304, 'If-Modified-Since 晚于 mtime → 304');
+      const imsOld = await request('GET', '/assets/__cache_probe__.txt', null,
+        { 'If-Modified-Since': new Date(FIXED.getTime() - 60000).toUTCString() });
+      t.eq(imsOld.status, 200, 'If-Modified-Since 早于 mtime → 200（不是无脑 304）');
+      const bothWay = await request('GET', '/assets/__cache_probe__.txt', null,
+        { 'If-Modified-Since': new Date(FIXED.getTime() + 60000).toUTCString(), 'If-None-Match': '"zzz"' });
+      t.eq(bothWay.status, 200, '两个头同时出现时以 If-None-Match 为准（RFC 7232 §3.3）');
+
+      /* ⑤ 校验器的常见写法要认：弱前缀、列表、`*` */
+      t.eq((await request('GET', '/assets/__cache_probe__.txt', null,
+        { 'If-None-Match': 'W/' + etagOf(c3) })).status, 304, '弱前缀 W/ 照样匹配（304 只用于校验，不是内容）');
+      t.eq((await request('GET', '/assets/__cache_probe__.txt', null,
+        { 'If-None-Match': '"a", "b", ' + etagOf(c3) })).status, 304, '逗号列表里含本校验器 → 304');
+      t.eq((await request('GET', '/assets/__cache_probe__.txt', null,
+        { 'If-None-Match': '*' })).status, 304, 'If-None-Match: * → 304');
+      t.eq((await request('GET', '/assets/__cache_probe__.txt', null,
+        { 'If-None-Match': '"stale-value"' })).status, 200, '对不上的校验器 → 200（不是无脑命中）');
+
+      /* ⑥ 真实资源上的收益与 HEAD 语义 */
+      const css1 = await request('GET', '/assets/styles.css');
+      const css2 = await request('GET', '/assets/styles.css', null, { 'If-None-Match': etagOf(css1) });
+      t.eq(css1.status, 200, 'styles.css 首次 GET 给 200 并带校验器');
+      t.eq(css2.status, 304, 'styles.css 第二次命中 304（真页面里的样式不再整份重传）');
+      const head1 = await request('HEAD', '/assets/app.js');
+      t.eq(head1.status, 200, 'HEAD 返回 200（方法没被当成「不支持」）');
+      t.eq(head1.text, '', 'HEAD 不带正文');
+      t.ok(Number(head1.headers['content-length']) > 0,
+        'HEAD 仍报 Content-Length，客户端能据此判断大小：' + head1.headers['content-length']);
+      const headHit = await request('HEAD', '/assets/app.js', null, { 'If-None-Match': etagOf(head1) });
+      t.eq(headHit.status, 304, 'HEAD + If-None-Match 也能拿到 304');
+      const idx1 = await request('GET', '/');
+      t.eq(idx1.headers['cache-control'], 'no-cache', '首页仍是 no-cache（改版不能压在 60 秒缓存里）');
+      t.ok(etagOf(idx1).length > 0, '首页也带校验器：no-cache 的意思是「每次问一声」，问出 304 才算省');
+      t.eq((await request('GET', '/', null, { 'If-None-Match': etagOf(idx1) })).status, 304,
+        '首页再进一次只花一个 304，不重下整份 HTML');
+      const missEtag = await request('GET', '/assets/__nope__.js');
+      t.eq(missEtag.status, 404, '不存在的资源仍 404');
+      t.eq(missEtag.headers['etag'], undefined, '404 不发校验器（没内容可校验）');
+    } finally {
+      try { fs.unlinkSync(PROBE); } catch (e) { /* ignore */ }
+    }
+
     /* ---------- 写接口鉴权 ----------
        /api/kb 的增删过去完全公开：任意网站一条 text/plain 的简单 POST（连预检都不要）
        就能往全部坐席的话术库里塞任意内容 —— 那是话术库，不是公告栏。
