@@ -78,6 +78,12 @@
     caseNotes: {},                 // 各工单的「处置结论」草稿（重渲染不丢）
     composerMode: 'agent',
     pendingImage: null,            // 待发送的图片附件（含视觉观察）
+    /* 照片授权留痕（会话级 · 只在内存）。承诺了「逐张授权、可撤回」就得留下凭据，
+       否则这句话刷新一次就查无实据。**绝不写 localStorage**：那等于
+       「上次授权过这张图」跨刷新活下来，正是逐张授权要排除的东西。
+       台账本身由 privacy.js 构造（纯函数），这里只持有实例与浮层开合态。 */
+    consentLedger: null,
+    consentOpen: false,
     /* 视觉模型通道的自述（来自 /api/health.vlm，服务端说是什么就是什么）。
        checked=false 表示「还没问过」—— 没问过就绝不可能已授权，
        所以初始 configured=false 是 fail-closed：/api/health 挂了也只会退回本机像素统计。
@@ -118,6 +124,8 @@
     run: function (job) { return analyzeOne(job); },
     /* 单条分析异常不得阻断后续，也不得让消息永远停在「已收到、未分析」 */
     onError: function (job, e) {
+      /* 失败同样要清：原图不能因为「分析没跑成」就一直躺在内存里等人重试 */
+      if (job && job.image) dropOriginal(job.image, 'drop', '分析异常 · 原图已从内存丢弃');
       window.MessageBus.ack(job.mid);
       if (typeof console !== 'undefined' && console.warn) console.warn('[analyze] 异常：', e);
     },
@@ -328,7 +336,16 @@
     var settled = false;
     var failMsg = null;
     var degraded = '';
-    function ack() { if (!acked) { acked = true; window.MessageBus.ack(job.mid); } }
+    function ack() {
+      if (acked) return;
+      acked = true;
+      /* 分析一结束就把「交过模型的那份原图」从内存里摘掉，只留缩略图与结论。
+         时机的两头都不对：点发送时丢 —— vision 阶段与「重跑一次」都要用这一张，
+         等于自己把分析依据删了；等到 finally 之后再丢 —— 白背几十 MB 的 base64。
+         落盘那侧另有闸门（bus.js 的 forDisk），这里管的是内存。 */
+      if (job.image) dropOriginal(job.image, 'drop', '分析完成 · 原图已从内存丢弃');
+      window.MessageBus.ack(job.mid);
+    }
 
     try {
       var HARNESS = window.AnalysisHarness;
@@ -560,7 +577,9 @@
       var m = msgs[i];
       html += '<div class="up-item">' +
         '<span class="up-time num">' + esc(m.time) + '</span>' +
-        (m.image && m.image.dataUrl ? '<img class="up-img" src="' + esc(m.image.dataUrl) + '" alt="图片">' : '') +
+        (m.image ? (m.image.dataUrl || m.image.thumb
+          ? '<img class="up-img" src="' + esc(m.image.dataUrl || m.image.thumb) + '" alt="图片">'
+          : '<span class="up-img cl-gone" title="原图已按保留策略从内存丢弃">🖼</span>') : '') +
         '<span class="up-text">' + esc(m.text) + '</span>' +
         (m.source === 'sse' || m.source === 'webhook' ? '<span class="up-src">外部</span>' : '') +
         '</div>';
@@ -583,6 +602,10 @@
       if (S.chat.length) { renderContacts(); return; }
     } else {
       state.bubbleOpen = false;
+      /* 切走之前先把上一位顾客那张**待发送**的图当场处理掉。
+         预览条挂在 composer 上、不属于任何一个会话，不清它就会跟着进下一位顾客的发送键 ——
+         那不是「还没发」，那是把 A 的照片发给了 B。 */
+      clearPendingImage('切换到另一位顾客 · 待发送的图片已移除');
       state.si = i;
       if (state.playing) stopPlay();
       /* 调用配额是「每会话」口径：换会话即清零，否则跑到 100 次之后
@@ -1037,11 +1060,17 @@
     if (m.source === 'sse' || m.source === 'webhook') via += '<span class="via live">外部接入</span>';
     /* 图片附件：气泡里直接给出缩略图 + 本机视觉观察的结论 */
     var imgHtml = '';
-    if (m.image && m.image.dataUrl) {
+    if (m.image && (m.image.dataUrl || m.image.thumb || m.image.pixels === false)) {
       var vo = m.image.observation;
       var vTip = vo ? (vo.detail || []).map(function (d) { return d.key + '：' + d.v; }).join('\n') : '';
-      imgHtml = '<span class="msg-img">' +
-        '<img src="' + esc(m.image.dataUrl) + '" alt="顾客上传的图片">' +
+      /* 原图丢完之后气泡不能变成「图不见了」：留缩略图，并把「原图已丢弃」写在脸上。
+         pixels===false 是刷新后从 localStorage 恢复的那批 —— 那里从来就没有像素。 */
+      var src = m.image.dataUrl || m.image.thumb;
+      var gone = !src ? '<span class="mi-gone">原图已清理 · 指纹 ' + esc(m.image.fp || '—') + ' · 仅留视觉结论</span>' : '';
+      imgHtml = '<span class="msg-img' + (src ? '' : ' no-img') + '">' +
+        (src ? '<img src="' + esc(src) + '" alt="顾客上传的图片">' : gone) +
+        (src && m.image.originalDropped ? '<span class="mi-dropped" title="交过模型的那份原图已在分析结束后从内存丢弃，这里只是 ' +
+          (window.Vision && window.Vision.THUMB_EDGE ? window.Vision.THUMB_EDGE : '—') + 'px 缩略图">原图已丢弃</span>' : '') +
         (vo ? '<span class="mi-tag lv-' + vo.level + '" title="' + esc(vTip) + '">视觉 · ' +
           esc(visionKindLabel(vo)) + '</span>' : '') +
         /* 结论来源跟着消息走：气泡上必须分得清「模型看过这张图」和「本机算了一遍像素」，
@@ -3390,6 +3419,7 @@
     var r = BUS.ingest({ customerId: def.id, text: t, source: 'manual', image: img });
     if (!r.accepted) toast('消息未接收：' + (r.message || r.reason), 'warn');
     else {
+      if (img) ledgerRecord(img, 'send', '原图随本轮分析交给管线');
       state.pendingImage = null;
       renderComposerAttach();
       $('composerInput').value = '';
@@ -3529,6 +3559,135 @@
   /** 这张图是否已被坐席明确授权外发（授权只在 asset 上，没有全局开关） */
   function vlmConsentFor(asset) { return !!(asset && asset.consent); }
 
+  /* ---------- 照片授权留痕（会话级 · 只在内存 · 绝不落 localStorage） ----------
+     「逐张授权、可撤回、发完就丢原图」这三句话如果没有凭据，就只是界面文案。
+     台账本体是 privacy.js 里的纯函数，这里只做三件事：给每张图盖身份（assetId / fp）、
+     在动作发生的当场记一笔、以及到点把原图从内存里摘掉。
+     像素永远不进台账：record() 只挑白名单字段，就算这里传了整个 asset 也带不过去。 */
+
+  /** 取（或建）本次打开页面以来的台账。privacy.js 没加载时返回 null，所有留痕调用都成空操作。 */
+  function ledger() {
+    if (!state.consentLedger) {
+      var P = window.Privacy;
+      if (!P || !P.consentLedger) return null;
+      state.consentLedger = P.consentLedger();
+    }
+    return state.consentLedger;
+  }
+
+  function consentTtl() {
+    var P = window.Privacy;
+    var ms = P && P.CONSENT ? P.CONSENT.RETENTION_MS : null;
+    /* 只认 privacy.js 那一个数字。读不到就按「零保留期」处理 —— 宁可图一放上来就被摘掉，
+       也不在这里抄一份 180000：抄一份就意味着两处可以各改各的，
+       而保留期是界面上写给顾客看的承诺，不是内部的默认值。 */
+    return typeof ms === 'number' && ms >= 0 ? ms : 0;
+  }
+
+  /** 给一张图盖身份：唯一 assetId + 内容指纹（指纹只用于对账，不是加密哈希） */
+  function stampAsset(asset) {
+    var P = window.Privacy;
+    if (!asset) return asset;
+    state.assetSeq = (state.assetSeq || 0) + 1;
+    asset.fp = P && P.fingerprint ? P.fingerprint(asset.dataUrl || '') : '';
+    asset.assetId = 'A' + state.assetSeq + (asset.fp ? '-' + asset.fp : '');
+    asset.attachedAt = Date.now();
+    asset.originalDropped = false;
+    var L = ledger();
+    if (L) L.record({ action: 'attach', assetId: asset.assetId, fp: asset.fp });
+    return asset;
+  }
+
+  /** 记一笔与「这一张图」有关的留痕；extra 里别塞像素，反正白名单也过不去 */
+  function ledgerRecord(asset, action, note) {
+    var L = ledger();
+    if (!L || !asset) return null;
+    return L.record({
+      action: action, assetId: asset.assetId, fp: asset.fp,
+      via: action === 'grant' ? (state.vlm.model || 'vlm') : undefined,
+      note: note,
+    });
+  }
+
+  /**
+   * 丢掉交过模型的那份原图，只留缩略图与结论。幂等：第二次调用不再记。
+   * 为什么丢在「分析结束」而不是「点发送」：管线的 vision 阶段与重跑都要用这一张，
+   * 早一步丢就等于把分析依据自己删了。
+   */
+  function dropOriginal(image, action, note) {
+    if (!image || image.originalDropped) return false;
+    image.originalDropped = true;
+    image.dataUrl = null;
+    ledgerRecord(image, action || 'drop', note);
+    repaintDroppedImage();
+    return true;
+  }
+
+  /**
+   * 丢掉原图之后必须重画一次。
+   * renderChat 是**增量**的：只把新增的消息插进去，已有那条气泡的 HTML 不再重算。
+   * 而气泡是在「消息到达」时就渲染好的 —— 那一刻 dataUrl 还在，整份 base64 已经写进
+   * `<img src>`。于是出现了最坏的一种不一致：内存里对象已经空了、界面上却还挂着原图，
+   * 「原图已丢弃」那句话在 DOM 上根本不成立（浏览器实测撞出来的）。
+   * 图片消息本来就稀少，丢一次整块重建一次，换的是「界面说的是真话」。
+   */
+  function repaintDroppedImage() {
+    var list = $('chatList');
+    if (list) { list._sess = null; list.dataset.n = '0'; }
+    renderChat();
+    renderContacts();
+  }
+
+  /**
+   * 待发送的那张图离开输入框 —— 手工移除、切回坐席模式、切到另一位顾客、重放剧本，
+   * 四条路径都走这里。
+   * 只把 `state.pendingImage` 置空是不够的：那样原图对象只是没了引用，
+   * 台账上查不到「这一张后来怎么样了」，而逐张授权要回答的恰恰是这句话。
+   * 切会话这一条尤其不能省：预览条是**全局**的，不清就等于把上一位顾客的照片
+   * 挂到下一位顾客的发送键上 —— 那是一张别人的照片。
+   */
+  function clearPendingImage(reason) {
+    var img = state.pendingImage;
+    if (!img) return false;
+    state.pendingImage = null;
+    dropOriginal(img, 'detach', reason);
+    renderComposerAttach();
+    return true;
+  }
+
+  /**
+   * 保留期到点清扫：待发送的图超过 RETENTION_MS 还没发出去，就当众把它摘掉。
+   * 没有这一步，「一次一张」会变成「勾完就去干别的，图一直躺在内存里等下一次发送」。
+   */
+  function sweepRetention() {
+    var img = state.pendingImage;
+    if (!img || img.originalDropped) return false;
+    var age = Date.now() - (img.attachedAt || Date.now());
+    if (age < consentTtl()) return false;
+    state.pendingImage = null;
+    dropOriginal(img, 'expire', '待发送超过 ' + Math.round(consentTtl() / 1000) + ' 秒，原图已从内存丢弃');
+    renderComposerAttach();
+    toast('待发送的照片已超过保留期 · 原图已从内存丢弃，只保留本机视觉结论', 'warn');
+    return true;
+  }
+
+  /** 留痕浮层的正文：一行一条，读得出「谁在什么时候授权了什么」 */
+  function consentLedgerRows() {
+    var L = ledger();
+    if (!L) return '<div class="cl-empty">隐私模块未加载，这次打开页面以来没有留痕。</div>';
+    var es = L.entries();
+    if (!es.length) return '<div class="cl-empty">这次打开页面以来还没有图片动作。</div>';
+    var verb = { attach: '放入待发送', grant: '授权外发', revoke: '撤回授权', send: '随消息发出', drop: '原图已丢弃', expire: '超过保留期 · 原图已丢弃', detach: '移出输入框' };
+    return es.map(function (e) {
+      var t = String(e.at || '').slice(11, 19);
+      return '<div class="cl-row"><span class="cl-t">' + esc(t) + '</span>' +
+        '<span class="cl-a a-' + esc(e.action) + '">' + esc(verb[e.action] || e.action) + '</span>' +
+        '<span class="cl-f">' + esc(e.fp || '—') + '</span>' +
+        '<span class="cl-v">' + esc(e.via ? ('→ ' + e.via) : '') + '</span>' +
+        '<span class="cl-n">' + esc(e.note || '') + '</span></div>';
+    }).join('');
+  }
+
   /** 注册同源代理分析器（幂等）。Vision 未加载 / 无 DOM 时安静返回 false。 */
   function vlmRegister() {
     if (!VIS || !VIS.available || !VIS.available()) return false;
@@ -3603,11 +3762,39 @@
       ? '只这一张，不记住；密钥在服务端，服务端限 ' + (state.vlm.maxImages || 3) + ' 张 / 次、' +
         (state.vlm.maxBodyKb || 0) + 'KB / 次'
       : '服务端没有配置视觉模型，这张图只会做本机像素统计';
+    /* 这句是给坐席看的承诺，必须与保留期同一个数：
+       读不到保留期时不许显示「超过 0 分钟」，那等于告诉人「可以慢慢来」。 */
+    var ttl = consentTtl();
+    var ttlNote = ttl > 0
+      ? '超过 ' + Math.round(ttl / 60000) + ' 分钟没发出会自动丢弃原图'
+      : '隐私模块未加载 · 待发送的原图一律不留存';
     return '<div class="ca-consent">' +
       '<label><input type="checkbox" data-vlm-consent="1"' + (img.consent ? ' checked' : '') + dis + '>' +
       ' 允许把<b>这一张</b>图交给视觉模型（识图 / 妆容）</label>' +
       '<span class="ca-consent-note">' + esc(note) + '</span>' +
-      '</div>';
+      '<span class="ca-consent-note">' + esc(ttlNote) + '</span>' +
+      consentTallyBtn() + '</div>' + consentLedgerPanel();
+  }
+
+  /** 「本次打开页面以来已授权 N 张 · 留痕 M 条」：待发送条与空态共用同一份，别长成两个样子 */
+  function consentTallyBtn() {
+    var L = ledger();
+    /* 不是装饰：逐张授权最怕的是坐席勾到手软、
+       最后一张和被第一张勾的图早已不是同一张。这张累计必须摆在勾选项旁边。 */
+    return '<button class="cl-toggle" type="button" data-ledger="1" aria-expanded="' +
+      (state.consentOpen ? 'true' : 'false') + '">' +
+      '本次打开页面以来已授权 <b class="num">' + (L ? L.grantedAssets() : 0) + '</b> 张 · 留痕 ' +
+      (L ? L.entries().length : 0) + ' 条</button>';
+  }
+
+  /** 留痕明细（只在点开时存在）；没有待发送的图时也要能展开 —— 见 renderComposerAttach 的空态 */
+  function consentLedgerPanel() {
+    if (!state.consentOpen) return '';
+    var L = ledger();
+    return '<div class="ca-consent">' +
+      '<div class="cl-panel"><div class="cl-head">照片授权留痕（本次打开页面以来 · 跨顾客是同一份 · 只在内存 · 刷新即清）</div>' +
+      consentLedgerRows() +
+      '<div class="cl-foot">' + esc(L ? L.text() : '隐私模块未加载') + '</div></div></div>';
   }
 
   /**
@@ -3660,12 +3847,17 @@
     if (!on) {
       img.observation = img.baseObservation || img.observation;
       img.viaVlm = false;
+      ledgerRecord(img, 'revoke', state.vlm.model || null);
       renderComposerAttach();
       toast('已撤回本张授权 · 结论退回本机像素统计', 'ok');
       return;
     }
     toast('已授权这一张 · 正在交给视觉模型…', 'ok');
     vlmEnhance(img).then(function () {
+      /* 留痕记在**真的发出过之后**：勾选框被点开但通道没走（未配置 / 注册失败）时，
+         记「授权外发」就是凭空多写一条没发生过的事 */
+      var went = !!img.viaVlm || !!(img.observation && img.observation._vlmUnparsed);
+      ledgerRecord(img, 'grant', went ? (state.vlm.model || 'vlm') : '点了勾但没有发出（通道不可用）');
       renderComposerAttach();
       var o = img.observation || {};
       if (o._vlmError) toast('视觉模型没答上，已退回本机结论：' + o._vlmError, 'warn');
@@ -3679,12 +3871,27 @@
     var el = $('composerAttach');
     if (!el) return;
     var img = state.pendingImage;
-    if (!img || !img.observation) { el.hidden = true; el.innerHTML = ''; return; }
+    if (!img || !img.observation) {
+      /* 没有待发送的图 ≠ 这条通道没做事。刚才那张图授权过、发过、被丢弃过，
+         这些留痕必须还能翻出来核对；把整条都 hidden 掉就等于「证据随图一起消失」。 */
+      var L0 = ledger();
+      if (L0 && L0.entries().length) {
+        el.hidden = false;
+        el.className = 'composer-attach cl-idle';
+        el.innerHTML = '<div class="ca-body">' +
+          '<div class="ca-head"><b>照片授权留痕</b><span class="spacer"></span></div>' +
+          '<div class="ca-sum">没有待发送的图片 · 这次打开页面以来的动作都记在下面这条台账里</div>' +
+          '<div class="ca-consent">' + consentTallyBtn() + '</div>' +
+          consentLedgerPanel() + '</div>';
+        return;
+      }
+      el.hidden = true; el.innerHTML = ''; return;
+    }
     var o = img.observation;
     el.hidden = false;
     el.className = 'composer-attach lv-' + o.level;
     el.innerHTML =
-      '<img class="ca-thumb" src="' + esc(img.dataUrl) + '" alt="待发送的图片">' +
+      '<img class="ca-thumb" src="' + esc(img.thumb || img.dataUrl) + '" alt="待发送的图片">' +
       '<div class="ca-body">' +
         '<div class="ca-head"><b>视觉观察</b>' +
           '<span class="ca-kind">' + esc(visionKindLabel(o)) + '</span>' +
@@ -3717,7 +3924,7 @@
     if (!VIS || !VIS.available()) { toast('视觉通道未加载', 'danger'); return; }
     VIS.analyzeSynth(kind).then(function (asset) {
       /* 新对象 = 没有 consent。示例图也是图，不会因为「反正是合成的」就默认外发 */
-      state.pendingImage = asset;
+      state.pendingImage = stampAsset(asset);
       return vlmEnhance(asset);
     }).then(function (asset) {
       state.pendingImage = asset;
@@ -4910,6 +5117,8 @@
     state.ctxOpen = false;
     /* 会话被整体重置 = 新会话开始，调用配额同步归零 */
     if (window.LLMClient && window.LLMClient.resetCalls) window.LLMClient.resetCalls();
+    /* 重放剧本会清空对话，那张还没发出去的照片更不能留在条上等下一次发送 */
+    clearPendingImage('会话被重置（重放剧本）· 待发送的图片已移除');
     var c = contactAt(i);
     /* 重置该会话，但不影响其他会话已积累的消息 */
     c.session = newSession();
@@ -5151,7 +5360,7 @@
     /* 图片通道只在「模拟顾客」下可用 —— 坐席自己发图没有业务含义 */
     var tools = $('composerTools');
     if (tools) tools.hidden = mode !== 'customer';
-    if (mode !== 'customer' && state.pendingImage) state.pendingImage = null;
+    if (mode !== 'customer') clearPendingImage('切回坐席回复模式 · 待发送的图片已移除');
     renderComposerAttach();
     renderComposerGuard();
   }
@@ -5544,7 +5753,7 @@
       if (!VIS || !VIS.available()) { toast('视觉通道未加载，无法分析图片', 'danger'); return; }
       toast('正在本机分析图片…', 'ok');
       VIS.analyzeFile(f).then(function (asset) {
-        state.pendingImage = asset;
+        state.pendingImage = stampAsset(asset);
         return vlmEnhance(asset);
       }).then(function (asset) {
         state.pendingImage = asset;
@@ -5561,7 +5770,13 @@
     });
     $('composerAttach').addEventListener('click', function (e) {
       if (e.target.closest && e.target.closest('[data-detach]')) {
-        state.pendingImage = null;
+        /* 走同一个 clearPendingImage：手工移除和到点清扫必须留下同一种痕迹（幂等 + 重画），
+           就地置空 dataUrl 的话，界面上那份 base64 会一直挂着。 */
+        clearPendingImage('坐席手动移除了待发送的图片');
+        return;
+      }
+      if (e.target.closest && e.target.closest('[data-ledger]')) {
+        state.consentOpen = !state.consentOpen;
         renderComposerAttach();
       }
     });
@@ -5812,7 +6027,19 @@
         messages: BUS.history(),
         risks: state.liveRisks,
         stats: BUS.report().stats,
-        extraNotes: ['风险事件 ' + state.liveRisks.length + ' 条；消息日志含全部来源（剧本 / 手动 / 外部接入）。'],
+        consentLedger: state.consentLedger,   // 没有图片动作时是 null，导出里如实写「未含台账」
+        extraNotes: ['风险事件 ' + state.liveRisks.length + ' 条；消息日志含全部来源（剧本 / 手动 / 外部接入）。',
+          '照片授权台账：' + (state.consentLedger ? state.consentLedger.text() : '本会话无图片动作'),
+          /* 落盘失败必须有声音：配额炸了之后审计只是内存态，界面上不能装作一切正常 */
+          (BUS.report().stats.persistErrors || 0)
+            ? '⚠ 审计落盘失败 ' + BUS.report().stats.persistErrors + ' 次，最近这些消息只在内存里。'
+            : '审计落盘正常（消息日志不含图片像素，见 bus.js forDisk）。',
+          /* 旧版本把原图整份写进过本机磁盘。清掉了要写在包里，
+             否则「我们从不落图片像素」这句对老用户的历史数据就是假的。 */
+          (BUS.report().stats.legacyPurged || 0)
+            ? '本机磁盘上原有 ' + BUS.report().stats.legacyPurged +
+              ' 条旧日志带图片像素，本次开机已按同一规则清除（只清像素，序号与结论保留）。' : '',
+        ],
       });
       var name = P.download(bundle);
       toast(name ? '审计日志已导出（已脱敏）：' + name : '当前环境不支持文件下载', 'ok');
@@ -6058,6 +6285,8 @@
 
     /* 响应时限走秒：只更新时限文本，不动表格结构（避免打断正在输入的结论） */
     setInterval(tickSla, 1000);
+    /* 照片保留期清扫：待发送的图不会自己过期，到点必须有人摘掉（纯时间比较，不动 DOM 就返回） */
+    setInterval(sweepRetention, 5000);
 
     /* 让「剧本推进」与「外部接入」共用同一个入口：都经 MessageBus 回流、
        进同一套队列（同会话 FIFO、跨会话并行），任何来源都不会插别的会话的队 */

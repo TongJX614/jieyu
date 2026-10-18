@@ -3000,6 +3000,32 @@ html[data-density="loose"] .std-row { padding: 9px 0; }
 .ca-consent input:disabled { cursor: not-allowed; }
 .ca-consent b { font-weight: 500; color: var(--tx-1); }
 .ca-consent-note { color: var(--tx-3); }
+/* 照片授权留痕：累计计数是一颗按钮（点开是台账浮层），正文一律用 --tx-1 / --tx-2，
+   对比度与相邻的 .ca-consent 同族，避免出现第三种灰。 */
+.cl-toggle {
+  font: inherit; font-size: 11px; color: var(--tx-1); background: var(--bg-2);
+  border: 1px solid var(--line-strong); border-radius: var(--r-2); padding: 2px 8px;
+  min-height: 22px; cursor: pointer; flex: 0 0 auto;
+}
+.cl-toggle b { color: var(--tx-1); font-weight: 600; }
+.cl-panel { flex: 1 1 100%; margin-top: 6px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-2); padding: 6px 8px; }
+.cl-head, .cl-foot { font-size: 11px; color: var(--tx-2); }
+.cl-head { font-weight: 600; padding-bottom: 4px; border-bottom: 1px dashed var(--line); }
+.cl-foot { padding-top: 4px; color: var(--tx-3); }
+.cl-empty { font-size: 11px; color: var(--tx-2); padding: 4px 0; }
+.cl-row { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: 11px; color: var(--tx-1); padding: 3px 0; border-bottom: 1px solid var(--line); }
+.cl-row:last-child { border-bottom: 0; }
+.cl-t { color: var(--tx-2); font-variant-numeric: tabular-nums; }
+.cl-a { font-weight: 600; }
+.cl-a.a-grant { color: var(--ok-solid); }
+.cl-a.a-revoke, .cl-a.a-expire { color: var(--warn-solid); }
+.cl-f { color: var(--tx-2); font-family: var(--font-mono); }
+.cl-v, .cl-n { color: var(--tx-3); }
+/* 原图丢弃后气泡上的两句话：一句写给活着的那张（缩略图），一句写给已经没了的那张 */
+.mi-dropped { display: inline-block; margin-top: 3px; font-size: 10px; color: var(--tx-2); border: 1px dashed var(--line-strong); border-radius: var(--r-2); padding: 1px 5px; }
+.msg-img.no-img { display: block; }
+.mi-gone { display: inline-block; font-size: 11px; color: var(--tx-2); border: 1px dashed var(--line-strong); border-radius: var(--r-2); padding: 6px 8px; }
+.up-img.cl-gone { display: inline-flex; align-items: center; justify-content: center; background: var(--bg-2); font-size: 14px; }
 /* 结论来源标注（模型看图 / 本机看图）——与风险等级用不同色，别抢注意力 */
 .mi-tag.src.vlm { color: var(--accent); border-color: var(--line-strong); }
 .mi-tag.src.local { border-style: dashed; }

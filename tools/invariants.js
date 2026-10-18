@@ -38,6 +38,12 @@ const abs = (r) => path.join(ROOT, r);
 const read = (r) => fs.readFileSync(abs(r), 'utf8');
 const exists = (r) => fs.existsSync(abs(r));
 
+/* 剥掉注释再看代码 —— 用于「这个数字只许出现在一处」这类检查：
+   注释里提到一个数字是解释，代码里再写一份才是第二处定义。 */
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
 function walk(dir, out) {
   const list = out || [];
   for (const name of fs.readdirSync(abs(dir))) {
@@ -661,6 +667,88 @@ function loadIsolated(files) {
 }
 
 const RUNTIME_FILES = scriptList().filter((f) => f !== 'assets/app.js' && f !== 'eval/kit.js');
+
+check('ST23', '静态结构', '照片生命周期：像素不落盘 · 台账只在内存 · 阈值只有一处', () => {
+  /* 这一条是批次 E 的护栏，钉的是三件「改回去不会报错、只是把顾客的原图留下来」的事：
+       ① 落盘瘦身只在 bus 内部做一次。谁在别处再拼一份 log 往 localStorage 写，
+          顾客照片的 base64 就回到磁盘上了 —— 刷新还在、清不掉，而且界面毫无异常。
+       ② 授权台账必须留在内存。写进 localStorage 等于让「上次授权过这张图」活过刷新，
+          而那正是逐张授权要排除的东西。
+       ③ 保留期与缩略图边长各只许有一个定义处。界面上那两句
+          （「超过 3 分钟自动丢弃」「只是 96px 缩略图」）是承诺，抄一份数字就等于承诺可以各改各的。 */
+  const bad = [];
+  const BUS = read('assets/bus.js');
+  const PRIV = stripComments(read('assets/privacy.js'));
+  const VISION = read('assets/vision.js');
+
+  /* ① 落盘：只有 forDisk 之后那一份能进 localStorage，且 forDisk 不许带像素 */
+  if (!/function forDisk\b/.test(BUS)) bad.push('bus.js 没有 forDisk（落盘前那一步瘦身）');
+  if (!/\.map\(forDisk\)/.test(BUS)) bad.push('persist() 没经过 forDisk —— 原图会整份写进 localStorage');
+  const fd = (/function forDisk\b[\s\S]*?\n  }/.exec(BUS) || [''])[0];
+  if (fd && /dataUrl\s*:/.test(fd)) bad.push('forDisk 的产物里出现了 dataUrl —— 像素又要落盘了');
+  if (fd && !/pixels:\s*false/.test(fd)) bad.push('forDisk 没写 pixels:false —— 刷新后界面分不清「没有图」和「图被清理了」');
+  if (!/stats\.persistErrors\+\+/.test(BUS)) bad.push('写盘失败没有计数（隐私模式 / 超配额会静默吞掉，「审计在落盘」就成了愿望）');
+  /* 旧版本写过像素进磁盘。只洗新的一条不算修完：开机恢复时必须照同一套规则回写一遍 */
+  const rs = (/function restore\b[\s\S]*?\n  }/.exec(BUS) || [''])[0];
+  if (!rs || !/forDisk\(/.test(rs)) bad.push('restore() 没走 forDisk —— 磁盘上的历史原图没人清');
+  if (!/stats\.legacyPurged\s*=\s*purged/.test(rs)) bad.push('清掉的历史像素条目没有计数（静默改写用户磁盘上的东西）');
+  if (!/persist\(\);/.test(rs)) bad.push('清理之后没有当场回写（等下一条消息才覆盖的话，用户什么都不做时残留一直在）');
+  /* 全项目只许 bus 写这张审计日志；别处再写一份就绕过了瘦身。
+     bus 自己写的是 setItem(LOG_KEY,…) —— 所以认「声明了这个键的文件」，
+     再要求它是唯一调用 setItem 写这个键的文件。 */
+  const keyOwners = ASSETS_JS.filter((f) => /beauty-cs-msglog/.test(stripComments(read(f))));
+  if (keyOwners.join(',') !== 'assets/bus.js') {
+    bad.push('beauty-cs-msglog 这个键不止 bus.js 在用：' + (keyOwners.join(',') || '（没有）'));
+  }
+  const msglogWrites = ASSETS_JS.filter((f) => /setItem\(\s*(LOG_KEY|['"]beauty-cs-msglog)/.test(stripComments(read(f))));
+  if (msglogWrites.join(',') !== 'assets/bus.js') {
+    bad.push('直接往审计日志写盘的文件不止 bus.js（那条路径不经过 forDisk，像素会回潮）：' + (msglogWrites.join(',') || '（没有）'));
+  }
+
+  /* ② 台账只在内存 */
+  if (/localStorage/.test(PRIV)) bad.push('privacy.js 出现了 localStorage —— 授权台账活过刷新就是错的');
+  if (!/consentLedger/.test(PRIV) || !/MAX_ENTRIES\s*:/.test(PRIV)) bad.push('privacy.js 的 CONSENT 台账口径缺失');
+
+  /* ③ 阈值的唯一定义处 */
+  const ttlDefs = ASSETS_JS.filter((f) => /RETENTION_MS\s*[:=]\s*[\d*]/.test(stripComments(read(f))));
+  if (ttlDefs.join(',') !== 'assets/privacy.js') bad.push('保留期数字的定义处不唯一：' + (ttlDefs.join(',') || '（没有）'));
+  const edgeDefs = ASSETS_JS.filter((f) => /THUMB_EDGE\s*[:=]\s*\d/.test(stripComments(read(f))));
+  if (edgeDefs.join(',') !== 'assets/vision.js') bad.push('缩略图边长的定义处不唯一：' + (edgeDefs.join(',') || '（没有）'));
+
+  /* ④ 装配：丢弃、留痕、清扫三件事必须真的被调用。
+     一律在**剥掉注释**的源码上查 —— 把一句调用注释掉、或者在注释里写一遍这个函数名，
+     都不该让这条闸门变绿（负向探针实测：原来数的是原始文本，注释掉的调用照样计数）。 */
+  const APPC = stripComments(APP);
+  if (!/if \(job\.image\) dropOriginal\(/.test(APPC)) bad.push('分析完成的路径上没有 dropOriginal —— 原图会一直躺在内存里');
+  const dropCalls = (APPC.match(/dropOriginal\(job\.image/g) || []).length;
+  if (dropCalls < 2) {
+    bad.push('成功与失败两条路径都要丢原图（只丢一边等于「出错了就继续留着顾客的照片」），实为 ' + dropCalls + ' 处');
+  }
+  if (!/setInterval\(sweepRetention/.test(APPC)) bad.push('保留期清扫定时器没装 —— 「超过保留期自动丢弃」只是文案');
+  if (!/ledgerRecord\(img, 'send'/.test(APPC)) bad.push('随消息发出没有记进台账');
+  if (!/dropOriginal\(img, 'detach'/.test(APPC)) bad.push('移除待发送图片必须走 dropOriginal（记台账 + 重画），自己清 dataUrl 会留下界面上的原图');
+  /* 待发送条是**全局**的：任何「把引用一置空」的写法都不会报错，但台账里查不到这一张的去向，
+     而切会话那一处更严重 —— 上一位顾客的原图会跟着进下一位顾客的发送键。 */
+  if (!/function clearPendingImage\b/.test(APPC)) bad.push('没有 clearPendingImage：待发送的图片只能靠就地置空清掉');
+  const cpCalls = (APPC.match(/clearPendingImage\('/g) || []).length;
+  if (cpCalls < 4) bad.push('手工移除 / 切回坐席模式 / 切会话 / 重放剧本四条路径都要走 clearPendingImage，实为 ' + cpCalls + ' 处');
+  if (/&& state\.pendingImage = null/.test(APPC)) bad.push('出现「就地置空 pendingImage」的老写法：那条路径不会留痕');
+  if (!/ledgerRecord\(image, action \|\| 'drop'/.test(APPC)) bad.push('dropOriginal 没有落台账（丢弃这件事本身也要留痕）');
+  const repaints = (APPC.match(/repaintDroppedImage/g) || []).length;
+  if (repaints < 2) bad.push('丢弃原图后没有重画 —— renderChat 是增量的，气泡里的 base64 会一直留在 DOM 上（只数到 ' + repaints + ' 处：定义有、调用没有）');
+  if (!/cl-idle/.test(APPC)) bad.push('待发送条清空后没有留痕空态 —— 图一走台账就一起消失，事后无从核对「刚才到底发出去了哪几张」');
+  if (/setItem\([^)]*(consent|ledger)/i.test(APPC)) bad.push('app.js 把授权台账写进了 localStorage');
+
+  /* ⑤ 测试必须真的在看这几件事（否则这条不变量只是此刻的代码形状） */
+  if (!/data:image/.test(read('tests/bus.test.js'))) bad.push('bus 单测没有对着原始存储字符串证过「不含像素」');
+  if (!/dataUrl/.test(read('tests/privacy.test.js'))) bad.push('privacy 单测没有证过「像素进不了台账」');
+  if (!/name: 'photo-retention'/.test(read('tests/browser-check.js'))) {
+    bad.push('浏览器检查没有 photo-retention（装配层断了，界面上什么都不会报错）');
+  }
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: '落盘必经 forDisk 且无像素 · 写盘失败有计数 · 台账不落盘 · 保留期/边长各一处定义 · 丢弃与清扫已装配 · 三侧测试都在看' };
+});
 
 check('RT01', '运行时契约', '按 index.html 顺序加载后声明的全局都在', () => {
   const { win } = loadIsolated(RUNTIME_FILES);

@@ -28,6 +28,7 @@
   var RED_MID = 0.14;       // ≥ 14% → 轻度泛红
   var RED_PIXEL = 0.38;     // 单像素判为「偏红」的归一化红度阈值
   var MAX_EDGE = 180;       // 缩到长边 180px 再统计：够用且快
+  var THUMB_EDGE = 96;      // 丢原图后留给界面的缩略图长边 —— 这个数只在这里定义一次（privacy / app 都读它）
 
   var ANALYZERS = {};       // 视觉分析器注册表（真 VLM 的插槽）
 
@@ -331,8 +332,32 @@
     var url = synth(kind);
     return loadImage(url).then(function (img) {
       var st = statsFromImage(img);
-      return { dataUrl: url, name: 'synth-' + kind + '.png', size: 0, synthetic: true, stats: st, observation: observe(st) };
+      return { dataUrl: url, name: 'synth-' + kind + '.png', size: 0, synthetic: true, stats: st,
+        observation: observe(st), thumb: makeThumb(img) };
     });
+  }
+
+  /**
+   * 缩略图（浏览器）：长边收到 edge px 的 JPEG，**只给界面显示用**。
+   * 它是像素，所以和原图同一条纪律：只在内存、不落盘（见 bus.js 的 forDisk）。
+   * 存在的意义是让「丢掉原图」这件事在界面上不表现为「图不见了」——
+   * 坐席仍能认出那是哪一张，而交过模型的那份高分辨率字节不再驻留。
+   */
+  function makeThumb(img, edge) {
+    if (!hasDom() || !img) return null;
+    var maxEdge = edge || THUMB_EDGE;
+    var w = img.naturalWidth || img.width || 0;
+    var h = img.naturalHeight || img.height || 0;
+    if (!w || !h) return null;
+    var s = Math.min(1, maxEdge / Math.max(w, h));
+    var cw = Math.max(1, Math.round(w * s)), ch = Math.max(1, Math.round(h * s));
+    var cv = document.createElement('canvas');
+    cv.width = cw; cv.height = ch;
+    var cx = cv.getContext('2d');
+    cx.fillStyle = '#ffffff';        // JPEG 没有透明通道，先铺白底
+    cx.fillRect(0, 0, cw, ch);
+    cx.drawImage(img, 0, 0, cw, ch);
+    return cv.toDataURL('image/jpeg', 0.6);
   }
 
   /* ------------------------------------------------------- 真实 VLM 插槽 */
@@ -521,8 +546,9 @@
   }
 
   return {
-    RED_HIGH: RED_HIGH, RED_MID: RED_MID, RED_PIXEL: RED_PIXEL, MAX_EDGE: MAX_EDGE,
+    RED_HIGH: RED_HIGH, RED_MID: RED_MID, RED_PIXEL: RED_PIXEL, MAX_EDGE: MAX_EDGE, THUMB_EDGE: THUMB_EDGE,
     statsFromPixels: statsFromPixels,
+    makeThumb: makeThumb,
     observe: observe,
     skinCondition: skinCondition,
     heuristicKind: heuristicKind,

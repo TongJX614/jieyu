@@ -180,6 +180,209 @@ const CHECKS = [
     })()`,
   },
   {
+    /* 「照片只在内存里活 3 分钟」这条承诺，单测证不了装配：
+       · bus 的 forDisk() 映射没接上 → 顾客原图照样整份进 localStorage（刷新还在，清不掉）；
+       · dropOriginal 没被 ack 调用 → 分析结束后原图长驻内存，界面上却写着「已丢弃」；
+       · 保留期定时器没装 → 「勾完去干别的，图一直躺着」成为默认路径。
+       所以在这个检查里走一遍真实路径：放图 → 看留痕 → 发送 → 看原图丢弃 → 等自动清扫。
+       全程只读 DOM 与 localStorage，不碰 app 内部变量。 */
+    name: 'photo-retention',
+    url: '/?s=1&nolive=1',
+    wait: 3000,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      const txt = (el) => (el ? String(el.textContent || '') : '').replace(/\\s+/g, ' ').trim();
+      const P = window.Privacy, BUS = window.MessageBus, V = window.Vision;
+      const out = {};
+
+      want(P && P.CONSENT && typeof P.CONSENT.RETENTION_MS === 'number', 'privacy.js 没导出 CONSENT.RETENTION_MS');
+      want(V && typeof V.makeThumb === 'function', 'vision.js 没导出 makeThumb');
+      want(typeof BUS.LOG_KEY === 'string', 'MessageBus 没把 LOG_KEY 露出来（探针无法核对真实落盘内容）');
+      if (bad.length) throw new Error('隐私模块装载断言失败：' + bad.join(' | '));
+
+      /* ---- ① 放一张合成图：预览条用缩略图，留痕记一条 attach ---- */
+      document.getElementById('btnComposerMode').click();
+      await sleep(300);
+      document.getElementById('btnSynthSevere').click();
+      await sleep(1300);
+      const thumbEl = document.querySelector('#composerAttach .ca-thumb');
+      const thumbSrc = thumbEl ? String(thumbEl.getAttribute('src') || '') : '';
+      out.thumbHead = thumbSrc.slice(0, 22);
+      out.thumbLen = thumbSrc.length;
+      want(!!thumbEl, '待发送预览条里没有出现图片缩略图');
+      want(/^data:image\\/jpeg/.test(thumbSrc), '预览条必须显示压过的 jpeg 缩略图，实为 ' + out.thumbHead);
+      want(thumbSrc.length < 40000, '缩略图被压得过小才算成功（长边 ' + V.THUMB_EDGE + 'px），实际 ' + thumbSrc.length + ' 字节');
+
+      const notes = Array.prototype.map.call(
+        document.querySelectorAll('#composerAttach .ca-consent-note'), (n) => txt(n)).join(' ｜ ');
+      out.ttlNote = notes;
+      want(notes.indexOf(Math.round(P.CONSENT.RETENTION_MS / 60000) + ' 分钟') !== -1,
+        '界面上的保留期必须跟着 privacy.js 那个数走（' + P.CONSENT.RETENTION_MS + 'ms），实为「' + notes + '」');
+
+      const tally0 = document.querySelector('#composerAttach .cl-toggle');
+      out.tally0 = txt(tally0);
+      want(/本次打开页面以来已授权 0 张 · 留痕 1 条/.test(out.tally0),
+        '放图后计数应是「已授权 0 张 · 留痕 1 条」（选图不等于同意外发），实为「' + out.tally0 + '」');
+      tally0.click();
+      await sleep(200);
+      const rows0 = Array.prototype.map.call(document.querySelectorAll('#composerAttach .cl-row'), (r) => txt(r));
+      out.rows0 = rows0;
+      want(rows0.length === 1, '留痕浮层应列出这一张的一条动作，实为 ' + rows0.length + ' 条');
+      want(/放入待发送/.test(rows0[0] || ''), '第一条动作要写成「放入待发送」，实为「' + rows0[0] + '」');
+
+      /* ---- ② 发送前的落盘内容：图片像素一个字节都不许有 ---- */
+      const rawBefore = localStorage.getItem(BUS.LOG_KEY) || '';
+      want(rawBefore.indexOf('data:image') === -1, '发送前审计日志里就出现了图片像素');
+
+      /* ---- ③ 发送 → 分析结束 → 原图从内存丢弃，界面写在脸上 ---- */
+      document.getElementById('composerInput').value = '我用了两天脸上开始刺痛发红';
+      document.getElementById('btnSend').click();
+      await sleep(9000);
+
+      out.chatHasPng = document.getElementById('chatList').innerHTML.indexOf('data:image/png') !== -1;
+      want(out.chatHasPng === false, '聊天区里还残留原图（data:image/png）—— 分析结束后没丢弃，或丢弃后气泡没换成缩略图');
+      const bubbles = document.querySelectorAll('#chatList .msg-img');
+      const lastBubble = bubbles[bubbles.length - 1];
+      want(!!lastBubble, '聊天里没有带图的气泡');
+      out.droppedTag = txt(lastBubble ? lastBubble.querySelector('.mi-dropped') : null);
+      want(/原图已丢弃/.test(out.droppedTag), '气泡上必须写明「原图已丢弃」，实为「' + out.droppedTag + '」');
+
+      const mine = BUS.history().filter((m) => m.image).pop();
+      want(!!mine, '总线历史里找不到带图的那条消息');
+      if (mine) {
+        out.memDataUrl = mine.image.dataUrl === null ? 'null' : typeof mine.image.dataUrl;
+        out.memThumb = /^data:image\\/jpeg/.test(String(mine.image.thumb || ''));
+        out.memDropped = mine.image.originalDropped === true;
+        out.memAssetId = String(mine.image.assetId || '');
+        out.memFp = /^[0-9a-f]{8}$/.test(String(mine.image.fp || ''));
+        want(out.memDataUrl === 'null', '内存里这条消息的 dataUrl 必须置空，实为 ' + out.memDataUrl);
+        want(out.memThumb, '丢原图之后内存里要还留着缩略图（否则界面只能显示「图不见了」）');
+        want(out.memDropped, 'originalDropped 必须为真，界面上的「原图已丢弃」才是真话');
+        want(/^A\\d+-[0-9a-f]{8}$/.test(out.memAssetId),
+          '每张图要有可对着念的 assetId（A序号-指纹），实为「' + out.memAssetId + '」');
+        want(out.memFp, '指纹必须是 8 位十六进制，留痕才对得上账，实为「' + mine.image.fp + '」');
+      }
+
+      const raw = localStorage.getItem(BUS.LOG_KEY) || '';
+      out.rawHasPixels = raw.indexOf('data:image') !== -1;
+      out.rawHasThumbKey = raw.indexOf('"thumb"') !== -1;
+      out.rawHasPixelsKey = raw.indexOf('"pixels"') !== -1;
+      want(out.rawHasPixels === false, '落盘的审计日志里出现了图片像素 —— 顾客原图被写进了 localStorage');
+      want(out.rawHasThumbKey === false, '落盘那份也不许带缩略图');
+      want(out.rawHasPixelsKey, '落盘条目要显式写 pixels:false，让读日志的人知道这里本来就没有像素');
+      out.persistErrors = BUS.report().stats.persistErrors;
+      want(out.persistErrors === 0, '瘦身之后仍然写不下（persistErrors=' + out.persistErrors + '）：审计静默降级了');
+
+      /* ---- ④ 留痕跟着走完：send / drop 两条也必须落在台账里 ----
+         发送后待发送条被清空，台账本身还在（会话级）—— 再放一张图，计数与明细就会重新出现 */
+      document.getElementById('btnSynthMild').click();
+      await sleep(1300);
+      const tally1 = document.querySelector('#composerAttach .cl-toggle');
+      out.tally1 = txt(tally1);
+      want(/留痕 4 条/.test(out.tally1),
+        '一张图的完整生命周期应是 attach/send/drop/attach 四条，实为「' + out.tally1 + '」');
+      if (!document.querySelector('#composerAttach .cl-panel')) tally1.click();
+      await sleep(200);
+      const rows1 = Array.prototype.map.call(document.querySelectorAll('#composerAttach .cl-row'), (r) => txt(r));
+      out.rows1 = rows1;
+      want(rows1.some((r) => /随消息发出/.test(r)), '台账里没有「随消息发出」这一条');
+      want(rows1.some((r) => /原图已丢弃/.test(r)), '台账里没有「原图已丢弃」这一条');
+
+      /* ---- ⑤ 保留期到点自动摘掉（临时把 TTL 压到 400ms，用完必须复原） ---- */
+      const origTtl = P.CONSENT.RETENTION_MS;
+      P.CONSENT.RETENTION_MS = 400;
+      out.sweptBefore = !!document.querySelector('#composerAttach .ca-thumb');
+      await sleep(6200);                       // 清扫定时器 5s 一跳
+      P.CONSENT.RETENTION_MS = origTtl;
+      out.swept = !document.querySelector('#composerAttach .ca-thumb');
+      want(out.swept, '待发送的图超过保留期后必须被自动摘掉（原图不留存）');
+      const rows2 = Array.prototype.map.call(document.querySelectorAll('#composerAttach .cl-row'), (r) => txt(r));
+      out.expireRow = rows2.some((r) => /超过保留期/.test(r));
+      want(out.expireRow, '自动清扫必须留下一条「超过保留期」的台账');
+
+      /* ---- ⑥ 四条「图不见了」的路径，每条都要说自己是怎么不见的 ----
+         预览条挂在全局的输入框上，不属于任何一个会话。以前切会话只是把引用置空：
+         界面上缩略图还挂着、台账里查不到这一张的去向，而下一位顾客一点发送，
+         进去的就是**别人的照片**。
+         为什么四条腿要各自断言一句独有的注释：openContact 里清一次之后，
+         它紧接着调用的 loadScenario 再清就是空操作 —— 只断言「图不见了」的话，
+         删掉任何一条都照样绿（这条是负向验证当场照出来的）。 */
+      const detachRows = () => Array.prototype.map.call(
+        document.querySelectorAll('#composerAttach .cl-row'), (r) => txt(r)).filter((r) => /移出输入框/.test(r));
+      const newest = (before) => {
+        const now = detachRows();
+        return now.length > before ? now[now.length - 1] : '';
+      };
+      const again = async () => {
+        document.getElementById('btnSynthMild').click();
+        await sleep(1400);
+        return !!document.querySelector('#composerAttach .ca-thumb');
+      };
+
+      /* ⑥a 坐席点「移除」 */
+      out.swAttachA = await again();
+      want(out.swAttachA, '⑥a 前提不成立：待发送条里没有缩略图');
+      let n0 = detachRows().length;
+      const detachBtn = document.querySelector('#composerAttach [data-detach]');
+      want(!!detachBtn, '⑥a 前提不成立：预览条上没有「移除」按钮');
+      if (detachBtn) detachBtn.click();
+      await sleep(400);
+      out.swRowA = newest(n0);
+      want(!document.querySelector('#composerAttach .ca-thumb'), '⑥a 点了移除，缩略图却还在');
+      want(/坐席手动移除/.test(out.swRowA), '⑥a 台账要写明是坐席自己移除的，实为「' + out.swRowA + '」');
+
+      /* ⑥b 切到另一位顾客（那台机器上挂着的是上一位的照片） */
+      out.swAttachB = await again();
+      want(out.swAttachB, '⑥b 前提不成立：没能再放上一张待发送的图');
+      const onNow = document.querySelector('#contactsList .contact.on');
+      const others = Array.prototype.slice.call(document.querySelectorAll('#contactsList .contact'))
+        .filter((b) => b !== onNow);
+      want(others.length > 0, '⑥b 前提不成立：联系人列表里没有第二个会话');
+      n0 = detachRows().length;
+      if (others.length) others[0].click();
+      await sleep(1000);
+      out.swRowB = newest(n0);
+      want(!document.querySelector('#composerAttach .ca-thumb'),
+        '切会话后待发送的图片仍挂在输入框上 —— 那是一张别的顾客的照片');
+      want(/切换到另一位顾客/.test(out.swRowB), '⑥b 台账要写明是切会话清的，实为「' + out.swRowB + '」');
+
+      /* ⑥c 重放剧本（会话被整体重置） */
+      out.swAttachC = await again();
+      want(out.swAttachC, '⑥c 前提不成立：没能再放上一张待发送的图');
+      n0 = detachRows().length;
+      document.getElementById('btnReset').click();
+      await sleep(1000);
+      out.swRowC = newest(n0);
+      want(!document.querySelector('#composerAttach .ca-thumb'), '⑥c 会话都重置了，图还挂在输入框上');
+      want(/会话被重置/.test(out.swRowC), '⑥c 台账要写明是重置会话清的，实为「' + out.swRowC + '」');
+
+      /* ⑥d 切回坐席回复模式（图片通道只在「模拟顾客」下可用） */
+      out.swAttachD = await again();
+      want(out.swAttachD, '⑥d 前提不成立：没能再放上一张待发送的图');
+      n0 = detachRows().length;
+      document.getElementById('btnComposerMode').click();
+      await sleep(500);
+      out.swRowD = newest(n0);
+      want(!document.querySelector('#composerAttach .ca-thumb'), '⑥d 已切回坐席模式，图却还留着');
+      want(/切回坐席回复模式/.test(out.swRowD), '⑥d 台账要写明是切模式清的，实为「' + out.swRowD + '」');
+      out.swPng = String(document.getElementById('chatList').innerHTML).indexOf('data:image/png') !== -1;
+      want(out.swPng === false, '这几次来回切换之后，DOM 里仍然挂着 png 像素');
+
+      /* ---- ⑦ 台账绝不许落盘：它是内存态，刷新即清 ---- */
+      const lsKeys = Object.keys(localStorage);
+      out.leakedLedger = lsKeys.filter((k) => /consent|ledger|留痕/i.test(k) ||
+        String(localStorage.getItem(k) || '').indexOf('"action":"attach"') !== -1);
+      want(out.leakedLedger.length === 0, '授权台账被写进了 localStorage：' + JSON.stringify(out.leakedLedger));
+
+      if (bad.length) throw new Error('照片保留期与授权台账断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      out.ok = true;
+      return out;
+    })()`,
+  },
+  {
     name: 'eval-view',
     url: '/?view=eval&nolive=1',
     wait: 3000,

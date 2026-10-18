@@ -6,10 +6,15 @@
 
 'use strict';
 
-const state = { pass: 0, fail: 0, failures: [], current: '(root)' };
+const state = { pass: 0, fail: 0, failures: [], current: '(root)', suites: [] };
 
+/* 每次进入一个套件都登记一次名字。run-all.js 用它核对
+   「源码里声明了几个 suite」与「实际跑到了几个 suite」——
+   断言静默消失（写在顶层 return 之后、或前置异常把后半段带走）时，
+   套件数会少掉，而 FAIL 依然是 0：那才是最难发现的假绿。 */
 function suite(name) {
   state.current = name;
+  state.suites.push(name);
   process.stdout.write('\n■ ' + name + '\n');
 }
 

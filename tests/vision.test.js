@@ -162,6 +162,18 @@ module.exports = function (t) {
     return o;
   });
 
+  t.suite('vision · 缩略图（丢原图之后界面上还剩什么）');
+  /* 必须写在下面那个 return 之前 —— 本文件只有一条返回链，
+     return 之后的同步代码一行都不会执行（断言会静默消失，套件照样绿）。 */
+  {
+    /* Node 里没有 canvas。makeThumb 必须**如实返回 null**，而不是抛错或凭空造一张 ——
+       调用方（app.js）拿 null 就当「只有原图」处理，编不出像素才是诚实的行为。 */
+    t.eq(V.makeThumb(null), null, '没有图像对象 → null');
+    t.eq(V.makeThumb({ naturalWidth: 200, naturalHeight: 100 }), null, '无 DOM：返回 null，不抛、不假造');
+    t.eq(V.THUMB_EDGE, 96, '缩略图长边全项目只在这里定义（app 的「只是 96px 缩略图」那句话读的就是它）');
+    t.eq(typeof V.analyzeFile, 'function', 'analyzeFile 仍在（缩略图挂在它的产物上）');
+  }
+
   /* 两段异步（VLM 完整输出 / VLM 授权闸门）合并进同一个返回的 promise 链，
      避免两个 return 让后一段变成死代码 */
   return (async function () {
