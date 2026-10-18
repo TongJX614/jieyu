@@ -12,9 +12,11 @@ window.LLMClient = (function () {
     model: 'deepseek-chat',
     apiKey: '',
     mode: 'auto', // auto | llm | local
-    timeout: 20000,   // 单次请求上限。原来是 45s：交互场景下「模型没响应」≠「等 45 秒」，
-                      // 队列是串行的，一次卡满 45 秒等于整个工作台停摆。
+    timeout: 20000,   // 单次请求上限。原来是 45s：交互场景下「模型没响应」≠「等 45 秒」——
+                      // 同一会话严格 FIFO，一次卡满 45 秒就是这个顾客后面每句话都停摆；
+                      // 队列的并发额度只有两个，卡住的请求还一直占着一个名额。
     budgetMs: 15000,  // 一轮分析允许花在模型上的总时长（跨 agent 多步 + 自愈重试）
+                      // 按轮算：并行时每一轮各守各的 deadlineAt，互不覆盖
     maxCalls: 100,    // 一个会话内允许的模型调用总次数（含重试），超出即改用本地引擎
   };
 
@@ -181,6 +183,41 @@ window.LLMClient = (function () {
     lines.push('分析要求：必须把上面这段对话作为一个整体来读，' +
       '本轮消息里的指代（"这个""还是不行""那怎么办"）要结合前文还原真实诉求；' +
       '若本轮消息本身没有明确信号，就依据前文的诉求主体给出判断，不要只盯着最后一句。');
+
+    /* 视觉观察块：顾客上传的图片已脱敏、仅描述图像本身，结构化结论直接可见，
+       让模型在话术里能引用「我看到的」（识图 / 皮肤状态 / 妆容推荐）。 */
+    var vo = input.image && input.image.observation;
+    if (vo) {
+      lines.push('');
+      lines.push('【顾客上传的图片 · 视觉观察（已脱敏，仅描述图像本身）】');
+      /* 类型说法与 vision.js 同一份；模型看到的必须是「类型未确认」而不是裸 token unknown，
+         否则它会自己脑补成皮肤照片并接着给医疗建议。 */
+      var VISION = (typeof window !== 'undefined') ? window.Vision : null;
+      var kindTxt = (VISION && VISION.kindLabel) ? VISION.kindLabel(vo) : (vo.kind || '未知');
+      lines.push('- 图像类型：' + kindTxt + '（kind=' + (vo.kind || 'unknown') + '）');
+      if (vo.kind !== 'skin') {
+        lines.push('- 注意：这张图的类型**未被确认为皮肤照片**，禁止据此给出任何皮肤护理 / 停用产品 / 就医建议；' +
+          '只按顾客的文字诉求作答。');
+      }
+      if (vo.object && vo.object.name && vo.object.name !== '未识别') {
+        lines.push('- 识别为：' + vo.object.name + '（置信度 ' + (vo.object.confidence || 0) + '）');
+      }
+      if (vo.condition && vo.condition.findings) {
+        lines.push('- 皮肤状态：' + vo.condition.summary);
+        vo.condition.findings.forEach(function (f) {
+          if (f.severity !== 'none' && f.severity !== 'unknown') {
+            lines.push('    · ' + f.key + '：' + f.severity + '（' + f.value + '）');
+          }
+        });
+      }
+      if (vo.makeup && vo.makeup.style) {
+        lines.push('- 推荐妆容：' + vo.makeup.style +
+          (vo.makeup.palette && vo.makeup.palette.length ? ' · 色系：' + vo.makeup.palette.join('、') : ''));
+      }
+      if (vo.provider === 'offline') {
+        lines.push('- 分析器：离线像素统计（物体 / 妆容识别需启用视觉模型 VLM）');
+      }
+    }
     return lines.join('\n');
   }
 
@@ -300,14 +337,43 @@ window.LLMClient = (function () {
   let deadline = 0;
   const ledger = { calls: 0, timeouts: 0, lastError: '' };
 
-  /** 由组装根（harness/index.js）在每轮分析开始时调用 */
+  /** 全局预算线：由组装根或直调方设置。0 = 不限 */
   function setDeadline(untilMs) { deadline = Number(untilMs) || 0; }
 
   function remainingMs() { return deadline ? Math.max(0, deadline - Date.now()) : Infinity; }
 
+  /* 预算有两种口径，同时存在、各管各的：
+       · deadline（上面那个全局单值）—— 直调 analyze/chat 的老代码、以及「换会话即清零」的硬闸；
+       · deadlineAt（随调用参数传下来的按轮预算）—— 组装根给**每一次 run()** 单独算的绝对截止时刻。
+     为什么必须分出按轮的那个：模型客户端全页面只有一个，deadline 是它身上的**一个格子**。
+     两轮分析一旦在时间上重叠（不同会话并行后这是常态），第二轮就覆盖第一轮，
+     第一轮收尾时再把第二轮刚设好的预算清成 0 —— 「谁在什么时间里还剩多少」就此失真，
+     表现是「明明没配超时，第二句却秒降级到本地引擎」。
+     按轮的预算挂在 job 上、随参数传进来，谁也覆盖不了谁。 */
+
+  /**
+   * 某条预算线还剩多少毫秒。
+   * 传了 untilMs 就与全局值**取更紧的那个**：全局是硬闸，按轮的是本轮该守的分；
+   * 不传时等价于 remainingMs()，老调用方行为完全不变。
+   */
+  function remainingFor(untilMs) {
+    const u = Number(untilMs) || 0;
+    if (!u) return remainingMs();
+    const own = Math.max(0, u - Date.now());
+    const g = remainingMs();
+    return g === Infinity ? own : Math.min(g, own);
+  }
+
   function callStats() {
+    /* cap 从配置里读：界面要显示的是「已用 / 上限」两个能核对的数字，
+       而不是把上限藏在设置抽屉里、只在降级那一瞬 toast 一下 */
+    let cap = DEFAULTS.maxCalls;
+    try { cap = Number(readConfig().maxCalls) || DEFAULTS.maxCalls; } catch (e) { /* 读不到用默认上限 */ }
     return {
       calls: ledger.calls,
+      cap: cap,
+      /* 触顶是一种**常驻状态**（现在跑的是本地引擎，且原因就是配额），不是一次性事件 */
+      atCap: ledger.calls >= cap,
       timeouts: ledger.timeouts,
       remainingMs: remainingMs() === Infinity ? null : Math.round(remainingMs()),
       lastError: ledger.lastError,
@@ -316,7 +382,7 @@ window.LLMClient = (function () {
 
   function resetCalls() { ledger.calls = 0; ledger.timeouts = 0; ledger.lastError = ''; }
 
-  async function postOnce(endpoint, cfg, body, timeoutMs) {
+  async function postOnce(endpoint, cfg, body, timeoutMs, budgetUntil) {
     const cap = (cfg.maxCalls != null ? cfg.maxCalls : DEFAULTS.maxCalls);
     if (ledger.calls >= cap) {
       const e = new Error('模型调用已达本会话上限 ' + cap + ' 次，本条改用本地引擎');
@@ -324,7 +390,7 @@ window.LLMClient = (function () {
       ledger.lastError = e.message;
       throw e;
     }
-    const left = remainingMs();
+    const left = remainingFor(budgetUntil);
     if (left <= 0) {
       const e = new Error('本轮分析的时间预算已用尽（' + Math.round((cfg.budgetMs || DEFAULTS.budgetMs) / 1000) + 's），本条改用本地引擎');
       e.budgetExhausted = true;
@@ -396,13 +462,15 @@ window.LLMClient = (function () {
     const options = opts || {};
     const maxTokens = options.maxTokens || 1024;
     const canRetry = options.retry !== false;
+    /* 本轮预算随参数下来（不是读全局那一格）：并行时每条线路只守自己的分 */
+    const until = options.deadlineAt || 0;
 
     const first = Object.assign({}, baseBody);
     if (maxTokens) first.max_tokens = maxTokens;
 
     let res;
     try {
-      res = await postOnce(endpoint, cfg, first, cfg.timeout);
+      res = await postOnce(endpoint, cfg, first, cfg.timeout, until);
     } catch (e) {
       const rejectedParam =
         e.httpStatus === 400 && /response_format|json_object|max_tokens/i.test(String(e.raw || e.message));
@@ -410,7 +478,7 @@ window.LLMClient = (function () {
         const second = Object.assign({}, first);
         delete second.response_format;
         second.max_tokens = Math.min(8192, maxTokens * 4);
-        res = await postOnce(endpoint, cfg, second, cfg.timeout);
+        res = await postOnce(endpoint, cfg, second, cfg.timeout, until);
       } else {
         throw e;
       }
@@ -421,30 +489,34 @@ window.LLMClient = (function () {
 
     /* 提高上限的这次重试只在预算还够时做：否则宁可如实报「正文为空」，
        也不要为了凑一次完整输出把本轮预算耗光 —— Agent 后面还有别的步要跑 */
-    if (remainingMs() < 4000) {
+    if (remainingFor(until) < 4000) {
       throw new Error(describeEmpty(res) + '（本轮剩余预算不足 4s，不再重试）');
     }
 
     const second = Object.assign({}, first);
     delete second.response_format;
     second.max_tokens = Math.min(8192, Math.max(2048, maxTokens * 8));
-    const retry = await postOnce(endpoint, cfg, second, cfg.timeout);
+    const retry = await postOnce(endpoint, cfg, second, cfg.timeout, until);
     if (isEmptyOutput(retry)) throw new Error(describeEmpty(retry));
     return retry;
   }
 
   /**
    * 分析一条消费者消息
+   * @param {object} input
+   * @param {{deadlineAt?:number}} [opts] deadlineAt = 本轮分析的绝对截止时刻（按轮预算）
    * @returns {Promise<object>} 与 LocalEngine.analyze 同构的结果
    */
-  async function analyze(input) {
+  async function analyze(input, opts) {
     const cfg = readConfig();
     if (cfg.mode === 'local') throw new Error('已切换为本地引擎');
 
+    const o = opts || {};
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: buildUserPrompt(input) },
-    ];    const body = {
+    ];
+    const body = {
       model: cfg.model,
       messages: messages,
       temperature: 0.35,
@@ -455,7 +527,7 @@ window.LLMClient = (function () {
     let lastErr = null;
     for (let i = 0; i < endpoints.length; i++) {
       try {
-        const r = await postChat(endpoints[i], cfg, body, { maxTokens: 2048 });
+        const r = await postChat(endpoints[i], cfg, body, { maxTokens: 2048, deadlineAt: o.deadlineAt });
         return normalize(JSON.parse(stripFence(r.content)), 'llm');
       } catch (e) {
         lastErr = e;
@@ -469,6 +541,7 @@ window.LLMClient = (function () {
    * 通用多轮对话请求 —— 供 Agent 的 ReAct 循环使用。
    * 与 analyze 共用同一条「端点解析 + 自愈重试」链路，只是不再固定 messages 与输出 schema：
    * 调用方自己拼 messages（system 里可以是另一套协议）、自己解释 content。
+   * opts.deadlineAt：本轮（这里是 Agent 的子预算）的绝对截止时刻，见上方两种预算口径。
    */
   async function chat(messages, opts) {
     const cfg = readConfig();
@@ -486,7 +559,7 @@ window.LLMClient = (function () {
     let lastErr = null;
     for (let i = 0; i < endpoints.length; i++) {
       try {
-        const r = await postChat(endpoints[i], cfg, body, { maxTokens: o.maxTokens || 1024 });
+        const r = await postChat(endpoints[i], cfg, body, { maxTokens: o.maxTokens || 1024, deadlineAt: o.deadlineAt });
         return { content: r.content, model: r.model || cfg.model };
       } catch (e) {
         lastErr = e;
@@ -553,9 +626,11 @@ window.LLMClient = (function () {
     buildUserPrompt: buildUserPrompt,
     test: test,
     hasKey: hasKey,
-    /* 调用记账 / 时间预算：由组装根开启与查询，界面用它显示「这一轮花了多久、发了几次请求」 */
+    /* 调用记账 / 时间预算：界面用它显示「这一轮花了多久、发了几次请求」。
+       setDeadline 是全局硬闸，remainingFor(until) 才是「按轮预算」的正解 —— 见上面两种口径的注释 */
     setDeadline: setDeadline,
     remainingMs: remainingMs,
+    remainingFor: remainingFor,
     callStats: callStats,
     resetCalls: resetCalls,
   };

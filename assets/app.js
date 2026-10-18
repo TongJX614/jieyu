@@ -1,7 +1,8 @@
 /* ==========================================================================
    主应用
    · 所有顾客消息统一走 MessageBus.ingest()，不存在第二条旁路
-   · 分析任务进入串行队列，杜绝并发导致的「后到覆盖先到」
+   · 分析任务进入队列：同一会话严格 FIFO（结果要按顺序回写会话状态），
+     不同会话允许并行 —— 一条全局串行队列会让 A 会话的模型延迟变成 B 会话的等待
    · 每个联系人独立维护会话、逐句情绪序列与风险记录，切走再切回不丢
    · 阈值 / 词典 / 处置动作全部来自 policy.js，界面不出现任何魔法数字
    ========================================================================== */
@@ -97,8 +98,22 @@
   };
 
   var contacts = [];     // 联系人（会话）列表
-  var queue = [];        // 分析队列（串行，保证同一会话内严格按到达顺序处理）
-  var draining = false;
+
+  /* 分析任务队列。调度本身在 assets/jobqueue.js（纯逻辑、Node 可测），这里只提供运行它的方法。
+     语义：同一会话严格 FIFO；不同会话允许并行（上限见 maxConcurrent）。
+     串行队列的问题不是「不优雅」，而是**别人的卡顿会变成你的卡顿**：
+     一轮分析最坏等模型十几秒，这段时间里另外 7 个会话一句都不能开始分析。 */
+  if (!window.JobQueue) throw new Error('JobQueue 未加载（请在 app.js 之前引入 assets/jobqueue.js）');
+  var queue = window.JobQueue.create({
+    maxConcurrent: window.JobQueue.DEFAULT_MAX_CONCURRENT,
+    keyOf: function (job) { return (job && job.idx != null) ? job.idx : 'none'; },
+    run: function (job) { return analyzeOne(job); },
+    /* 单条分析异常不得阻断后续，也不得让消息永远停在「已收到、未分析」 */
+    onError: function (job, e) {
+      window.MessageBus.ack(job.mid);
+      if (typeof console !== 'undefined' && console.warn) console.warn('[analyze] 异常：', e);
+    },
+  });
 
   function cur() { return contacts[state.si].session; }
   function curDef() { return contacts[state.si].def; }
@@ -265,37 +280,26 @@
 
     /* 连同「此刻已答复到第几轮」一起冻结：本句到达之后才发出的坐席回复，
        不构成对它的答复，分析收尾时不能拿它当作「已答」的证据。 */
-    enqueue({ idx: idx, mid: msg.id, message: msg.text, ctx: ctx, image: msg.image || null, replySeq: S.replySeq });
+    /* 返回 >0 = 这条还得排队（同会话已有分析在跑）。排队必须当场画出来：
+       联系人列表上没有任何迹象的话，坐席看到的就是「我发了话，系统没反应」。 */
+    if (queue.enqueue({ idx: idx, mid: msg.id, message: msg.text, ctx: ctx, image: msg.image || null, replySeq: S.replySeq })) {
+      renderContacts();
+    }
   }, 'workbench');
 
-  /* ==================== 分析队列（串行） ==================== */
+  /* ==================== 分析队列：同会话 FIFO，跨会话并行 ==================== */
 
-  function enqueue(job) {
-    queue.push(job);
-    drain();
-  }
-
-  async function drain() {
-    if (draining) return;
-    draining = true;
-    while (queue.length) {
-      var job = queue.shift();
-      try {
-        await analyzeOne(job);
-      } catch (e) {
-        /* 单条分析异常不得中断队列，否则后续消息会被饿死 */
-        window.MessageBus.ack(job.mid);
-        if (typeof console !== 'undefined' && console.warn) console.warn('[analyze] 异常：', e);
-      }
-    }
-    draining = false;
-  }
+  /* 入队 → 调度 → 失败记账都在 assets/jobqueue.js；这里不再有 drain 循环。
+     原来那条全局串行队列保证的「同一会话严格按到达顺序处理」仍然成立（桶内 FIFO），
+     去掉的是「别的会话也得排队」这一条 —— 它与本会话的分析结果毫无数据依赖。 */
 
   /* ==================== 分析：整条编排交给 harness 管线 ==================== */
 
   /* 原本散在这里的「订单事实装配 / 接地校验 / 订单兜底 / 出站合规 / 逐句情绪聚合」
-     已全部迁入 assets/harness/stages.js，成为管线上的六个显式阶段：
-       facts → generate(llm→local) → vision → ground → compliance → emotion → context
+     已全部迁入 assets/harness/stages.js，成为管线上的八个显式阶段：
+       facts → generate(llm→local) → riskfloor → vision → ground → compliance → emotion → context
+     其中 riskfloor 是「模型自报结论 vs 词典口径」的对账闸：判级真源只有 policy.js 一份，
+     界面显示的分数必须是过闸之后的，绝不允许是模型随口报的那个。
      app.js 只做两件事：把业务上下文装配成 job，把运行结果落回界面与会话状态。
      因此「换模型通道」不用碰 app.js，「改业务判定」也不会碰模型调用。 */
 
@@ -315,6 +319,7 @@
     var acked = false;
     var settled = false;
     var failMsg = null;
+    var degraded = '';
     function ack() { if (!acked) { acked = true; window.MessageBus.ack(job.mid); } }
 
     try {
@@ -383,7 +388,11 @@
         visionRedness: vImg ? vImg.redness : null,
       });
 
-      state.degraded = run.degraded || '';
+      degraded = run.degraded || '';
+      /* state.degraded 说的是「**当前这个会话**这一轮降级了没有」，顶部状态条据此显示。
+         并发后它不能再被后台会话写：否则坐席会在一个一切正常的会话上看到
+         「大模型不可用，已降级」，而真正降级的是另一个会话。 */
+      if (idx === state.si) state.degraded = degraded;
       recordRisk(idx, result, job.mid);
 
       /* 顾客全景弹窗展开时不自动弹话术气泡，避免两层浮层互相遮挡；
@@ -394,7 +403,8 @@
       settled = true;
       ack();
     } catch (e) {
-      /* 管线抛错：先把它转成一句人话，再交给 finally 复位界面；队列由 drain 继续推进 */
+      /* 管线抛错：先把它转成一句人话，再交给 finally 复位界面；
+         队列侧由 JobQueue 继续推进（这条记为 failed，后面的照常跑） */
       ack();
       failMsg = '本条消息分析失败：' + ((e && e.message) ? e.message : String(e));
       if (typeof console !== 'undefined' && console.warn) console.warn('[analyze] 异常：', e);
@@ -407,10 +417,10 @@
       if (idx === state.si) {
         renderAll();
         updateStatus();
-        if (settled && state.degraded && window.LLMClient.readConfig().mode !== 'local') {
-          toast('大模型不可用，已切换本地兜底引擎：' + state.degraded, 'warn');
+        if (settled && degraded && window.LLMClient.readConfig().mode !== 'local') {
+          toast('大模型不可用，已切换本地兜底引擎：' + degraded, 'warn');
         }
-        if (settled && !$('engineRoot').hidden) renderHarness();
+        if (settled && !$('engineRoot').hidden) { renderHarness(); renderPerfNow(); }
         if (failMsg) toast(failMsg, 'danger');
       } else {
         renderContacts();
@@ -493,6 +503,9 @@
             '<span class="chip plain">' + esc(c.member) + '</span>' +
             '<span class="chip plain">' + esc(c.channel) + '</span>' +
             (c.session.pending ? '<span class="chip warn">分析中</span>' : '') +
+            /* 排队也要显形：同会话已有分析在跑时，这句话确实收到了、只是在等 ——
+               列表上毫无迹象，看起来就等同于「系统没收到」 */
+            (queue.waitingFor(c.idx) ? '<span class="chip plain">排队 ' + queue.waitingFor(c.idx) + '</span>' : '') +
           '</span>' +
         '</span>' +
         '<span hidden>' + esc(c.def.name) + '</span>' +
@@ -1020,9 +1033,9 @@
       var vo = m.image.observation;
       var vTip = vo ? (vo.detail || []).map(function (d) { return d.key + '：' + d.v; }).join('\n') : '';
       imgHtml = '<span class="msg-img">' +
-        '<img src="' + esc(m.image.dataUrl) + '" alt="顾客上传的皮肤照片">' +
-        (vo ? '<span class="mi-tag lv-' + vo.level + '" title="' + esc(vTip) + '">视觉观察 · ' +
-          esc(vo.label) + '</span>' : '') +
+        '<img src="' + esc(m.image.dataUrl) + '" alt="顾客上传的图片">' +
+        (vo ? '<span class="mi-tag lv-' + vo.level + '" title="' + esc(vTip) + '">视觉 · ' +
+          esc(visionKindLabel(vo)) + '</span>' : '') +
         (m.image.synthetic ? '<span class="mi-tag synth">合成示例</span>' : '') +
         '</span>';
     }
@@ -1297,6 +1310,24 @@
     } else sub.textContent = '暂无建议';
 
     var body = $('spriteBody');
+
+    /* 分析进行中绝不渲染上一轮的结果：S.analyzed 还是前一轮的旧值，
+       原样画出来就成了「这条消息还没读完，答案已经贴出来了」——
+       读者分不清这是历史还是结论。先给一个明确的读取态，
+       「手上那件」是实时状态（跟随会话原话），不属于分析产物，保留。 */
+    if (S.busy) {
+      var PHb = state.propInfo;
+      body.innerHTML =
+        (PHb ? '<div class="sb-prop" title="' + esc(PHb.from === 'order' ? (PHb.product || '本单商品') : '顾客原话：' + String(PHb.text || '')) + '">' +
+          '<span class="sp-k">手上这件</span>' +
+          '<b>' + esc(PHb.cat.name) + '</b>' +
+          '<span class="sp-src">' + esc(PHb.from === 'order' ? '订单 ' + PHb.orderNo : '顾客这句话里提到') + '</span>' +
+          '</div>' : '') +
+        '<div class="sb-reading"><span class="sbr-dots"><i></i><i></i><i></i></span>' +
+        '正在读这条消息，读完在这里给出建议回复</div>';
+      return;
+    }
+
     if (!has) {
       body.innerHTML = '<div class="empty">收到消费者消息后，我会在这里<br>给出可直接发送的建议回复</div>';
       return;
@@ -1392,6 +1423,7 @@
         '<div class="sv-detail">' + (V.detail || []).map(function (d) {
           return '<span>' + esc(d.key) + ' <b>' + esc(d.v) + '</b></span>';
         }).join('') + '</div>' +
+        visionSectionsHtml(V) +
         (V.signals.length
           ? '<div class="sv-sig">已叠加信号「' + esc(V.signals.join('、')) + '」' +
             (r.visionBoost ? '（+' + r.visionBoost + ' 分）' : '') + '</div>'
@@ -1940,24 +1972,20 @@
     closeKbEditor();
     toast('已收进话术库：' + item.cat, 'ok');
 
-    fetch('/api/kb', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(item),
-    }).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    }).then(function (j) {
+    /* 写入要带登录态（服务端 /api/kb POST 已收口）：走 apiJson，它统一挂 Authorization */
+    apiJson('/api/kb', { method: 'POST', body: JSON.stringify(item) }).then(function (j) {
       if (j && j.item && j.item.id) {
         item.id = j.item.id;
         kbSource = 'server';
         kbCacheWrite();
         renderKb();
       }
-    }).catch(function () {
+    }).catch(function (e) {
       kbSource = 'local';
       renderKb();
-      toast('服务端暂时不可用，这条先存在本机', 'warn');
+      toast(e && e.status === 401
+        ? '未登录：这条先存在本机，登录后会自动同步'
+        : '服务端暂时不可用，这条先存在本机', 'warn');
     });
   }
 
@@ -1970,7 +1998,7 @@
     kbCacheWrite();
     renderKb();
     toast('已从话术库删除', 'ok');
-    fetch('/api/kb/' + encodeURIComponent(id), { method: 'DELETE' })
+    apiJson('/api/kb/' + encodeURIComponent(id), { method: 'DELETE' })
       .catch(function () { toast('服务端未同步删除，下次联网可能重新出现', 'warn'); });
   }
 
@@ -3298,7 +3326,9 @@
   function deliverWhenIdle(si) {
     if (typeof si === 'number' && si !== state.si) return;
     var S = cur();
-    if (S.busy || queue.length) { setTimeout(function () { deliverWhenIdle(si); }, 300); return; }
+    /* 等的是**这个会话**的分析跑完，不是「全工作台都闲下来」：
+       并行之后别的会话还在跑是常态，拿全局空闲当条件会让剧本干等一个与它无关的请求。 */
+    if (S.busy || queue.busyFor(state.si)) { setTimeout(function () { deliverWhenIdle(si); }, 300); return; }
     if (S.awaitingReply && lastTurnIsCustomer(S)) return;   // 确实还在等坐席回复，交给坐席
     if (S.awaitingReply) S.awaitingReply = false;           // 会话事实说明已答 → 就地校正标记
     deliverNext();
@@ -3376,6 +3406,63 @@
       '<button class="cg-fix" data-guardfix="1">一键净化</button>';
   }
 
+  /* ---------- 视觉观察渲染辅助（识图 / 皮肤状态 / 妆容 的统一展示） ---------- */
+
+  /* 图像类型说法的唯一真源在 vision.js（Vision.kindLabel），这里只做转发。
+     「图片（类型未确认）」和「图片」不是一回事：前者是「离线统计给不出结论」，
+     写成后者等于告诉坐席「系统认过这张图」。 */
+  function visionKindLabel(V) {
+    return (window.Vision && window.Vision.kindLabel) ? window.Vision.kindLabel(V) : '图片';
+  }
+
+  /** 把 observation 的 识图 / 皮肤状态 / 妆容 三段渲染成统一的小节 HTML */
+  function visionSectionsHtml(V) {
+    if (!V) return '';
+    var h = '';
+
+    /* 识图 */
+    var obj = V.object;
+    h += '<div class="sv-sec sv-obj"><span class="sv-sec-k">识图</span>';
+    if (obj && obj.name && obj.name !== '未识别') {
+      h += '<span class="sv-sec-v">' + esc(obj.name) +
+        (obj.confidence ? '（置信 ' + Math.round(obj.confidence * 100) + '%）' : '') + '</span>';
+    } else {
+      h += '<span class="sv-sec-v muted">' + esc((obj && obj.note) || '未识别（离线）') + '</span>';
+    }
+    h += '</div>';
+
+    /* 皮肤状态 —— 类型没确认时如实展示「不足以判定」，不写「未见明显异常」那种假阴性 */
+    var cond = V.condition;
+    if (cond && cond.findings) {
+      var active = cond.findings.filter(function (f) {
+        return f.severity !== 'none' && f.severity !== 'unknown';
+      });
+      h += '<div class="sv-sec sv-cond"><span class="sv-sec-k">皮肤状态</span>';
+      if (V.kind !== 'skin') {
+        h += '<span class="sv-sec-v muted">' + esc(cond.summary || '图片类型未确认，不足以判定皮肤状态') + '</span>';
+      } else if (active.length) {
+        h += '<span class="sv-sec-v">' + active.map(function (f) {
+          return esc(f.key) + ' <b class="sev-' + f.severity + '">' + esc(f.severity) + '</b>';
+        }).join('、') + '</span>';
+      } else {
+        h += '<span class="sv-sec-v muted">未见明显异常（离线像素统计）</span>';
+      }
+      h += '</div>';
+    }
+
+    /* 妆容推荐 */
+    var mk = V.makeup;
+    h += '<div class="sv-sec sv-mk"><span class="sv-sec-k">妆容推荐</span>';
+    if (mk && mk.style) {
+      h += '<span class="sv-sec-v">' + esc(mk.style) +
+        (mk.palette && mk.palette.length ? '（' + mk.palette.map(esc).join('、') + '）' : '') + '</span>';
+    } else {
+      h += '<span class="sv-sec-v muted">' + esc((mk && mk.note) || '未推荐（离线）') + '</span>';
+    }
+    h += '</div>';
+    return h;
+  }
+
   /** 待发送图片的预览条：缩略图 + 本机视觉分析结论（发送前就能看到 AI 会怎么读这张图） */
   function renderComposerAttach() {
     var el = $('composerAttach');
@@ -3386,15 +3473,25 @@
     el.hidden = false;
     el.className = 'composer-attach lv-' + o.level;
     el.innerHTML =
-      '<img class="ca-thumb" src="' + esc(img.dataUrl) + '" alt="待发送的皮肤照片">' +
+      '<img class="ca-thumb" src="' + esc(img.dataUrl) + '" alt="待发送的图片">' +
       '<div class="ca-body">' +
         '<div class="ca-head"><b>视觉观察</b>' +
+          '<span class="ca-kind">' + esc(visionKindLabel(o)) + '</span>' +
           '<span class="ca-lv ' + o.level + '">' + esc(o.label) + '</span>' +
           (img.synthetic ? '<span class="ca-tag">合成示例图</span>' : '') +
           '<span class="spacer"></span>' +
           '<button class="ca-x" type="button" data-detach="1" title="移除图片">✕</button>' +
         '</div>' +
         '<div class="ca-sum">' + esc(o.summary) + '</div>' +
+        '<div class="ca-sec">' +
+          (o.object && o.object.name && o.object.name !== '未识别'
+            ? '<span class="ca-sec-k">识图</span><span class="ca-sec-v">' + esc(o.object.name) + '</span>'
+            : '') +
+          (o.makeup && o.makeup.style
+            ? '<span class="ca-sec-k">妆容</span><span class="ca-sec-v">' + esc(o.makeup.style) + '</span>'
+            : '') +
+          (o.provider === 'offline' ? '<span class="ca-sec-v muted">离线：识图/妆容需视觉模型</span>' : '') +
+        '</div>' +
         '<div class="ca-detail">' + (o.detail || []).map(function (d) {
           return '<span>' + esc(d.key) + ' ' + esc(d.v) + '</span>';
         }).join('') +
@@ -3440,7 +3537,7 @@
     if (!state.playing) return;
     var S = cur();
     var def = curDef();
-    if (S.busy || queue.length) { state.timer = setTimeout(loop, 400); return; }
+    if (S.busy || queue.busyFor(state.si)) { state.timer = setTimeout(loop, 400); return; }
     if (S.awaitingReply && S.analyzed && S.analyzed.replies.length) {
       /* 演示也只发合规的那一条：命中合规禁区的候选自动跳过 */
       for (var i = 0; i < S.analyzed.replies.length; i++) {
@@ -3555,10 +3652,20 @@
   function updateStatus() {
     var cfg = window.LLMClient.readConfig();
     var dot = $('modelDot'), txt = $('modelText'), chip = $('modelStatus');
+    /* callStats 里的 cap / atCap 是「现在还在不在模型可用状态」的判据：
+       配额触顶不会自己恢复（只有切会话 resetCalls 或调高上限），所以它必须是一条**常驻**状态，
+       而不是降级那一瞬的 toast —— toast 会消失，「还要不要等模型」却一直要回答。 */
+    var lc = (cfg.mode !== 'local' && window.LLMClient.callStats) ? window.LLMClient.callStats() : null;
     if (cfg.mode === 'local') {
       dot.className = 'dot warn';
       txt.textContent = '本地引擎';
       chip.title = '当前为仅本地引擎模式，点击切换';
+    } else if (lc && lc.atCap) {
+      dot.className = 'dot warn';
+      txt.textContent = '配额已用尽 · 本地引擎';
+      chip.title = '本会话模型调用已达上限 ' + lc.cap + ' 次，之后的分析全部改走本地规则引擎。\n' +
+        '切换会话即重新计数；要放宽请在「设置 → 性能预算」里调高上限。\n' +
+        '最近一次失败原因：' + (state.degraded || lc.lastError || '—') + '\n点击打开设置';
     } else if (state.degraded) {
       dot.className = 'dot warn';
       txt.textContent = '已降级本地引擎';
@@ -3590,10 +3697,12 @@
     var LC = window.LLMClient;
     if (!LC || !LC.callStats) { el.textContent = ''; return; }
     var lc = LC.callStats();
-    /* 把「已用 / 上限」摆出来：调用预算是可核对的数字，不是藏在配置里的一句话 */
-    var cap = 0;
-    try { cap = (LC.readConfig() || {}).maxCalls || 0; } catch (e) { cap = 0; }
-    el.textContent = '本会话已调用模型 ' + lc.calls + (cap ? ' / ' + cap : '') + ' 次 · 超时中断 ' + lc.timeouts + ' 次' +
+    /* 把「已用 / 上限」摆出来：调用预算是可核对的数字，不是藏在配置里的一句话。
+       cap / atCap 现在由 callStats 一起给 —— 读数与判据必须来自同一次快照，
+       分两次读配置会出现「显示还没满、状态条说已满」。 */
+    el.textContent = '本会话已调用模型 ' + lc.calls + (lc.cap ? ' / ' + lc.cap : '') + ' 次 · 超时中断 ' +
+      lc.timeouts + ' 次' +
+      (lc.atCap ? ' · 已达上限，之后的分析全部走本地引擎（切换会话重新计数）' : '') +
       (lc.lastError ? ' · 最近：' + lc.lastError : '');
   }
 
@@ -3691,14 +3800,25 @@
     syncSeg('prefDensity', 'data-density-opt', state.prefs.density || 'std');
     syncSeg('prefRail', 'data-rail-opt', state.prefs.rail === 'off' ? 'off' : 'on');
     syncSeg('prefSendKey', 'data-send-opt', state.prefs.sendKey === 'ctrl' ? 'ctrl' : 'enter');
+    /* 快捷键表里「发送回复」必须跟着上面那个开关走 —— 否则同一张卡里两处说法打架 */
+    var sendKeys = $('kbdSendKeys');
+    if (sendKeys) {
+      sendKeys.innerHTML = state.prefs.sendKey === 'ctrl'
+        ? '<kbd>Ctrl</kbd><i>+</i><kbd>Enter</kbd>'
+        : '<kbd>Enter</kbd>';
+    }
     $('prefAccount').textContent = ACCT.me
       ? ACCT.me.name + ' · ' + ACCT.me.role + ' ' + ACCT.me.level
       : '未登录（本地演示）';
     var llm = window.LLMClient ? window.LLMClient.readConfig() : null;
-    $('prefAbout').innerHTML = '解语 Jieyu · 美妆客服共情副驾　界面 2026.10　判据 v' + esc(RP.VERSION) +
-      '<br>引擎：' + (llm && llm.apiKey ? '大模型可用，失败自动降级本地' : '本地规则引擎（未配置 Key）') +
-      '　话术库 ' + kbEntries().length + ' 条' +
-      '<br>分析管线 harness：facts → generate → vision → ground → compliance → emotion → context';
+    /* 关于：三行「标签 + 值」，不再用全角空格硬拼 —— 全角空格在不同字号下宽度不一，
+       拼出来的三段间距每次都不一样，看着像没对齐 */
+    $('prefAbout').innerHTML =
+      '<span class="about-row"><b>版本</b><span>界面 2026.10<i>·</i>判据 v' + esc(RP.VERSION) + '</span></span>' +
+      '<span class="about-row"><b>引擎</b><span>' +
+        (llm && llm.apiKey ? '大模型可用，失败自动降级本地' : '本地规则引擎（未配置 Key）') +
+        '<i>·</i>话术库 ' + kbEntries().length + ' 条</span></span>' +
+      '<span class="about-row"><b>管线</b><span class="about-pipe">facts → generate → riskfloor → vision → ground → compliance → emotion → context</span></span>';
   }
 
   function openPrefs() {
@@ -4439,19 +4559,36 @@
         }).join('') + '</ul>';
       }
 
-      /* 模型调用与预算：慢的时候要能一眼看出「是模型慢，还是规则引擎慢」 */
+      /* 模型调用与预算：慢的时候要能一眼看出「是模型慢，还是规则引擎慢」。
+         上限读 callStats().cap（配置里的实际值），不再读 DEFAULT —— 
+         把默认值标在界面上，配置改小之后读数会说谎。 */
       var lc = (window.LLMClient && window.LLMClient.callStats) ? window.LLMClient.callStats() : null;
       var budgetS = Math.round(((window.LLMClient && window.LLMClient.readConfig && window.LLMClient.readConfig().budgetMs) || 15000) / 1000);
       h += '<div class="hp-verdict">' +
         '<span>接地 <b class="num">' + (f.grounded != null ? f.grounded : '–') + '/' +
           (f.replies != null ? f.replies : '–') + '</b></span>' +
         '<span>合规 <b>' + esc(f.compliance || 'none') + '</b></span>' +
+        /* 风险对账：自报 / 词典 → 取。三个数一起摆着，「模型低报被抬回」才看得见 */
+        '<span>风险 <b class="num">' + (f.riskClaimedScore != null ? f.riskClaimedScore : '–') +
+          ' / ' + (f.riskDictScore != null ? f.riskDictScore : '–') +
+          ' → ' + (f.riskScore != null ? f.riskScore : '–') + '</b></span>' +
         '<span>提供者 <b>' + esc(f.provider || '–') + '</b></span>' +
-        '<span>Agent <b>' + (f.agentTools != null ? f.agentTools + ' 步' : '–') + '</b></span>' +
+        '<span>Agent <b>' + (f.agentTools != null ? f.agentTools + ' 步' : '–') + '</b>' +
+          /* 上限是**按子预算**算出来的（剩余 ÷ 单步下限），所以「只走了 2 步」能区分是
+             模型自己收敛了，还是本轮时间不够 —— 前者正常，后者是预算问题 */
+          (f.agentStepsAllowed ? '（预算上限 ' + f.agentStepsAllowed + ' 步）' : '') + '</span>' +
         '<span>意图来源 <b>' + esc(f.intentSource || '–') + '</b></span>' +
         '<span>模型调用 <b class="num">' + (lc ? lc.calls : '–') + '</b>/' +
-          esc(String((window.LLMClient && window.LLMClient.DEFAULT && window.LLMClient.DEFAULT.maxCalls) || 100)) +
-          ' · 预算 <b class="num">' + budgetS + 's</b></span>' +
+          esc(String(lc ? lc.cap : '–')) +
+          ' · 本轮预算 <b class="num">' + budgetS + 's</b>' +
+          /* 预算是**按轮**算的：这里给的是这一轮到 llm 通道时还剩多少，
+             能回答「为什么这一句没走模型」 */
+          (f.budgetLeftMs != null ? '（到 llm 时剩 <b class="num">' + f.budgetLeftMs + 'ms</b>）' : '') +
+          '</span>' +
+        (f.llmSkippedForBudget
+          ? '<span>llm 未调用（预算不足，直接落本地）</span>'
+          : (f.agentBudgetLeftMs != null
+            ? '<span>Agent 子预算 <b class="num">' + f.agentBudgetLeftMs + 'ms</b></span>' : '')) +
         '</div>';
     } else {
       h += '<div class="hp-empty">还没跑过一轮分析 —— 顾客发一句话就能看到各阶段耗时与判定。</div>';
@@ -5007,7 +5144,32 @@
       state.prefs.riskToast = this.checked;
       prefsSave();
     });
+    /* 清空本机数据：连点两次才执行。
+       它跟「恢复默认设置」并排、而且一按就把偏好 / 话术缓存 / Key 一起抹掉，
+       误点的代价不可撤回 —— 二段确认比弹系统对话框轻，也不会打断读屏。
+       4 秒不点第二下就自己收回，按钮上的字一直说的是「现在会发生什么」。 */
+    var wipeArmed = false;
+    var wipeTimer = 0;
     $('btnWipeLocal').addEventListener('click', function () {
+      var btn = $('btnWipeLocal');
+      var label = btn.getAttribute('data-label') || btn.textContent.trim();
+      btn.setAttribute('data-label', label);
+      if (!wipeArmed) {
+        wipeArmed = true;
+        btn.textContent = '再点一次确认清空';
+        btn.setAttribute('data-armed', '1');
+        clearTimeout(wipeTimer);
+        wipeTimer = setTimeout(function () {
+          wipeArmed = false;
+          btn.textContent = label;
+          btn.removeAttribute('data-armed');
+        }, 4000);
+        return;
+      }
+      clearTimeout(wipeTimer);
+      wipeArmed = false;
+      btn.textContent = label;
+      btn.removeAttribute('data-armed');
       /* 键名写成字面量而不是遍历变量：这样 ST05 能静态校验前缀，
          不会出现「清了半天其实键名拼错、位置还在」这种静默失败。
          注意桌宠位置用的是 beauty-cs-sprite（与读写一致），别再写成 -sprite-pos。
@@ -5583,14 +5745,28 @@
     });
 
     $('btnCopyIngest').addEventListener('click', function () {
-      var u = location.origin + '/api/ingest';
-      var cmd = 'curl -X POST ' + u + " -H \"Content-Type: application/json\" -d '{\"customerId\":\"allergy\",\"text\":\"我用完脸红得厉害\"}'";
-      var done = function () { toast('接入命令已复制到剪贴板', 'ok'); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(cmd).then(done, function () { toast('复制失败，请手动选中', 'warn'); });
-      } else {
-        toast('当前环境不支持自动复制', 'warn');
-      }
+      /* 命令形态由服务端自己说（/api/health.ingestMode），界面不猜：
+         设了 INGEST_TOKEN 就得带 x-ingest-token，没设则只有本机 curl 能用。
+         印一条注定被拒的 curl，比不印更容易让人以为「服务端坏了」。 */
+      var fire = function (mode) {
+        var u = location.origin + '/api/ingest';
+        var auth = mode === 'token' ? ' -H "x-ingest-token: 你的INGEST_TOKEN"' : '';
+        var cmd = 'curl -X POST ' + u + ' -H "Content-Type: application/json"' + auth +
+          " -d '{\"customerId\":\"allergy\",\"text\":\"我用完脸红得厉害\"}'";
+        var done = function () {
+          toast(mode === 'token' ? '接入命令已复制（记得把 x-ingest-token 换成真值）'
+            : '接入命令已复制（服务端仅接受本机请求，跨机器请设 INGEST_TOKEN）', 'ok');
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(cmd).then(done, function () { toast('复制失败，请手动选中', 'warn'); });
+        } else {
+          toast('当前环境不支持自动复制', 'warn');
+        }
+      };
+      fetch('/api/health', { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : {}; })
+        .then(function (j) { fire(j && j.ingestMode === 'token' ? 'token' : 'loopback'); })
+        .catch(function () { fire('loopback'); });
     });
   }
 
@@ -5653,7 +5829,8 @@
     /* 响应时限走秒：只更新时限文本，不动表格结构（避免打断正在输入的结论） */
     setInterval(tickSla, 1000);
 
-    /* 让「剧本推进」与「外部接入」共用同一条串行通道，任何来源都不会插队 */
+    /* 让「剧本推进」与「外部接入」共用同一个入口：都经 MessageBus 回流、
+       进同一套队列（同会话 FIFO、跨会话并行），任何来源都不会插别的会话的队 */
     if (typeof console !== 'undefined' && console.info) {
       console.info('[MessageBus] 就绪 · 上报：', BUS.report());
     }

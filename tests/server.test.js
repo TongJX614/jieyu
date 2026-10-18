@@ -2,6 +2,11 @@
    服务端网关 server/server.js
    —— 起真进程 + 真 HTTP 请求，钉住「只靠肉眼看不出来」的边界：
       · 静态目录穿越：同前缀兄弟目录（beauty-cs-copilot-x）不得被读出去
+      · 静态白名单：仓库根不再随便读 —— 坐席账号库 / .git / tests / tools 都拿不到
+      · 写接口鉴权：话术库增删要登录态，坐席列表与登录响应不回显 salt / pinHash
+      · 登录失败锁定：同一来源连错若干次后 429
+      · 模型代理：跨站 Origin 拒掉（CORS 挡不住请求本身），窗口内限量
+      · 接入令牌：设了 INGEST_TOKEN 就默认拒绝，带对才放行（要另起一台带 env 的进程）
       · 幂等表上限：长跑不得只增不减
       · 出入站边界：空文本、非法 JSON、方法不允许、未知资源
    这些行为只存在于「真起一个服务器」之后，单测看不见。
@@ -17,15 +22,17 @@ const { spawn } = require('child_process');
 const ROOT = path.resolve(__dirname, '..');
 const PORT = Number(process.env.SERVER_TEST_PORT || 5399);
 const BASE = 'http://127.0.0.1:' + PORT;
+const DEMO_PIN = '1234';          // 演示口令：README 里写死的，不是需要保护的机密
+const SEED_AGENT = 'CS013';
 
 /* 与项目同前缀的兄弟目录：旧代码的 startsWith(ROOT) 会把它当「根目录内」 */
 const SIBLING_NAME = path.basename(ROOT) + '-probe';
 const SIBLING = path.join(path.dirname(ROOT), SIBLING_NAME);
 
-function request(method, p, body, headers) {
+function requestAt(base, method, p, body, headers) {
   return new Promise((resolve, reject) => {
     const payload = body == null ? null : (typeof body === 'string' ? body : JSON.stringify(body));
-    const req = http.request(BASE + p, { method, headers: headers || {} }, (res) => {
+    const req = http.request(base + p, { method, headers: headers || {} }, (res) => {
       let data = '';
       res.on('data', (c) => { data += c; });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: data }));
@@ -36,14 +43,16 @@ function request(method, p, body, headers) {
   });
 }
 
+const request = (method, p, body, headers) => requestAt(BASE, method, p, body, headers);
+
 const json = (r) => { try { return JSON.parse(r.text); } catch (e) { return null; } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitHealth(timeoutMs) {
+async function waitHealth(timeoutMs, base) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const r = await request('GET', '/api/health');
+      const r = await requestAt(base || BASE, 'GET', '/api/health');
       if (r.status === 200) return json(r);
     } catch (e) { /* 还没起来 */ }
     await sleep(120);
@@ -76,6 +85,7 @@ module.exports = async function (t) {
     t.eq(health.keySource, 'client', '未配置服务端密钥时标明由浏览器透传');
     t.ok(typeof health.dedupeLimit === 'number' && health.dedupeLimit > 0,
       '幂等表声明了容量上限（防长跑内存只增不减）');
+    t.eq(health.ingestMode, 'loopback', '未配置 INGEST_TOKEN 时接入只认本机（默认拒绝）');
 
     /* -------------------------------------------------- 消息接入网关 */
 
@@ -175,6 +185,87 @@ module.exports = async function (t) {
 
     t.eq((await request('PUT', '/index.html')).status, 405, '静态路径上的 PUT 返回 405');
 
+    /* ---------- 白名单：仓库根不再是「谁都能读的静态目录」 ----------
+       2026-10-18 之前的真实状态：/server/data/db.json 直接下载得到全部坐席
+       salt + 口令散列，/.git/ 全量源码历史敞开。这类文件在磁盘上一直都在，
+       「读不到」这件事只有真起一个服务器发一次请求才证得明。 */
+    t.suite('server · 静态白名单（凭据与仓库元数据读不到）');
+    const rDb = await request('GET', '/server/data/db.json');
+    t.not(rDb.status === 200 && rDb.text.indexOf('pinHash') !== -1, '坐席账号库读不到（拿不到 salt / 口令散列）');
+    t.eq(rDb.status, 404, '被拒的敏感文件按 404 回（白名单本身不是要告诉外界的信息）');
+    t.eq(rDb.text.indexOf('pinHash') === -1, true, '响应体里不含口令散列');
+    const rGitCfg = await request('GET', '/.git/config');
+    t.not(rGitCfg.status === 200, '/.git/config 读不到');
+    t.ok(rGitCfg.status === 403 || rGitCfg.status === 404, '/.git/config 返回 403/404，实际 ' + rGitCfg.status);
+    t.ok((await request('GET', '/.git/HEAD')).status !== 200, '/.git/HEAD 读不到');
+    t.ok((await request('GET', '/.env')).status !== 200, '/.env 读不到');
+    t.eq((await request('GET', '/package.json')).status, 404, '仓库根的散文件不在白名单里');
+    t.eq((await request('GET', '/tests/server.test.js')).status, 404, 'tests/ 不再作为静态资源提供');
+    t.eq((await request('GET', '/tools/invariants.js')).status, 404, 'tools/ 不再作为静态资源提供');
+    /* 先命中白名单前缀、再往上跳 —— normalize 之前看起来完全像 assets 里的文件 */
+    const rJump = await request('GET', '/assets/..%2Fserver%2Fdata%2Fdb.json');
+    t.not(rJump.status === 200 && rJump.text.indexOf('pinHash') !== -1, '「白名单前缀 + 回跳」读不到凭据');
+    /* 白名单不能误伤正常资源 */
+    t.eq((await request('GET', '/index.html')).status, 200, 'index.html 在白名单里');
+    t.eq((await request('GET', '/eval/kit.js')).status, 200, 'eval/ 在白名单里（评测页可用）');
+    const rHealth = json(await request('GET', '/api/health'));
+    t.ok(Array.isArray(rHealth.staticAllow.dirs) && rHealth.staticAllow.dirs.length > 0,
+      'health 自述静态白名单（对接方不用读源码就知道能取什么）');
+
+    /* ---------- 写接口鉴权 ----------
+       /api/kb 的增删过去完全公开：任意网站一条 text/plain 的简单 POST（连预检都不要）
+       就能往全部坐席的话术库里塞任意内容 —— 那是话术库，不是公告栏。
+       读保持公开（演示页要直接打开），写必须有登录态。 */
+    t.suite('server · 写接口鉴权（话术库不是公共公告栏）');
+    const rKbAnonWrite = await request('POST', '/api/kb', { cat: 'QA', text: '未登录写入的注入用例' });
+    t.eq(rKbAnonWrite.status, 401, '未登录不能新增话术');
+    t.eq((await request('DELETE', '/api/kb/kb-not-exist')).status, 401, '未登录不能删除话术');
+    const rKbRead = await request('GET', '/api/kb');
+    t.eq(rKbRead.status, 200, '话术库仍可公开读（界面不受影响）');
+
+    const rBadLogin = await request('POST', '/api/auth/login', { agentId: SEED_AGENT, pin: '9999' });
+    t.eq(rBadLogin.status, 401, '错口令登录被拒');
+    t.eq(rBadLogin.text.indexOf('pinHash') === -1, true, '登录失败响应不回显任何凭据材料');
+    const rLoginRaw = await request('POST', '/api/auth/login', { agentId: SEED_AGENT, pin: DEMO_PIN });
+    const rLogin = json(rLoginRaw);
+    t.eq(rLoginRaw.status, 200, '种子坐席口令登录成功（口令换成 scrypt 后仍能进）');
+    t.ok(typeof rLogin.token === 'string' && rLogin.token.length >= 24, '发回会话令牌');
+    t.eq(rLoginRaw.text.indexOf('salt') === -1, true, '登录响应里不含 salt');
+    t.eq(rLoginRaw.text.indexOf('pinHash') === -1, true, '登录响应里不含口令散列');
+
+    const auth = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + rLogin.token };
+    const rKbWrite = json(await request('POST', '/api/kb',
+      { cat: 'QA-鉴权回归', text: '这条只用于验证写接口鉴权，测完即删' }, auth));
+    t.eq(rKbWrite.ok, true, '登录后可以写话术库');
+    t.ok(rKbWrite.item && rKbWrite.item.id, '返回新建条目 id');
+    const rKbDel = json(await request('DELETE', '/api/kb/' + encodeURIComponent(rKbWrite.item.id), null, auth));
+    t.eq(rKbDel.ok, true, '登录后可删除（且把测试数据收干净）');
+    const kbAfter = json(await request('GET', '/api/kb'));
+    t.eq(kbAfter.items.some((x) => x.id === rKbWrite.item.id), false, '测试条目已不在库里');
+
+    const rAgents = await request('GET', '/api/agents');
+    t.eq(rAgents.text.indexOf('pinHash') === -1, true, '坐席列表不回显口令散列');
+    t.eq(rAgents.text.indexOf('salt') === -1, true, '坐席列表不回显 salt');
+
+    /* 在线爆破的兜底：离线字典能不能爆破是哈希强度问题，在线撞库则是次数问题 */
+    t.suite('server · 登录失败锁定');
+    let lastLock = null;
+    for (let i = 0; i < 10; i++) {
+      lastLock = await request('POST', '/api/auth/login', { agentId: 'ZZ0001', pin: 'wrong' + i });
+    }
+    t.eq(lastLock.status, 429, '同一来源连续失败后被锁定（429）');
+    t.eq(json(lastLock).reason, 'locked', 'reason=locked');
+
+    /* 模型代理的跨站写入口：任意网页都能让这台机器替它调模型（花的是本机配置的 key）。
+       CORS 只限制浏览器「读得到响应吗」，一点也限制不了请求被服务端接受并转发。 */
+    t.suite('server · /api/chat 来源闸门');
+    const rEvil = await request('POST', '/api/chat', { messages: [{ role: 'user', content: 'hi' }] },
+      { 'Content-Type': 'application/json', Origin: 'http://evil.example' });
+    t.eq(rEvil.status, 403, '跨站 Origin 直接拒（不是靠 CORS 兜）');
+    const rLocal = await request('POST', '/api/chat', { messages: [{ role: 'user', content: 'hi' }] },
+      { 'Content-Type': 'application/json', Origin: 'http://localhost:' + PORT });
+    t.not(rLocal.status === 403, '同源 Origin 放行（本机演示不受影响）');
+
     /* -------------------------------------------------- 幂等表淘汰（真发满一轮） */
 
     t.suite('server · 幂等表淘汰（真发满一轮）');
@@ -195,6 +286,53 @@ module.exports = async function (t) {
       t.eq(json(rOld).ok, true, '被淘汰的旧 id 可重新入队（证明真做了淘汰，而非只在计数上封顶）');
     } else {
       t.ok(true, '上限 ' + limit + ' 过大，跳过实发测试（仅校验常量存在）');
+    }
+
+    /* ---------- 第二台：显式配置了接入令牌 + 收紧的代理频控 ----------
+       默认那台只能证明「本机来源放行」，令牌模式必须另起进程才测得到
+       （INGEST_TOKEN 是启动时读的环境变量）。 */
+    t.suite('server · 接入令牌模式 + 代理频控（另起一台带 env 的进程）');
+    const PORT2 = PORT + 1;
+    const BASE2 = 'http://127.0.0.1:' + PORT2;
+    const INGEST_TOK = 'qa-ingest-token';
+    const child2 = spawn(process.execPath, [path.join('server', 'server.js')], {
+      cwd: ROOT,
+      env: Object.assign({}, process.env, {
+        PORT: String(PORT2), DEEPSEEK_API_KEY: '', LLM_API_KEY: '',
+        INGEST_TOKEN: INGEST_TOK, LLM_MAX_RPM: '2',
+      }),
+      stdio: 'ignore',
+    });
+    try {
+      const h2 = await waitHealth(12000, BASE2);
+      t.ok(h2, '第二台在 12s 内起来');
+      if (h2) {
+        t.eq(h2.ingestMode, 'token', 'health 自述当前是令牌模式');
+        t.eq(h2.chatLimit.max, 2, 'health 自述代理频控上限');
+
+        const bodyIn = { text: '令牌模式下的投递', customerId: key, msgId: 'TOK-' + Date.now().toString(36) };
+        const noTok = await requestAt(BASE2, 'POST', '/api/ingest', bodyIn);
+        t.eq(noTok.status, 401, '设了 INGEST_TOKEN 后不带令牌的投递被拒（默认拒绝，不是默认放行）');
+        t.eq(json(noTok).reason, 'unauthorized', 'reason=unauthorized');
+        const badTok = await requestAt(BASE2, 'POST', '/api/ingest', bodyIn, { 'x-ingest-token': 'wrong-wrong' });
+        t.eq(badTok.status, 401, '令牌不对同样被拒');
+        const goodTok = await requestAt(BASE2, 'POST', '/api/ingest', bodyIn, { 'x-ingest-token': INGEST_TOK });
+        t.eq(goodTok.status, 202, '带对令牌的投递放行');
+
+        /* 频控：跨站先被来源闸挡掉（不计入窗口），本机在窗口内也只给 LLM_MAX_RPM 次 */
+        const evil2 = await requestAt(BASE2, 'POST', '/api/chat', { messages: [] },
+          { 'Content-Type': 'application/json', Origin: 'http://evil.example' });
+        t.eq(evil2.status, 403, '第二台上跨站 Origin 仍是 403');
+        const q1 = await requestAt(BASE2, 'POST', '/api/chat', { messages: [] }, { 'Content-Type': 'application/json' });
+        const q2 = await requestAt(BASE2, 'POST', '/api/chat', { messages: [] }, { 'Content-Type': 'application/json' });
+        const q3 = await requestAt(BASE2, 'POST', '/api/chat', { messages: [] }, { 'Content-Type': 'application/json' });
+        t.not(q1.status === 429, '窗口内第 1 次不限量');
+        t.not(q2.status === 429, '窗口内第 2 次不限量');
+        t.eq(q3.status, 429, '第 3 次超窗口上限 → 429（本机来源也限）');
+      }
+    } finally {
+      child2.kill();
+      await sleep(150);
     }
   } finally {
     cleanup();

@@ -7,7 +7,7 @@
      1. bus.restore()  刷新后 pendingAck 虚高（已确认的又变回「待分析」）
      2. orderctx       提示词里意图名永远是空的（三元两个分支都是空串）
      3. agent          模型规划失败降级后，轨迹里工具重复出现
-     4. harness.run()  并发/嵌套调用时，内层把外层的交互预算抹掉
+     4. harness.run()  重叠运行时一轮把另一轮的交互预算抹掉（现改为「预算按轮挂在 job 上」）
    ========================================================================== */
 
 'use strict';
@@ -104,15 +104,26 @@ module.exports = async function (t) {
   }
 
   /* -------------------------------------------------------------- ④ budget */
-  t.suite('bugfix · 交互预算在重叠运行下不得被内层抹掉');
+  t.suite('bugfix · 交互预算按轮隔离（重叠运行不得互相覆盖）');
 
   {
-    /* harness/index.js 在 Node 下没有 window，所以临时挂一个带 setDeadline 桩的 window，
-       用调用序列反推预算有没有被第二轮回调清掉。用完立刻摘干净，别影响其他套件。 */
-    const calls = [];
+    /* 原缺陷：harness/index.js 把预算写进 LLMClient 的**一个全局格子**（setDeadline）。
+       两轮分析一旦重叠，第二轮覆盖第一轮，第一轮收尾时又把第二轮刚设好的清成 0 ——
+       表现是「没配超时，第二句却秒降级本地引擎」，而界面上查不到任何原因。
+       当时靠「调用方是串行队列」兜着；队列改成跨会话并行之后这个前提就没了，
+       所以预算改成挂在每一轮的 job 上、随参数传下去 —— 谁也覆盖不了谁。 */
+    const seen = [];
+    let globalSetDeadlineUsed = false;
+    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     const stubLLM = {
       readConfig: function () { return { budgetMs: 5000, mode: 'auto' }; },
-      setDeadline: function (v) { calls.push(v); },
+      remainingFor: function (until) { return until ? Math.max(0, until - Date.now()) : Infinity; },
+      setDeadline: function () { globalSetDeadlineUsed = true; },
+      analyze: async function (input, opts) {
+        seen.push({ until: (opts && opts.deadlineAt) || 0, at: Date.now() });
+        await delay(30);                            // 让两轮在时间上真的重叠
+        throw new Error('stub：不发真请求');
+      },
     };
     const hadWindow = Object.prototype.hasOwnProperty.call(global, 'window');
     const prevWindow = global.window;
@@ -121,16 +132,27 @@ module.exports = async function (t) {
     try {
       const H = require('../assets/harness/index.js');
 
-      /* 两次调用之间**不能** await：必须同步连发，才能制造出时间上重叠的两轮 */
-      const p1 = H.run({ message: '第一轮' });
-      const p2 = H.run({ message: '第二轮' });
+      const j1 = { message: '第一轮' };
+      const j2 = { message: '第二轮' };
+      /* 两次调用之间**不能** await：必须同步连发，才能制造出重叠的两轮 */
+      const p1 = H.run(j1);
+      const p2 = H.run(j2);
       await Promise.allSettled([p1, p2]);
 
-      t.eq(calls.filter((v) => v > 0).length, 1,
-        '重叠的两轮只应设置一次预算（内层不得覆盖外层）');
-      t.eq(calls[calls.length - 1], 0, '全部结束后才解除预算（不能留在脸上）');
-      t.eq(calls.length, 2,
-        'deadline 调用序列应为「设定 + 解除」两步，实为 ' + JSON.stringify(calls));
+      t.eq(seen.length, 2, '重叠的两轮各自都走到了模型通道（不是一轮把另一轮挤掉）');
+      t.ok(seen[0].until > 0 && seen[1].until > 0, '每轮都拿到自己的截止时刻');
+      t.eq(globalSetDeadlineUsed, false, '组装根不再写 LLMClient 的全局格子（那一格只留给直调方与硬闸）');
+      t.eq(j1.deadlineAt, undefined, '组装根不改动调用方传进来的 job');
+
+      const leftAfter = stubLLM.remainingFor(seen[1].until);
+      t.ok(leftAfter > 0, '先结束的那一轮没把后一轮的预算清零：仍剩 ' + Math.round(leftAfter) + 'ms');
+
+      /* 隔一会儿再开一轮：必须是「从现在起重新算的一整份预算」，不是沿用谁的余量 */
+      await delay(70);
+      await H.run({ message: '第三轮' });
+      t.ok(seen[2].until >= seen[0].until + 50,
+        '每一轮各得一份完整预算（' + (seen[2].until - seen[0].until) + 'ms 的间隔体现在截止时刻上）');
+      t.ok(stubLLM.remainingFor(seen[2].until) > 4000, '第三轮开工时预算是满的');
     } finally {
       if (hadWindow) global.window = prevWindow;
       else delete global.window;

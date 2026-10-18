@@ -21,9 +21,17 @@
      · model —— 由大模型自主规划（真 ReAct，需要在设置里配置 Key）
      · local —— 由规则规划器按本轮消息内容选择工具（离线演示；工具真的被执行、轨迹真的产生）
 
-   降级语义沿用 harness 约定：
-     · 返回 null = 不适用（例如没有 Agent 依赖）
-     · 抛错     = 失败，由 core 落到下一个 provider（llm → local）
+   时间：模型规划只允许用**本轮预算的一部分**（subBudgetUntil：剩余×60%、最多 9s），
+   每一步开跑前先看剩余时间，不够一次往返就停手 —— 一路花干再把整轮交给兜底，
+   界面上看到的「超时」会全记在 Agent 之后的调用上，真凶反而看不见。
+   步数同理由预算给（stepAllowance：剩余 ÷ 单步下限）：**不由风险等级给**，因为那需要在
+   generate 之前先判一次级，而判级入口全项目只允许三处（invariants ST19）。
+
+   降级语义沿用 harness 约定，但 Agent 这一环有个容易记错的细节：
+     · 返回 null = 不适用（例如没有 input）
+     · 模型规划失败（超时 / 输出无法解析 / 预算或步数不够）→ **在本环内**改用规则规划，
+       返回的是完整结果，core 不会再去调 llm provider —— 同一套工具、同一条轨迹
+     · 只有 provider 自己抛出未捕获异常时，才由 core 落到下一个 provider（llm → local）
 
    UMD：浏览器挂 window.HarnessAgent，Node 下 module.exports（便于单测）。
    ========================================================================== */
@@ -37,6 +45,53 @@
 
   var MAX_STEPS = 5;
 
+  /* ---------------- 子预算 ----------------
+     Agent 是整轮里最费时间的一环：最多 5 步 × 每步一次往返。
+     如果不给它单独划一道线，它会把本轮预算一路花干，然后降级路径（llm 一次性推理、
+     再到 local）只能在没有预算的情况下重跑 —— 一次分析实际花掉两三倍时间，
+     而且界面上看到的「超时中断」全都记在 Agent 之后的那几次调用上，看不出真凶。 */
+  var SUB_BUDGET_RATIO = 0.6;      // 本轮剩余里划给「模型自主规划」的比例
+  var SUB_BUDGET_CAP_MS = 9000;    // 再多也不给：避免一轮分析被 Agent 独占
+  var MIN_STEP_MS = 3000;          // 单步开跑所需的最小剩余：低于它就是白等一次被掐断的往返
+  /* 算「还付得起几步」时给的一点余量。没有它，`subBudgetUntil` 取整出来的 5999ms
+     会被 floor(5999/3000) 判成 1 步 —— 明明够两步的钱，因为时钟差了几个毫秒就少走一步，
+     而且这个 1 还是 2 会随机器快慢抖动（测试里就是随机红绿灯）。 */
+  var STEP_SLACK_MS = 500;
+
+  /**
+   * Agent 的子预算截止时刻 = min(本轮截止, 现在 + min(本轮剩余 × 比例, 上限))。
+   * 本轮只剩 4s → Agent 最多用 2.4s，剩下的留给兜底；
+   * 本轮还剩 15s → 被 9s 上限截住，Agent 不至于把整轮独占。
+   * 拿不到按轮预算（直调 runModel 的单测、无 LLMClient）→ 原样返回，表示不限，行为与原来一致。
+   */
+  function subBudgetUntil(job, LLM) {
+    var until = (job && job.deadlineAt) ? Number(job.deadlineAt) : 0;
+    if (!until || !LLM || typeof LLM.remainingFor !== 'function') return until;
+    var left = LLM.remainingFor(until);
+    if (!isFinite(left) || left <= 0) return until;
+    var share = Math.min(left * SUB_BUDGET_RATIO, SUB_BUDGET_CAP_MS);
+    return Date.now() + Math.floor(share);
+  }
+
+  /**
+   * 这一轮 Agent 允许走几步 = 子预算剩余 ÷ 单步下限，再夹在 [1, MAX_STEPS] 之间。
+   *
+   * 为什么不做「高危 3 步 / 普通 2 步」：那样要在 generate **之前**就知道风险等级，
+   * 等于新增第四个词典判级入口，而判级入口只允许三处（ST19）—— 多一个入口就多一套
+   * 「与实际生效不一致的标准」，它不报错，只是让数字说谎。
+   * 按预算给步数不需要判级，语义同样站得住：值得多查的消息事实多、拿到的子预算也最多，
+   * 预算一紧就自动少走。满子预算 9s → 3 步；剩 6s → 2 步；只剩 3s → 1 步。
+   * 至少留 1 步，否则 Agent 这一环等于没跑（是否该跑由 MIN_STEP_MS 在 provider 里判）。
+   */
+  function stepAllowance(leftMs) {
+    var l = Number(leftMs);
+    if (l === Infinity) return MAX_STEPS;            /* 没有按轮预算：只受 MAX_STEPS 约束 */
+    if (!isFinite(l) || l <= 0) return 1;            /* 读数坏了 / 已耗尽：保守给 1 步，别放行更多 */
+    var n = Math.floor((l + STEP_SLACK_MS) / MIN_STEP_MS);
+    if (n < 1) n = 1;
+    return Math.min(n, MAX_STEPS);
+  }
+
   function nowMs() {
     if (typeof performance !== 'undefined' && performance && performance.now) return performance.now();
     return Date.now();
@@ -45,6 +100,17 @@
   function brief(s, n) {
     var t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
     return t.length > n ? t.slice(0, n) + '…' : t;
+  }
+
+  /* 图像类型说法的唯一真源在 vision.js（Vision.kindLabel）。
+     这里只留「Node 单测没注入 Vision」的兜底，措辞与那边逐字一致 ——
+     未知类型必须说「图片（类型未确认）」而不是「图片」：后者会让 Agent 以为自己看过并认了图。 */
+  var KIND_FALLBACK = { skin: '皮肤照片', product: '已识别商品', look: '妆容参考' };
+  function visionKindLabel(deps, o) {
+    var VI = deps.Vision;
+    if (VI && typeof VI.kindLabel === 'function') return VI.kindLabel(o);
+    if (!o) return '图片';
+    return KIND_FALLBACK[o.kind] || '图片（类型未确认）';
   }
 
   /* ------------------------------------------------------------------ 工具集 */
@@ -182,13 +248,49 @@
       },
     };
 
+    tools.read_vision = {
+      label: '读取视觉观察',
+      desc: '读取顾客上传图片的结构化视觉观察（识图 / 皮肤状态 / 妆容推荐），用于在回复中引用「我看到的」；离线只给泛红等弱启发式，物体/妆容需视觉模型',
+      args: {},
+      run: function () {
+        var img = (input && input.image) || null;
+        var o = img && img.observation;
+        if (!o) return '本轮没有顾客上传的图片，无视觉观察可用。';
+        var lines = ['图像类型：' + visionKindLabel(deps, o)];
+        if (o.object && o.object.name && o.object.name !== '未识别') {
+          lines.push('识别为：' + o.object.name + '（置信 ' + Math.round((o.object.confidence || 0) * 100) + '%）');
+        }
+        if (o.condition && o.condition.findings) {
+          var act = o.condition.findings.filter(function (f) {
+            return f.severity !== 'none' && f.severity !== 'unknown';
+          });
+          if (o.kind === 'skin') {
+            lines.push('皮肤状态：' + (act.length
+              ? act.map(function (f) { return f.key + '（' + f.severity + '）'; }).join('、')
+              : '未见明显异常（离线像素统计）'));
+          } else {
+            /* 类型没确认就绝不写「皮肤状态：未见明显异常」——那是一条凭空捏造的阴性结论，
+               Agent 会拿它去安慰一个其实只发了快递单截图的顾客。 */
+            lines.push('皮肤状态：' + (o.condition.summary || '图片类型未确认，离线像素统计不足以判定皮肤状态'));
+          }
+        }
+        if (o.makeup && o.makeup.style) {
+          lines.push('推荐妆容：' + o.makeup.style +
+            (o.makeup.palette && o.makeup.palette.length ? '（色系：' + o.makeup.palette.join('、') + '）' : ''));
+        }
+        if (o.provider === 'offline') lines.push('注：离线像素统计，识图 / 妆容识别需视觉模型（VLM）。');
+        return lines.join('\n');
+      },
+    };
+
     return tools;
   }
 
   /* ------------------------------------------------------------------ 提示词 */
 
-  function agentSpec(tools) {
+  function agentSpec(tools, maxSteps) {
     var names = Object.keys(tools);
+    var cap = (typeof maxSteps === 'number' && maxSteps >= 1) ? Math.min(maxSteps, MAX_STEPS) : MAX_STEPS;
     var lines = [];
     lines.push('【Agent 工作模式（优先于上面的直接作答要求）】');
     lines.push('你可以先调用工具核实事实，再给出最终结论。每一步只输出一个 JSON 对象，二选一：');
@@ -203,7 +305,7 @@
     lines.push('');
     lines.push('约束：');
     lines.push('· 每一步只调用一个工具；已经拿到结果的事实不要重复调用。');
-    lines.push('· 事实足够就立刻给 final，不要为了调用而调用；最多 ' + MAX_STEPS + ' 步。');
+    lines.push('· 事实足够就立刻给 final，不要为了调用而调用；本轮最多 ' + cap + ' 步（时间不够时还会更少）。');
     lines.push('· 不得编造工具没有返回的数据（金额 / 时效 / 批次 / 赔偿结论）。');
     lines.push('· final 里的 replies 仍必须是可直接发送的客服话术，并引用已核实到的订单事实。');
     return lines.join('\n');
@@ -249,17 +351,34 @@
 
   /* ----------------------------------------------------------- 驱动一：模型规划 */
 
-  async function runModel(deps, job, input, steps, trace) {
+  async function runModel(deps, job, input, steps, trace, budgetUntil) {
     var LLM = deps.LLMClient;
     var tools = buildTools(deps, job, input);
+    var left0 = (typeof LLM.remainingFor === 'function') ? LLM.remainingFor(budgetUntil) : Infinity;
+    var allowance = stepAllowance(left0);
     var messages = [
-      { role: 'system', content: LLM.SYSTEM_PROMPT + '\n\n' + agentSpec(tools) },
+      { role: 'system', content: LLM.SYSTEM_PROMPT + '\n\n' + agentSpec(tools, allowance) },
       { role: 'user', content: LLM.buildUserPrompt(input) },
     ];
 
     for (var i = 0; i < MAX_STEPS; i++) {
+      /* 步前对账：剩余预算不够一次往返，就在此停手。
+         发出去也只会被 LLMClient 掐断 —— 多计一次「超时中断」、多占一个并发额度，
+         却不会多换来任何一条工具轨迹。如实报错，由 provider 落到规则规划。 */
+      var left = (typeof LLM.remainingFor === 'function') ? LLM.remainingFor(budgetUntil) : Infinity;
+      if (left < MIN_STEP_MS) {
+        throw new Error('Agent 预算不足（子预算剩余 ' + Math.round(left) + 'ms < 单步下限 ' +
+          MIN_STEP_MS + 'ms），第 ' + (i + 1) + ' 步未发起');
+      }
+      /* 步数上限也跟着剩余预算走：前几步把时间吃短之后，能付得起的步数就变少了。
+         这是「别为了调用而调用」的硬版本 —— 靠提示词劝不住模型。 */
+      allowance = stepAllowance(left);
+      if (i >= allowance) {
+        throw new Error('Agent 子预算只够 ' + allowance + ' 步，第 ' + (i + 1) +
+          ' 步不再发起（剩 ' + Math.round(left) + 'ms）');
+      }
       var t0 = nowMs();
-      var out = await LLM.chat(messages, { maxTokens: 1400 });
+      var out = await LLM.chat(messages, { maxTokens: 1400, deadlineAt: budgetUntil || 0 });
       var obj = parseJSON(out.content);
 
       if (!obj) throw new Error('Agent 第 ' + (i + 1) + ' 步输出无法解析为 JSON');
@@ -382,6 +501,25 @@
     var LLM = deps.LLMClient;
     var cfg = LLM && LLM.readConfig ? LLM.readConfig() : null;
     var canModel = !!(LLM && LLM.chat && LLM.SYSTEM_PROMPT && cfg && cfg.mode !== 'local');
+    var notModelWhy = canModel ? ''
+      : (!LLM || !LLM.chat ? '模型客户端未加载' : (cfg && cfg.mode === 'local' ? '已切本地模式' : '模型协议不完整'));
+
+    /* 本轮预算里划给 Agent 的那一份（截止时刻）。0 = 不限 */
+    var agentUntil = subBudgetUntil(state.job, LLM);
+    var agentLeft = (canModel && LLM.remainingFor) ? LLM.remainingFor(agentUntil) : Infinity;
+    if (canModel && agentLeft < MIN_STEP_MS) {
+      /* 不是「模型失败了」，是**根本没发请求** —— 轨迹里必须写清这一句，
+         否则看的人会以为模型又出问题了一次，而真正的现象是上一句把时间用光了。 */
+      canModel = false;
+      notModelWhy = '本轮预算只剩 ' + Math.round(agentLeft) + 'ms，不够一次模型往返（下限 ' +
+        MIN_STEP_MS + 'ms）';
+    }
+
+    if (trace && trace.set) {
+      trace.set('agentBudgetUntil', agentUntil || null);
+      trace.set('agentBudgetLeftMs', agentLeft === Infinity ? null : Math.round(agentLeft));
+      trace.set('agentStepsAllowed', canModel ? stepAllowance(agentLeft) : 0);
+    }
 
     if (canModel) {
       /* 模型规划单独用一个步骤数组：它中途抛错时要整体丢弃，
@@ -389,7 +527,7 @@
          「谁真正调了什么」随之失真。 */
       var modelSteps = [];
       try {
-        var res = await runModel(deps, state.job, input, modelSteps, trace);
+        var res = await runModel(deps, state.job, input, modelSteps, trace, agentUntil);
         state.agent = res.agent;
         if (trace && trace.set) { trace.set('agentMode', 'model'); trace.set('agentTools', modelSteps.length); }
         if (trace && trace.decide) {
@@ -405,7 +543,7 @@
         }
       }
     } else if (trace && trace.decide) {
-      trace.decide('Agent 未启用模型规划（未配置 Key 或已切本地模式）→ 规则规划驱动（同一套工具）');
+      trace.decide('Agent 未启用模型规划（' + notModelWhy + '）→ 规则规划驱动（同一套工具）');
     }
 
     var localSteps = [];
@@ -417,6 +555,11 @@
 
   return {
     MAX_STEPS: MAX_STEPS,
+    SUB_BUDGET_RATIO: SUB_BUDGET_RATIO,
+    SUB_BUDGET_CAP_MS: SUB_BUDGET_CAP_MS,
+    MIN_STEP_MS: MIN_STEP_MS,
+    subBudgetUntil: subBudgetUntil,
+    stepAllowance: stepAllowance,
     provider: provider,
     buildTools: buildTools,
     localPlan: localPlan,

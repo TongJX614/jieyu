@@ -190,6 +190,47 @@ window.LocalEngine = (function () {
     },
   ];
 
+  /* ---------- 视觉接地：把结构化视觉观察翻译成一句「先共情、再给方向」的开场白 ----------
+     闸门（2026-10-18 审查后加的）：**只有两种情况**才值得让视觉抢第一条话术 ——
+       ① 判为皮肤照片**且**统计到可见异常（先共情、再办事）；
+       ② 真的识别出「这是什么」（VLM 给出的信息量）。
+     其余一律返回 ''。原来的写法不看 kind、不看是否真有发现，只要收到图片就输出
+     「为了您的皮肤安全，建议先停用功效型产品」——顾客附一张快递单截图问物流，
+     第一条推荐话术变成了医疗建议，既越界又答非所问。
+     不涉及诊断、不越医疗边界；严重情况引导专业评估。 */
+  function visionReply(obs) {
+    if (!obs) return '';
+    var findings = (obs.condition && obs.condition.findings) || [];
+    var active = findings.filter(function (f) {
+      return f.severity !== 'none' && f.severity !== 'unknown';
+    });
+    var named = !!(obs.object && obs.object.name && obs.object.name !== '未识别');
+    var skinIssue = obs.kind === 'skin' && active.length > 0;
+    if (!skinIssue && !named) return '';
+
+    var s = '';
+    if (named) {
+      s += '我看到您发来的是「' + obs.object.name + '」。';
+    } else {
+      s += '我看到您发来的是一张皮肤照片。';
+    }
+    if (skinIssue) {
+      var desc = active.map(function (f) { return f.key + '（' + f.severity + '）'; }).join('、');
+      s += '从照片看，主要注意到 ' + desc + '。';
+      var severe = active.some(function (f) { return f.severity === 'severe'; });
+      s += '为了您的皮肤安全，建议先停用功效型产品、做好基础舒缓；';
+      s += severe
+        ? '情况较明显，请尽快到皮肤科让专业医生评估，我这边先为您登记并预约一次线上皮肤检测。'
+        : '持续观察 2-3 天若没有缓解，也建议咨询专业顾问。';
+    }
+    if (obs.makeup && obs.makeup.style) {
+      s += '另外结合您的肤色与五官特点，更适合「' + obs.makeup.style + '」'
+        + (obs.makeup.palette && obs.makeup.palette.length ? '（色系：' + obs.makeup.palette.join('、') + '）' : '')
+        + '，需要的话我可以把对应产品清单发给您。';
+    }
+    return s;
+  }
+
   /* ---------- 主分析入口 ---------- */
   function analyze(input) {
     input = input || {};
@@ -257,6 +298,21 @@ window.LocalEngine = (function () {
         var p = GENERIC[g];
         if (replies.some(function (x) { return x.text === p.text; })) continue;
         replies.push({ text: p.text, confidence: p.confidence, rationale: p.rationale, kb: p.kb });
+      }
+    }
+
+    /* 视觉接地：顾客发了照片，优先用「我看到的」开场，体现「听懂没说出口的那半句」。
+       插入到话术首位；即便有订单话术在后面兜底，视觉回应也排在最前。 */
+    var vobs = input.image && input.image.observation;
+    if (vobs) {
+      var vText = visionReply(vobs);
+      if (vText) {
+        replies.unshift({
+          text: vText,
+          confidence: 0.9,
+          rationale: '基于视觉观察优先回应照片内容，先共情再给方向（不越医疗边界）',
+          kb: '《视觉辅助接待 SOP》',
+        });
       }
     }
 

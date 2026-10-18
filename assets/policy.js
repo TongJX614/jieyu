@@ -267,23 +267,70 @@ window.RiskPolicy = (function () {
      floor：该信号单独命中时，风险等级不得低于此下限。
      用于「权重不大但性质严重」的合规 / 声誉类信号 ——
      例如单说一句「孕妇能用吗」只有 20 分，按纯阈值会落进「安全」档，
-     但它触碰的是医疗建议禁区，必须至少是「关注」。 */
+     但它触碰的是医疗建议禁区，必须至少是「关注」。
+
+     alias：**说法片段**，只服务于 normalizeSignal()，不参与文本命中、不计分。
+     存在的理由：模型写信号爱用自然说法（「皮肤刺激」「医疗建议」「退换货诉求」），
+     而 floorOf()/weightOf() 按标准名**精确匹配** —— 名字差一个字，医疗红线与
+     曝光红线的等级下限就一条都不触发，风险被算低。alias 负责把这些说法兜回表里的名字。
+     注意 alias ≠ k：k 是「顾客原话里的关键词」（命中即计分），
+     alias 是「模型对信号的称呼」（只做改名，不产生证据、不加分）。 */
   var SIGNALS = [
-    { name: '皮肤不良反应', w: 34, k: ['刺痛', '红肿', '发红', '泛红', '过敏', '烂脸', '毁容', '灼烧', '痒', '脱皮', '爆痘', '溃烂'] },
-    { name: '疑似皮肤损伤', w: 16, k: ['毁容', '不敢出门', '留疤', '色素沉着', '溃烂'] },
+    {
+      name: '皮肤不良反应', w: 34, k: ['刺痛', '红肿', '发红', '泛红', '过敏', '烂脸', '毁容', '灼烧', '痒', '脱皮', '爆痘', '溃烂'],
+      alias: ['皮肤', '脸部', '面部', '脸', '过敏', '刺激', '不适', '不良', '反应', '泛红', '红肿', '发红', '刺痛', '痒', '灼烧', '脱皮', '爆痘', '溃烂'],
+    },
+    {
+      name: '疑似皮肤损伤', w: 16, k: ['毁容', '不敢出门', '留疤', '色素沉着', '溃烂'],
+      alias: ['损伤', '毁容', '留疤', '疤痕', '色素', '不敢出门', '溃烂', '烂脸'],
+    },
     /* 无关键词信号：由「视觉通道」命中（消费者上传的皮肤照片），权重与文本信号同表同源。
        k 为空表示它不可能被文本命中 —— evaluate() 因此天然忽略它，不会重复计分。 */
-    { name: '影像可见皮肤异常', w: 18, k: [] },
-    { name: '公开平台曝光倾向', w: 26, floor: 'medium', k: ['小红书', '微博', '曝光', '发帖', '发到', '评价区', '黑猫'] },
-    { name: '监管投诉路径', w: 30, floor: 'medium', k: ['消协', '12315', '315', '药监', '工商', '举报', '监管'] },
-    { name: '法律追责风险', w: 26, floor: 'medium', k: ['起诉', '律师', '法律', '追责'] },
-    { name: '医疗健康建议边界', w: 20, floor: 'medium', k: ['孕妇', '备孕', '哺乳', '医生', '药用', '治疗', '处方'] },
-    { name: '情绪升级', w: 12, k: ['失望', '生气', '离谱', '恶心', '太差', '什么破', '无语', '火大'] },
-    { name: '退换诉求', w: 14, k: ['退款', '退货', '退钱', '不想要'] },
-    { name: '流失与口碑风险', w: 14, k: ['不会再来', '换一家', '竞品', '别家', '换品牌', '再也不'] },
-    { name: '履约时效问题', w: 12, k: ['还没发货', '没发货', '延迟', '几天没', '一周', '配送慢'] },
-    { name: '索偿诉求', w: 12, k: ['赔', '补偿', '怎么处理', '给个说法'] },
-    { name: '高价值会员异议', w: 10, k: ['钻石卡', '金卡', '积分', '会员', '权益'] },
+    { name: '影像可见皮肤异常', w: 18, k: [], alias: ['影像', '照片', '图片', '视觉', '画面'] },
+    /* 视觉通道升级信号：真 VLM 判出明显皮损 / 肿胀时返回（离线像素统计判不出，故 k 为空）。
+       与「影像可见皮肤异常」同源、同表，只是性质更重 —— 单张照片若真看出皮损，
+       风险至少「关注」，避免把肉眼可见的严重皮肤问题放成「安全」。 */
+    { name: '影像可见明显皮损', w: 22, floor: 'medium', k: [], alias: ['皮损', '肿胀', '破溃', '严重损伤'] },
+    {
+      name: '公开平台曝光倾向', w: 26, floor: 'medium', k: ['小红书', '微博', '曝光', '发帖', '发到', '评价区', '黑猫'],
+      alias: ['曝光', '小红书', '微博', '抖音', '黑猫', '发帖', '差评', '评价', '媒体', '公开'],
+    },
+    {
+      name: '监管投诉路径', w: 30, floor: 'medium', k: ['消协', '12315', '315', '药监', '工商', '举报', '监管'],
+      alias: ['监管', '消协', '药监', '工商', '举报', '12315', '315', '主管部门', '监管部门'],
+    },
+    {
+      name: '法律追责风险', w: 26, floor: 'medium', k: ['起诉', '律师', '法律', '追责'],
+      alias: ['法律', '律师', '起诉', '诉讼', '追责', '仲裁', '司法'],
+    },
+    {
+      name: '医疗健康建议边界', w: 20, floor: 'medium', k: ['孕妇', '备孕', '哺乳', '医生', '药用', '治疗', '处方'],
+      alias: ['医疗', '医学', '医用', '药用', '医生', '医院', '孕妇', '孕期', '备孕', '哺乳', '用药', '治疗', '处方'],
+    },
+    {
+      name: '情绪升级', w: 12, k: ['失望', '生气', '离谱', '恶心', '太差', '什么破', '无语', '火大'],
+      alias: ['情绪', '失望', '生气', '愤怒', '火大', '无语', '恶心', '离谱', '不满'],
+    },
+    {
+      name: '退换诉求', w: 14, k: ['退款', '退货', '退钱', '不想要'],
+      alias: ['退款', '退货', '换货', '退换', '不想要'],
+    },
+    {
+      name: '流失与口碑风险', w: 14, k: ['不会再来', '换一家', '竞品', '别家', '换品牌', '再也不'],
+      alias: ['流失', '不会再来', '再也不', '换一家', '换品牌', '别家', '竞品', '转投'],
+    },
+    {
+      name: '履约时效问题', w: 12, k: ['还没发货', '没发货', '延迟', '几天没', '一周', '配送慢'],
+      alias: ['发货', '物流', '快递', '延迟', '配送', '时效', '没收到'],
+    },
+    {
+      name: '索偿诉求', w: 12, k: ['赔', '补偿', '怎么处理', '给个说法'],
+      alias: ['赔偿', '补偿', '赔', '说法', '索赔'],
+    },
+    {
+      name: '高价值会员异议', w: 10, k: ['钻石卡', '金卡', '积分', '会员', '权益'],
+      alias: ['会员', '积分', '权益', '钻石', '金卡', '等级'],
+    },
   ];
 
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
@@ -334,6 +381,51 @@ window.RiskPolicy = (function () {
       if (SIGNALS[i].name === signalName) return SIGNALS[i].w || 0;
     }
     return 0;
+  }
+
+  /**
+   * 把「模型对信号的称呼」归一到表里的标准名。
+   * 规则是确定的，不看运气：
+   *   ① 先精确匹配标准名（模型听话时零成本）；
+   *   ② 再数 alias 片段命中条数，命中多者胜；并列时取权重更高的；
+   *     权重也相同则取表里靠前的（SIGNALS 的顺序就是优先级）；
+   *   ③ 一条片段都不命中 → null。返回 null 不是失败，是「这个名字我们兜不住」，
+   *     调用方必须把它**原样记录下来**而不是硬凑一个标准名 —— 凑出来的名字会变成假证据。
+   */
+  function normalizeSignal(raw) {
+    var t = String(raw == null ? '' : raw).trim();
+    if (!t) return null;
+    var i;
+    for (i = 0; i < SIGNALS.length; i++) if (SIGNALS[i].name === t) return { from: t, to: t, exact: true };
+    var best = null, bestHits = 0;
+    for (i = 0; i < SIGNALS.length; i++) {
+      var al = SIGNALS[i].alias || [];
+      var hits = 0;
+      for (var j = 0; j < al.length; j++) if (t.indexOf(al[j]) !== -1) hits++;
+      if (hits > bestHits || (hits === bestHits && hits > 0 && best && SIGNALS[i].w > best.w)) {
+        best = SIGNALS[i];
+        bestHits = hits;
+      }
+    }
+    return best ? { from: t, to: best.name, exact: false } : null;
+  }
+
+  /**
+   * 整批归一：去重、丢弃空串，并把「归一不出的原始称呼」单独交出去。
+   * 返回 { signals, map, unknown } —— map 与 unknown 都要落进审计，
+   * 因为「模型说了什么」和「我们采信了什么」必须能被分开核对。
+   */
+  function normalizeSignals(list) {
+    var signals = [], map = [], unknown = [];
+    (list || []).forEach(function (raw) {
+      var t = String(raw == null ? '' : raw).trim();
+      if (!t) return;
+      var hit = normalizeSignal(t);
+      if (!hit) { if (unknown.indexOf(t) === -1) unknown.push(t); return; }
+      if (signals.indexOf(hit.to) === -1) signals.push(hit.to);
+      if (!hit.exact && !map.some(function (p) { return p.from === hit.from; })) map.push({ from: hit.from, to: hit.to });
+    });
+    return { signals: signals, map: map, unknown: unknown };
   }
 
   /**
@@ -427,7 +519,10 @@ window.RiskPolicy = (function () {
           '（' + COMBOS[m].why + '）');
       }
     }
-    lines.push('- risk.signals 必须逐字使用上面的信号名称，不要自造近义词。');
+    lines.push('- risk.signals 必须逐字使用上面的信号名称（枚举，不得增删改字），不要自造近义词。');
+    lines.push('- 拿不准的信号**一律不写**：全部不确定时 risk.signals 写空数组 []；' +
+      'score 只在顾客原话里有依据时才上调，不要凭猜测给高分。' +
+      '系统会用词典复核你的结论，低报会被抬回，自造的信号名会被记录但不采信。');
     return lines.join('\n');
   }
 
@@ -449,6 +544,8 @@ window.RiskPolicy = (function () {
     adviceFor: adviceFor,
     applyFloors: applyFloors,
     weightOf: weightOf,
+    normalizeSignal: normalizeSignal,
+    normalizeSignals: normalizeSignals,
     promptSpec: promptSpec,
   };
 })();

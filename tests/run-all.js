@@ -16,6 +16,7 @@ const SUITES = [
   'privacy.test.js',
   'channels.test.js',
   'bus.test.js',
+  'jobqueue.test.js',
   'harness.test.js',
   'llm.test.js',
   'server.test.js',

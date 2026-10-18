@@ -70,6 +70,35 @@ function matchLines(text, re) {
   return out;
 }
 
+/** 'use strict' 之前有多少个**代码行**（块注释、纯注释行、行尾注释都不算），找不到返回 -1。
+    数代码行而不是原始行，是因为「头注释写多长」和「这个模块有没有严格模式」是两件不相干的事：
+    按原始行数窗口的写法，只要给文件加一段说明就把 'use strict' 顶出窗口，闸门会报一个假红 ——
+    而这种假红的下场通常是「把窗口调大」，真护栏就废了。
+    顺带比原来的写法更严：'use strict' 只出现在注释里，这里同样算缺失。 */
+function codeLinesBeforeStrict(text) {
+  let code = 0;
+  let inBlock = false;
+  for (const raw of linesOf(text)) {
+    let t = raw.trim();
+    if (inBlock) {
+      const end = t.indexOf('*/');
+      if (end === -1) continue;
+      t = t.slice(end + 2).trim();
+      inBlock = false;
+    } else if (t.indexOf('/*') === 0) {
+      const end = t.indexOf('*/');
+      if (end === -1) { inBlock = true; continue; }
+      t = t.slice(end + 2).trim();
+    }
+    if (t.indexOf('//') === 0) continue;
+    t = t.replace(/\/\/.*$/, '').trim();
+    if (!t) continue;
+    if (/^['"]use strict['"]/.test(t)) return code;
+    code++;
+  }
+  return -1;
+}
+
 /* ------------------------------ 文件清单 ------------------------------ */
 
 const ASSETS_JS = walk('assets').filter((f) => f.endsWith('.js'));
@@ -78,6 +107,9 @@ const SERVER = read('server/server.js');
 const APP = read('assets/app.js');
 const STAGES = read('assets/harness/stages.js');
 const HARNESS_INDEX = read('assets/harness/index.js');
+const LLM_JS = read('assets/llm.js');
+const AGENT_JS = read('assets/harness/agent.js');
+const JOBQUEUE_JS = read('assets/jobqueue.js');
 
 const scriptList = () => {
   const out = [];
@@ -130,6 +162,7 @@ check('ST03', '静态结构', '加载顺序：依赖在前、app.js 收尾', () 
   const scripts = scriptList();
   const chain = [
     'assets/policy.js', 'assets/crm.js', 'assets/orderctx.js', 'assets/guard.js', 'assets/bus.js',
+    'assets/jobqueue.js',
     'assets/scenarios.js', 'assets/casefile.js', 'assets/engine.js', 'assets/llm.js',
     'assets/harness/core.js', 'assets/harness/stages.js', 'assets/harness/agent.js',
     'assets/harness/index.js',
@@ -214,8 +247,13 @@ check('ST08', '静态结构', '全部脚本开启严格模式', () => {
     .concat(walk('tools').filter((f) => f.endsWith('.js') && f.indexOf('invariants.js') === -1))
     .concat(walk('tests').filter((f) => f.endsWith('.js')))
     .concat(walk('eval').filter((f) => f.endsWith('.js')));
-  const miss = files.filter((f) => linesOf(read(f)).slice(0, 40).join('\n').indexOf("'use strict'") === -1);
-  return miss.length ? { status: 'fail', detail: '缺 use strict：' + miss.join(', ') } : true;
+  const miss = files.filter((f) => {
+    const n = codeLinesBeforeStrict(read(f));
+    return n === -1 || n >= 40;
+  });
+  return miss.length
+    ? { status: 'fail', detail: "缺 use strict（或没落在正文前 40 个代码行内）：" + miss.join(', ') }
+    : true;
 });
 
 check('ST09', '静态结构', '每个模块都对外暴露声明的全局', () => {
@@ -360,8 +398,121 @@ check('ST17', '静态结构', '阈值不在 policy 之外重复（退化兜底�
     : true;
 });
 
-/* ============================== 运行时契约 ============================== */
+check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权 / 慢哈希 / 代理闸门', () => {
+  const bad = [];
 
+  /* ① 静态托管必须是「默认拒绝 + 显式白名单」。
+     反面教材（2026-10-18 之前的真实状态）：整棵仓库根随便读 ——
+     server/data/db.json 里躺着坐席 salt+口令哈希，/.git/ 里躺着全部源码历史，
+     任何人拿它离线爆破口令。所以白名单里绝不能出现这些目录。 */
+  const dirsM = /STATIC_ALLOW_DIRS\s*=\s*\[([^\]]*)\]/.exec(SERVER);
+  const filesM = /STATIC_ALLOW_FILES\s*=\s*\[([^\]]*)\]/.exec(SERVER);
+  if (!dirsM || !filesM) return { status: 'fail', detail: 'server.js 缺静态白名单常量（退化成「仓库根随便读」）' };
+  const list = (m) => m[1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+  const dirs = list(dirsM);
+  const files = list(filesM);
+  const FORBIDDEN = ['server', 'tests', 'tools', 'node_modules', '.git', 'data', 'harness'];
+  dirs.concat(files).forEach((entry) => {
+    if (FORBIDDEN.indexOf(entry) !== -1) bad.push('白名单里出现敏感目录/文件：' + entry);
+  });
+  if (!/segs\.some\(\(s\) => s\.charAt\(0\) === '\.'\)/.test(SERVER)) bad.push('缺少「点开头目录一律拒绝」（.git / .env 可被读）');
+  if (!/s === '\.\.'/.test(SERVER)) bad.push('缺少逐段 .. 判定（先命中白名单再往上跳的路径可越权）');
+
+  /* ② 口令必须是慢哈希；单轮 sha256 对 4–32 位口令等于没设防 */
+  if (!/crypto\.scryptSync\(/.test(SERVER)) bad.push('hashPin 未使用 scrypt');
+  if (!/PIN_ALG/.test(SERVER)) bad.push('口令算法未版本化（旧条目无法就地升级）');
+
+  /* ③ 写接口不能裸奔：话术库的增删要有登录态，投递要有闸门 */
+  if (!/agentOf\(req\)[\s\S]{0,240}handleKbCreate/.test(SERVER)) bad.push('POST /api/kb 未校验登录态');
+  if (!/agentOf\(req\)[\s\S]{0,240}handleKbDelete/.test(SERVER)) bad.push('DELETE /api/kb 未校验登录态');
+  if (!/ingestGateCheck\(req\)/.test(SERVER)) bad.push('handleIngest 未过接入闸门');
+  if (!/INGEST_TOKEN/.test(SERVER)) bad.push('缺投递令牌配置（只能靠 loopback 兜底）');
+
+  /* ④ LLM 反向代理：不校验来源就是给任意网站当免费（且花真钱）的代理；
+     CORS 只限制「浏览器能不能读响应」，不限制请求被服务端接受 */
+  if (!/isSameOriginOrLocal\(req\)/.test(SERVER)) bad.push('/api/chat 未校验 Origin/来源');
+  if (!/chatRateOk\(/.test(SERVER)) bad.push('/api/chat 无频控');
+
+  /* ⑤ 边界要在 /api/health 里可见，否则「现在是什么模式」只能靠读源码 */
+  for (const k of ['ingestMode', 'chatLimit', 'staticAllow']) if (!new RegExp(k + '\\s*:').test(SERVER)) bad.push('/api/health 未暴露 ' + k);
+
+  /* ⑥ 落盘临时文件按进程隔离（2026-10-18 实测撞到的）：
+     演示用的那台 5173 和我另起的一台共用同一个 db.json.tmp —— A 写完 rename 把 B 的半成品
+     搬走，B 再 rename 就 ENOENT。代码注释里那句「原子替换」的前提因此只适用于单写者。
+     这一条不许回潮：改回固定名不会报错，只会偶发「写入失败」或半个 JSON。 */
+  if (!/DB_FILE \+ '\.' \+ process\.pid \+ '\.tmp'/.test(SERVER)) {
+    bad.push('saveDb 的临时文件没带 pid（多实例共用同名 tmp，rename 会互相搬走对方的半成品）');
+  }
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: '白名单 ' + dirs.concat(files).join('/') };
+});
+
+check('ST19', '静态结构', '判级入口收敛：词典判级只允许三处调用', () => {
+  /* 「阈值单一真源」最怕的不是把 58 写成 60，而是**多出一个判级的地方**：
+     多一处调用 evaluate / levelOf / applyFloors，就多一套与实际生效的标准，
+     而且它不会报错，只是让数字说谎。历史上这里就多有一套 —— 模型路径直接采信
+     模型自报的 score/signals，绕过词典，直到 riskfloor 阶段被补上。
+     白名单三个入口，各有明确身份：
+       engine.js          本地规则引擎（词典就是它的口径）
+       llm.js             过闸前的临时值（最终以 stages.riskfloor 为准）
+       harness/stages.js  对账闸 + 视觉叠加
+     想加第四个入口 = 必须先说清为什么现有三处不够，并改这里。 */
+  const allowed = ['assets/engine.js', 'assets/llm.js', 'assets/harness/stages.js'];
+  const re = /\b(?:RP|RiskPolicy)\s*\.\s*(?:evaluate|levelOf|applyFloors)\s*\(/;
+  const bad = [];
+  for (const f of ASSETS_JS) {
+    if (f === 'assets/policy.js') continue;
+    if (re.test(read(f)) && allowed.indexOf(f) === -1) bad.push(f + ' 自行判级');
+  }
+  if (!/RP\s*\.\s*evaluate\(\s*job\.message/.test(STAGES)) bad.push('riskfloor 未用顾客原话跑词典');
+  if (!/name:\s*'riskfloor'/.test(HARNESS_INDEX)) bad.push('index.js 未装配 riskfloor 阶段');
+  if (!/normalizeSignals?\s*\(/.test(STAGES)) bad.push('riskfloor 未做模型信号名归一');
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: 'engine（词典）/ llm（过闸前）/ stages（闸）' };
+});
+
+check('ST20', '静态结构', '模型预算按轮传递 · 分析队列按会话分桶', () => {
+  /* 两条约定都是「改回去不会报错、只会行为变差」的那种，所以钉在这里：
+       · 预算：LLMClient 身上的全局 deadline 只有一个格子。两轮分析重叠时，
+         后到者覆盖、先到者收尾清零 —— 表现是「没配超时，第二句却秒降级本地引擎」。
+         正解是每轮一个 deadlineAt，随调用参数传下去。
+       · 队列：全局串行 = 别人的模型延迟变成你的等待；全局并发 = 同会话结果交错回写。
+         正解是按会话分桶：桶内严格 FIFO，桶间并行且有上限。 */
+  const bad = [];
+
+  if (/LLM\.setDeadline\s*\(/.test(HARNESS_INDEX)) bad.push('harness/index.js 仍在写 LLMClient 的全局 deadline');
+  if (!/deadlineAt:\s*Date\.now\(\)\s*\+\s*ms/.test(HARNESS_INDEX)) bad.push('harness/index.js 未给每一轮盖 deadlineAt');
+  if (!/analyze\(\s*state\.input\s*,\s*\{\s*deadlineAt/.test(HARNESS_INDEX)) bad.push('llm 通道没把本轮预算传给 LLMClient');
+
+  if (!/function\s+remainingFor\s*\(/.test(LLM_JS)) bad.push('llm.js 缺 remainingFor（按轮预算的读数口）');
+  if (!/remainingFor\(\s*budgetUntil\s*\)/.test(LLM_JS)) bad.push('llm.js postOnce 未守按轮预算');
+  if (!/remainingFor\(\s*until\s*\)/.test(LLM_JS)) bad.push('llm.js 自愈重试未守按轮预算（重试最容易把本轮耗干）');
+
+  if (!/function\s+subBudgetUntil\s*\(/.test(AGENT_JS)) bad.push('agent.js 没有独立的子预算');
+  if (!/deadlineAt:\s*budgetUntil/.test(AGENT_JS)) bad.push('agent.js 未把子预算传给 LLM.chat');
+  if (!/left\s*<\s*MIN_STEP_MS/.test(AGENT_JS)) bad.push('agent.js 未做步前预算检查');
+  /* 步数上限必须由**预算**给，不能由风险等级给：后者需要在 generate 之前先判一次级，
+     那就等于新增第四个词典判级入口（ST19 只允许三处）。这里把形式钉住，防止有人
+     为了「高危多查几步」把 RiskPolicy.evaluate 引进 agent.js。 */
+  if (!/function\s+stepAllowance\s*\(/.test(AGENT_JS)) bad.push('agent.js 的步数上限没有按子预算给');
+  if (!/i\s*>=\s*allowance/.test(AGENT_JS)) bad.push('agent.js 的模型规划循环没有按 allowance 收口');
+
+  if (!/window\.JobQueue\s*=/.test(JOBQUEUE_JS)) bad.push('jobqueue.js 未挂载全局');
+  if (!/JobQueue\.create\s*\(/.test(APP)) bad.push('app.js 未使用 JobQueue 调度分析任务');
+  if (/\bqueue\.length\b/.test(APP)) bad.push('app.js 仍用 queue.length 判空闲（跨会话并行会被这个判断压回串行）');
+  if (/\bdraining\b/.test(APP)) bad.push('app.js 残留旧的串行 drain 标记');
+
+  const scripts = scriptList();
+  const jq = scripts.indexOf('assets/jobqueue.js');
+  if (jq === -1) bad.push('index.html 未引入 jobqueue.js');
+  else if (jq > scripts.indexOf('assets/app.js')) bad.push('jobqueue.js 排在 app.js 之后（app.js 顶层就要 create）');
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: '预算按轮 · Agent 步数按预算 · 队列按会话分桶（桶内 FIFO / 桶间并行）' };
+});
+
+/* ============================== 运行时契约 ============================== */
 /** 独立 window 对象加载：可检测未声明的顶层变量泄漏 */
 function loadIsolated(files) {
   const win = {};
@@ -406,6 +557,12 @@ check('RT03', '运行时契约', 'policy 三件套结构完整（等级/时限/�
   if (RP) {
     if (typeof RP.levelOf !== 'function') bad.push('缺 levelOf');
     if (typeof RP.applyFloors !== 'function') bad.push('缺 applyFloors');
+    if (typeof RP.normalizeSignal !== 'function') bad.push('缺 normalizeSignal（模型说法无法归一）');
+    if (typeof RP.normalizeSignals !== 'function') bad.push('缺 normalizeSignals');
+    if (!RP.SIGNALS) bad.push('缺 SIGNALS');
+    else if (RP.SIGNALS.some((s) => s.floor && !(s.alias || []).length)) {
+      bad.push('有等级下限的信号缺说法片段（模型换个写法就绕过红线）');
+    }
     if (!RP.LEVELS) bad.push('缺 LEVELS');
     else for (const key of Object.keys(RP.LEVELS)) {
       const L = RP.LEVELS[key];
@@ -420,6 +577,56 @@ check('RT04', '运行时契约', '无未声明的顶层变量泄漏', () => {
   const allowed = new Set(['window', 'console', 'localStorage']);
   const leaked = Object.keys(sandbox).filter((k) => !before.has(k) && !allowed.has(k));
   return leaked.length ? { status: 'fail', detail: '顶层泄漏：' + leaked.join(', ') } : true;
+});
+
+check('RT05', '运行时契约', 'riskfloor 是硬闸：模型低报必须被词典抬回', () => {
+  const { sandbox, win } = loadIsolated(['assets/policy.js', 'assets/harness/stages.js']);
+  const S = win.HarnessStages;
+  const RP = win.RiskPolicy;
+  if (!S || typeof S.riskfloor !== 'function') {
+    return { status: 'fail', detail: 'stages.riskfloor 不存在 —— 判级失去单一真源闸' };
+  }
+  const bad = [];
+  const oi = S.ORDER.indexOf('riskfloor');
+  if (S.ORDER.indexOf('generate') + 1 !== oi || S.ORDER[oi + 1] !== 'vision') {
+    bad.push('ORDER 必须 generate → riskfloor → vision，实际 ' + S.ORDER.join('>'));
+  }
+
+  /* 直接在沙箱里跑这一个阶段：三个场景是「闸被拆掉时会怎样」的最小复现 */
+  const runStage = (message, risk) => {
+    const facts = {};
+    const decisions = [];
+    sandbox.__ctx = {
+      deps: { RiskPolicy: RP },
+      set: (k, v) => { facts[k] = v; },
+      decide: (txt) => { decisions.push(txt); },
+    };
+    sandbox.__state = { provider: 'llm', job: { message: message }, result: { risk: risk } };
+    /* 注意取 window.HarnessStages：沙箱里 window 不是全局对象（stages.js 挂的是 window.X） */
+    vm.runInContext('window.HarnessStages.riskfloor(__state, __ctx)', sandbox, { filename: 'riskfloor-probe' });
+    return { risk: sandbox.__state.result.risk, facts: facts, decisions: decisions };
+  };
+
+  const low = runStage('我脸过敏烂脸了，你们这是要毁容，我要投诉12315',
+    { level: 'low', score: 10, signals: ['皮肤刺激', '投诉倾向'], advice: '' });
+  if (low.risk.score !== 80) bad.push('红线消息未被抬回词典分数（实际 ' + low.risk.score + '，应为 80）');
+  if (low.risk.level !== 'high') bad.push('红线消息等级仍为 ' + low.risk.level + '（应为 high）');
+  if (low.facts.riskClaimedScore !== 10) bad.push('trace 未保留模型自报分数（审计断链）');
+  if (!low.decisions.some((d) => d.indexOf('10 分 / 词典 80 分 → 取 80') !== -1)) {
+    bad.push('trace 未写明「自报 / 词典 / 取值」三个数');
+  }
+
+  const med = runStage('这个精华我怀孕了还能继续用吗',
+    { level: 'low', score: 10, signals: ['医疗建议'], advice: '' });
+  if (med.risk.score !== 10) bad.push('无依据的主张被拿去加分了（实际 ' + med.risk.score + '）');
+  if (med.risk.level !== 'medium') bad.push('医疗红线的等级下限没生效（实际 ' + med.risk.level + '）');
+
+  const same = runStage('我脸过敏烂脸了，你们这是要毁容，我要投诉12315',
+    { level: 'high', score: 80, signals: RP.evaluate('我脸过敏烂脸了，你们这是要毁容，我要投诉12315').signals, advice: 'x' });
+  if (same.risk.score !== 80 || same.risk.recheck.raised !== false) bad.push('本地口径过闸不幂等（会二次加分）');
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: '低报抬回 / 主张不加分 / 幂等' };
 });
 
 /* ------------------------------- 输出 ------------------------------- */

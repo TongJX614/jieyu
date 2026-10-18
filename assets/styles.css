@@ -62,7 +62,7 @@
      --danger-soft / --warn-soft 等浅底仅用于告警条与浮层内提示，不用于卡片边框。 */
   --danger: #e8767f;
   --danger-soft: rgba(232, 118, 127, 0.12);
-  --danger-line: rgba(232, 118, 127, 0.34);
+  --danger-line: rgba(232, 118, 127, 0.5);
   --danger-solid: #b0243c;
   --warn: #dfb63f;
   --warn-soft: rgba(223, 182, 63, 0.12);
@@ -1600,6 +1600,27 @@ body[data-view]:not([data-view="workbench"]) .contacts-scrim { display: none; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-variant-numeric: tabular-nums;
 }
+/* 读取态：分析进行中气泡正文只显示这个，绝不把上一轮结果当本轮结论画出来 */
+.sb-reading {
+  display: flex; align-items: center; gap: 9px;
+  padding: 14px 2px 10px;
+  font-size: 12px; color: var(--tx-3); line-height: 1.5;
+}
+.sbr-dots { display: inline-flex; gap: 4px; flex: 0 0 auto; }
+.sbr-dots i {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent);
+  animation: sbr-bounce 1s ease-in-out infinite;
+}
+.sbr-dots i:nth-child(2) { animation-delay: .15s; }
+.sbr-dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes sbr-bounce {
+  0%, 100% { opacity: .25; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-3px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sbr-dots i { animation: none; opacity: .55; }
+}
 .sb-ctx-list {
   max-height: 178px; overflow-y: auto;
   margin: -3px 0 9px;
@@ -1738,6 +1759,18 @@ body[data-view]:not([data-view="workbench"]) .contacts-scrim { display: none; }
 /* 破坏性动作（清空本机数据）：红色只给文字与悬停底，不加实心底 —— 它不该比主操作更显眼 */
 .btn.ghost.danger { color: var(--danger); }
 .btn.ghost.danger:hover { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-line); }
+/* 破坏性动作：有描边的红字按钮。不加实心红 —— 它不该比「保存」这类主操作更显眼，
+   但也不能只是灰字，否则「清空本机数据」看着像一句说明 */
+.btn.danger { border-color: var(--danger-line); color: var(--danger); background: transparent; }
+.btn.danger:hover { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+/* 二段确认的「已经举起来」状态：底色与描边都加满，字数变长也不跳版 */
+.btn.danger[data-armed="1"] {
+  background: var(--danger-soft); border-color: var(--danger);
+  color: var(--danger); font-weight: 600;
+}
+/* 一组同级的动作排两列等宽：长短不一的文字不该把按钮拉成参差的两行 */
+.action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.action-grid .btn { width: 100%; }
 .btn.icon { padding: 0; width: var(--ctl-h); flex: 0 0 var(--ctl-h); justify-content: center; }
 .btn.small.icon { width: var(--ctl-sm); flex: 0 0 var(--ctl-sm); padding: 0; }
 .btn:disabled { opacity: 0.42; cursor: not-allowed; }
@@ -2143,7 +2176,21 @@ body[data-view]:not([data-view="workbench"]) .contacts-scrim { display: none; }
   border-color: var(--accent-line); background: var(--bg-3);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
-.form-note { font-size: 11px; color: var(--tx-3); margin-top: 7px; line-height: 17px; }
+.form-note { font-size: 11px; color: var(--tx-3); margin-top: 7px; line-height: 18px; }
+/* 关于：三行「标签 + 值」，标签一列对齐，值一列对齐。
+   以前用全角空格拼三段，不同字号下宽度不一，每段间距都不一样 */
+#prefAbout { display: flex; flex-direction: column; gap: 5px; }
+.about-row {
+  display: grid; grid-template-columns: 30px minmax(0, 1fr);
+  gap: 8px; align-items: baseline;
+}
+.about-row > b { font-weight: 500; color: var(--tx-3); }
+.about-row > span { min-width: 0; }
+.about-row i { font-style: normal; color: var(--tx-3); margin: 0 6px; }
+.about-pipe {
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.8;
+  color: var(--tx-3); word-break: keep-all;
+}
 .form-note code {
   font-family: var(--font-mono); font-size: 11px;
   background: var(--bg-3); padding: 1px 5px; border-radius: var(--r-1);
@@ -2153,21 +2200,27 @@ body[data-view]:not([data-view="workbench"]) .contacts-scrim { display: none; }
 
 /* 快捷键表：左边「这件事」，右边「按什么」。键帽用等宽字 + 一条底线，
    看起来像键，也就不会被当成普通代码片段 */
-.kbd-list { display: flex; flex-direction: column; gap: 2px; }
+.kbd-list { display: flex; flex-direction: column; gap: 0; }
 .kbd-row {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 5px 0; border-bottom: 1px solid var(--line);
-  font-size: 11px; color: var(--tx-2);
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 0; border-bottom: 1px solid var(--line);
+  font-size: var(--fs-xs); color: var(--tx-2);
 }
 .kbd-row:last-child { border-bottom: 0; }
-.kbd-row > span:first-child { flex: 1 1 96px; min-width: 0; }
-.kbd-alt { color: var(--tx-3); font-size: 10px; }
+/* 标签吃掉余量，键帽整组贴右 —— 五行键帽必须落在同一列上，
+   否则眼睛追着键帽看的时候会看到一条锯齿 */
+.kbd-row > span:first-child { flex: 1 1 auto; min-width: 0; }
+.kbd-keys {
+  flex: 0 0 auto; margin-left: auto;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.kbd-keys i { font-style: normal; color: var(--tx-3); font-size: 10px; line-height: 1; }
 .kbd-row kbd {
-  font-family: var(--font-mono); font-size: 10px; line-height: 1;
-  padding: 3px 5px; border-radius: 4px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1;
+  min-width: 20px; padding: 4px 5px; border-radius: var(--r-1);
   background: var(--bg-3); border: 1px solid var(--line);
   box-shadow: 0 1px 0 var(--line-strong);
-  color: var(--tx-1);
+  color: var(--tx-1); text-align: center;
 }
 
 /* 性能预算：三组「标签 + 数字」对齐成两列，短标签不会把输入框挤变形 */
@@ -2921,6 +2974,24 @@ html[data-density="loose"] .std-row { padding: 9px 0; }
 .sv-sig.none { color: var(--tx-3); }
 .sv-src { margin-top: 5px; font-size: 11px; color: var(--tx-3); }
 
+/* 视觉观察 · 识图 / 皮肤状态 / 妆容 三段统一小节 */
+.sv-sec { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 8px; margin-top: 6px; font-size: 11px; }
+.sv-sec-k { color: var(--tx-3); flex: 0 0 auto; }
+.sv-sec-v { color: var(--tx-2); }
+.sv-sec-v.muted { color: var(--tx-3); font-style: italic; }
+.sv-sec-v b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.sev-mild { color: var(--warn); }
+.sev-moderate { color: #d9772b; }
+.sev-severe { color: var(--danger); }
+.sev-unknown { color: var(--tx-3); }
+
+/* 发送前预览条里的识图 / 妆容速览 */
+.ca-kind { font-size: 11px; color: var(--accent); border: 1px solid var(--line); border-radius: var(--r-1); padding: 1px 7px; }
+.ca-sec { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin-top: 6px; font-size: 11px; }
+.ca-sec-k { color: var(--tx-3); }
+.ca-sec-v { color: var(--tx-2); }
+.ca-sec-v.muted { color: var(--tx-3); font-style: italic; }
+
 /* ---------- 主动关怀雷达（复购 / 权益 / 成分冲突） ---------- */
 
 .rail-badge.care { background: var(--warn-solid); color: #fff; border-color: transparent; }
@@ -3540,6 +3611,8 @@ html[data-density="loose"] .std-row { padding: 9px 0; }
 }
 
 .pref-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+/* 抽屉里跟按钮同行的说明：字号照 form-note，但不要它的上外边距（行高由 .pref-row 定） */
+.pref-note { font-size: 11px; color: var(--tx-3); line-height: 18px; }
 .chk {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; color: var(--tx-2); cursor: pointer;

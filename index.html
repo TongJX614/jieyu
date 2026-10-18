@@ -655,6 +655,7 @@
         </div>
         <div class="form-note">外部系统向 <code>POST /api/ingest</code> 投递顾客消息（字段 <code>customerId</code>、<code>text</code>，可选 <code>msgId</code> 用于幂等）。所有在线坐席通过 SSE 实时收到，断线重连会自动补拉，<b>不丢消息</b>。</div>
         <div class="form-note">示例：<code>curl -X POST /api/ingest -H "Content-Type: application/json" -d '{"customerId":"allergy","text":"我用完脸红得厉害"}'</code></div>
+        <div class="form-note">接入闸门：服务端默认<b>只接受本机</b>（127.0.0.1）投递；要从别的机器接，启动前设 <code>INGEST_TOKEN</code>，然后每个请求带 <code>x-ingest-token</code>。当前模式看 <code>GET /api/health</code> 的 <code>ingestMode</code>。</div>
       </div>
 
       <div class="form-block">
@@ -758,10 +759,11 @@
           <label class="chk"><input type="checkbox" id="prefSprite"> 在工作台显示</label>
           <label class="chk"><input type="checkbox" id="prefAutoBubble"> 命中风险时自动弹出建议</label>
         </div>
-        <div class="inline-row" style="margin-top:8px">
+        <div class="pref-row" style="margin-top:8px">
+          <span class="pref-note">可拖到任意位置，双击也能归位</span>
+          <span class="spacer"></span>
           <button class="btn" id="btnResetSpriteD">助手归位</button>
         </div>
-        <div class="form-note">小助手可拖到任意位置，双击也能归位。</div>
       </div>
 
       <div class="form-block">
@@ -784,27 +786,25 @@
 
       <div class="form-block">
         <label>数据与隐私</label>
-        <div class="inline-row">
-          <button class="btn ghost" id="btnAuditExportD">导出审计日志（脱敏）</button>
-          <button class="btn ghost" id="btnPrefExport">导出我的设置</button>
+        <div class="action-grid">
+          <button class="btn" id="btnAuditExportD">导出审计日志</button>
+          <button class="btn" id="btnPrefExport">导出我的设置</button>
+          <button class="btn" id="btnPrefReset">恢复默认设置</button>
+          <button class="btn danger" id="btnWipeLocal">清空本机数据</button>
         </div>
-        <div class="inline-row" style="margin-top:8px">
-          <button class="btn ghost" id="btnPrefReset">恢复默认设置</button>
-          <button class="btn ghost danger" id="btnWipeLocal">清空本机数据</button>
-        </div>
-        <div class="form-note">导出前按确定性规则脱敏（手机号 / 邮箱 / 证件号 / 订单号 / 姓名）。「导出我的设置」只导偏好，不含顾客数据与 Key。「恢复默认设置」会把主题、密度、导航、起点、助手与提醒重置一遍，账号与话术不动。</div>
+        <div class="form-note">导出前按确定性规则脱敏（手机号 / 邮箱 / 证件号 / 订单号 / 姓名）。「导出我的设置」只导偏好，不含顾客数据与 Key。「恢复默认设置」会把主题、密度、导航、起点、助手与提醒重置一遍，账号与话术不动。「清空本机数据」要连点两次才生效。</div>
       </div>
 
       <div class="form-block">
         <label>快捷键</label>
         <div class="kbd-list">
-          <div class="kbd-row"><span>发送回复</span><kbd>Enter</kbd><span class="kbd-alt">或 <kbd>Ctrl</kbd> + <kbd>Enter</kbd>（取决于上面的设置）</span></div>
-          <div class="kbd-row"><span>回复框换行</span><kbd>Shift</kbd> + <kbd>Enter</kbd></div>
-          <div class="kbd-row"><span>聚焦搜索客户</span><kbd>/</kbd></div>
-          <div class="kbd-row"><span>关闭浮层 / 取消</span><kbd>Esc</kbd></div>
-          <div class="kbd-row"><span>切到下一屏</span><kbd>Alt</kbd> + <kbd>1</kbd> … <kbd>6</kbd></div>
+          <div class="kbd-row"><span>发送回复</span><span class="kbd-keys" id="kbdSendKeys"><kbd>Enter</kbd></span></div>
+          <div class="kbd-row"><span>换行（长回复）</span><span class="kbd-keys"><kbd>Shift</kbd><i>+</i><kbd>Enter</kbd></span></div>
+          <div class="kbd-row"><span>聚焦搜索客户</span><span class="kbd-keys"><kbd>/</kbd></span></div>
+          <div class="kbd-row"><span>关闭浮层 / 取消</span><span class="kbd-keys"><kbd>Esc</kbd></span></div>
+          <div class="kbd-row"><span>切到下一屏</span><span class="kbd-keys"><kbd>Alt</kbd><i>+</i><kbd>1</kbd><i>…</i><kbd>6</kbd></span></div>
         </div>
-        <div class="form-note">浮层里的 Tab 会绕着走，Esc 先关最上面那一层。</div>
+        <div class="form-note">「发送回复」跟着上面「回复框的发送键」走，换一次这里就跟着换。浮层里的 Tab 会绕着走，Esc 先关最上面那一层。</div>
       </div>
 
       <div class="form-block">
@@ -812,7 +812,7 @@
         <div class="pref-row">
           <span class="pref-me" id="prefAccount">—</span>
           <span class="spacer"></span>
-          <button class="btn ghost" id="btnOpenAccount">账号与坐席</button>
+          <button class="btn" id="btnOpenAccount">账号与坐席</button>
         </div>
       </div>
 
@@ -969,6 +969,8 @@
 <script src="assets/orderctx.js"></script>
 <script src="assets/guard.js"></script>
 <script src="assets/bus.js"></script>
+<!-- 分析任务调度：同会话 FIFO、跨会话并行。它只调度，不认识 harness 也不碰 DOM -->
+<script src="assets/jobqueue.js"></script>
 <script src="assets/vision.js"></script>
 <script src="assets/careradar.js"></script>
 <script src="assets/recap.js"></script>

@@ -1,4 +1,4 @@
-/* 分析管线 harness：阶段顺序 / provider 降级语义 / 视觉阶段并入风险判定 */
+/* 分析管线 harness：阶段顺序 / 风险对账闸 / provider 降级语义 / 视觉阶段并入风险判定 */
 
 'use strict';
 
@@ -24,12 +24,25 @@ function buildHarness(chain) {
   h.provide('local', (state) => deps.LocalEngine.analyze(state.input));
   h.use({ name: 'facts', run: stages.facts });
   h.use({ name: 'generate', run: stages.generate });
+  h.use({ name: 'riskfloor', run: stages.riskfloor });
   h.use({ name: 'vision', run: stages.vision });
   h.use({ name: 'ground', run: stages.ground });
   h.use({ name: 'compliance', run: stages.compliance });
   h.use({ name: 'emotion', run: stages.emotion });
   h.use({ name: 'context', run: stages.context });
   return h;
+}
+
+/* 故意低报的「模型」：分数压到 10、等级写 low、信号名用自然说法（不合规的标准名）。
+   这就是 P1-1 抓出来的真实失效形态 —— 没有 riskfloor 时它会一路绿灯进界面。 */
+function liarResult(risk) {
+  return {
+    engine: 'llm',
+    emotion: { score: 55 },
+    intents: [{ name: '常规咨询', tone: 'muted', confidence: 0.6 }],
+    risk: risk,
+    replies: [{ text: '非常抱歉给您带来困扰，我这边马上为您核实处理。', confidence: 0.9 }],
+  };
 }
 
 function jobFor(text, image) {
@@ -44,10 +57,109 @@ function jobFor(text, image) {
   };
 }
 
+/* 造图：底色 + 指定比例的强红像素（和 vision.test.js 用同一套构造方式） */
+function px(redRatio, base) {
+  const b = base || [222, 184, 158];
+  const n = 60 * 60;
+  const d = new Uint8ClampedArray(n * 4);
+  const red = Math.round(n * redRatio);
+  for (let i = 0; i < n; i++) {
+    const isRed = i < red;
+    d[i * 4] = isRed ? 196 : b[0];
+    d[i * 4 + 1] = isRed ? 58 : b[1];
+    d[i * 4 + 2] = isRed ? 52 : b[2];
+    d[i * 4 + 3] = 255;
+  }
+  return d;
+}
+
 module.exports = async function (t) {
   t.suite('harness · 管线顺序');
-  t.eq(stages.ORDER.join('>'), 'facts>generate>vision>ground>compliance>emotion>context',
-    '视觉阶段插在 generate 与 ground 之间');
+  t.eq(stages.ORDER.join('>'),
+    'facts>generate>riskfloor>vision>ground>compliance>emotion>context',
+    '风险对账闸插在 generate 之后、vision 之前（模型结论先过词典，再让视觉叠加）');
+  t.eq(stages.ORDER.length, 8, '八个领域阶段');
+
+  /* ---------- 风险对账闸：判级真源只有 policy.js 一份，模型不许自带一套 ---------- */
+  t.suite('harness · 模型低报风险被词典抬回（与本地通道等级一致）');
+  {
+    const MSG = '我脸过敏烂脸了，你们这是要毁容，我要投诉12315';
+    const hModel = buildHarness(['llm']);
+    hModel.provide('llm', () => liarResult({
+      level: 'low', score: 10, signals: ['皮肤刺激', '投诉倾向'], advice: '安抚一下就好，不必升级',
+    }));
+    const rModel = await hModel.run(jobFor(MSG), deps);
+    const rLocal = await buildHarness().run(jobFor(MSG), deps);
+
+    t.eq(rLocal.result.risk.score, 80, '词典口径：34+16+30 = 80');
+    t.eq(rModel.result.risk.score, rLocal.result.risk.score, '模型路径过闸后与本地路径同分');
+    t.eq(rModel.result.risk.level, rLocal.result.risk.level, '两条通道的最终等级必须一致（单一真源）');
+    t.eq(rModel.result.risk.level, 'high', '烂脸 + 12315 不可能再被判成「安全」');
+    t.eq(rModel.result.risk.signals.join('>'), rLocal.result.risk.signals.join('>'), '信号清单也一致');
+    t.eq(rModel.result.risk.recheck.claimedScore, 10, 'recheck 保留模型自报的原值（可核对，不是抹掉）');
+    t.eq(rModel.result.risk.recheck.dictScore, 80, 'recheck 保留词典累加值');
+    t.eq(rModel.result.risk.recheck.raised, true, '抬回动作被显式标注');
+    t.eq(rModel.result.risk.advice.indexOf('安抚一下') === -1, true, '低报时的模型处置文案被词典口径覆盖');
+    t.includes(rModel.result.risk.advice, '立即升级资深客服', '处置动作文案取自高危档定义');
+
+    const dec = rModel.trace.decisions.filter((d) => d.indexOf('风险对账') === 0)[0] || '';
+    t.ok(!!dec, '轨迹里留下对账记录');
+    t.includes(dec, '10 分 / 词典 80 分 → 取 80', '对账行同时给出「模型自报 / 词典 / 取值」三个数');
+    t.includes(dec, '皮肤刺激→皮肤不良反应', '非标准信号名的归一映射被写明');
+    t.includes(dec, '投诉倾向', '兜不住的名字如实记录，而不是被丢掉');
+    t.eq(rModel.result.risk.recheck.unknown.join(''), '投诉倾向', 'unknown 清单进审计字段');
+    t.eq(rModel.trace.facts.riskClaimedScore, 10, 'trace 事实里能查到自报分（看板对账用）');
+    t.eq(rModel.trace.facts.riskScore, 80, 'trace 事实里的分数是过闸后的');
+
+    /* 本地引擎路径过闸必须是幂等的 —— 它本来就是按词典算的 */
+    const direct = deps.LocalEngine.analyze({
+      message: MSG, history: [], profile: {}, pack: null,
+    });
+    t.eq(rLocal.result.risk.score, direct.risk.score, '本地路径：过闸前后同分（幂等）');
+    t.eq(rLocal.result.risk.level, direct.risk.level, '本地路径：过闸前后同等级');
+    t.eq(rLocal.result.risk.recheck.raised, false, '本地路径不产生「抬回」');
+    t.eq(rLocal.result.risk.recheck.claimedOnly.length, 0, '本地路径没有无依据的主张');
+    t.eq(rLocal.result.risk.recheck.provider, 'local', '对账记录标明结论来自哪个提供者');
+  }
+
+  t.suite('harness · 模型主张但原话无依据：只抬等级，不加分');
+  {
+    const MSG2 = '这个精华我怀孕了还能继续用吗';
+    const h2 = buildHarness(['llm']);
+    h2.provide('llm', () => liarResult({
+      level: 'low', score: 10, signals: ['医疗建议'], advice: '',
+    }));
+    const r2 = await h2.run(jobFor(MSG2), deps);
+    t.eq(r2.result.risk.recheck.dictScore, 0, '词典在这句话里找不到任何关键词（原话只说「怀孕」）');
+    t.eq(r2.result.risk.score, 10, '无依据的主张不参与计分 → 分数仍是模型自报的 10');
+    t.eq(r2.result.risk.level, 'medium', '但医疗红线信号的等级下限照样生效（至少「关注」）');
+    t.eq(r2.result.risk.recheck.claimedOnly.join(''), '医疗健康建议边界', '主张项被单独列出');
+    t.eq(r2.result.risk.recheck.alias.length, 1, '归一映射记录：医疗建议 → 标准名');
+    const d2 = r2.trace.decisions.filter((d) => d.indexOf('风险对账') === 0)[0] || '';
+    t.includes(d2, '原话里无依据', '对账行点明哪些信号只是主张');
+    t.includes(d2, '不计分', '并说明它只用于抬等级下限');
+  }
+
+  t.suite('harness · 组合下限与视觉叠加不互相打架');
+  {
+    /* COMBOS：高价值会员异议 + 情绪升级 → 22 分也判「关注」。
+       这一步必须活到视觉叠加之后：vision 只加分、只就高，不得把等级降回低档。 */
+    const MSG3 = '我钻石卡的积分凭空少了一半，说实话挺失望的';
+    const obs = {
+      level: 'high', label: '泛红明显', redness: 31.5, signals: ['影像可见皮肤异常'],
+      summary: '泛红明显', detail: [],
+    };
+    const h3 = buildHarness(['llm']);
+    h3.provide('llm', () => liarResult({ level: 'low', score: 0, signals: [], advice: '' }));
+    const r3 = await h3.run(jobFor(MSG3, { dataURL: 'x', observation: obs }), deps);
+    t.eq(r3.result.risk.recheck.dictScore, 22, '词典 22 分（10+12）');
+    t.eq(r3.result.risk.recheck.level, 'medium', '过闸时按组合下限判到「关注」');
+    t.eq(r3.result.risk.score, 40, '视觉 +18 后总分 40');
+    t.eq(r3.result.risk.level, 'medium', '叠加后仍是「关注」（组合下限没被抹掉）');
+    t.eq(r3.result.risk.recheck.score, r3.result.risk.score, '审计里的分数与界面显示的一致');
+    t.eq(r3.result.risk.recheck.level, r3.result.risk.level, '审计里的等级与界面显示的一致');
+    t.eq(r3.result.risk.recheck.visionBoost, 18, '视觉叠加幅度也记进对账，来源可追');
+  }
 
   t.suite('harness · 无图片时视觉通道静默跳过');
   {
@@ -68,7 +180,7 @@ module.exports = async function (t) {
     const run2 = await h.run(jobFor('我下单一周了还没发货，页面写的是48小时内发出的。', { dataURL: 'x', observation: obs }), deps);
     t.eq(run2.result.risk.score, baseScore + 18, '风险分按统一权重表 +18');
     t.eq(run2.result.risk.level, 'medium', '12 + 18 = 30 → 跨过阈值升为关注');
-    t.not(run2.result.risk.signals.indexOf('影像可见皮肤异常') === -1, true, '信号并入 risk.signals');
+    t.eq(run2.result.risk.signals.indexOf('影像可见皮肤异常') !== -1, true, '信号并入 risk.signals');
     t.eq(run2.result.risk.visionBoost, 18, '记录视觉加分幅度（可核对）');
     t.eq(run2.result.vision.level, 'high', '观察结果挂在 result.vision');
     t.includes(run2.result.risk.advice, '2 分钟内', '处置建议按新等级重算（关注档 SLA）');
@@ -119,5 +231,181 @@ module.exports = async function (t) {
     t.ok(r.result, '非 fatal 阶段抛错不中断整轮');
     t.eq(r.trace.errors.length, 1, '异常被记进 trace');
     t.ok(r.trace.stages.some((s) => s.name === 'after' && s.ok), '后续阶段仍然执行');
+  }
+
+  /* ---------- Agent 的 read_vision 工具：不许把「没认出来」写成「没异常」 ----------
+     工具输出会直接进模型上下文，一句假的「皮肤状态：未见明显异常」比不说更糟。 */
+  t.suite('harness · Agent read_vision 不编造皮肤结论');
+  {
+    const agent = require(path.join('..', 'assets', 'harness', 'agent.js'));
+    const VS = load(['assets/vision.js']);
+    const depsV = Object.assign({}, deps, { Vision: VS.Vision });
+    const waybill = VS.Vision.observe(VS.Vision.statsFromPixels(px(0, [250, 250, 250]), 60, 60));
+    const skinPhoto = VS.Vision.observe(VS.Vision.statsFromPixels(px(0.4), 60, 60));
+    const msg = '这个是我的快递单，到底什么时候发货';
+
+    const outShot = agent.buildTools(depsV, jobFor(msg), {
+      message: msg, pack: { available: false }, history: [], image: { dataUrl: 'x', observation: waybill },
+    }).read_vision.run();
+    t.includes(outShot, '图像类型：图片（类型未确认）', '类型标签取 vision.js 的唯一说法');
+    t.includes(outShot, '图片类型未确认', '皮肤状态段如实转达「判不了」');
+    t.eq(outShot.indexOf('未见明显异常') === -1, true, '绝不写「未见明显异常」这种凭空阴性结论');
+
+    const outSkin = agent.buildTools(depsV, jobFor('我脸好红'), {
+      message: '我脸好红', pack: { available: false }, history: [], image: { dataUrl: 'x', observation: skinPhoto },
+    }).read_vision.run();
+    t.includes(outSkin, '图像类型：皮肤照片', '皮肤照片有明确标签');
+    t.includes(outSkin, '泛红（severe）', '皮肤照片照常给出可见发现');
+    t.includes(outSkin, '需视觉模型', '离线来源在工具输出里标明');
+
+    const outNone = agent.buildTools(depsV, jobFor('你好'), {
+      message: '你好', pack: { available: false }, history: [],
+    }).read_vision.run();
+    t.includes(outNone, '本轮没有顾客上传的图片', '无图时如实说无图');
+
+    /* 没注入 Vision（Node 单测场景）时的兜底措辞必须与真源逐字一致 */
+    const outFallback = agent.buildTools(deps, jobFor(msg), {
+      message: msg, pack: { available: false }, history: [], image: { dataUrl: 'x', observation: waybill },
+    }).read_vision.run();
+    t.includes(outFallback, '图片（类型未确认）', '兜底措辞与 Vision.kindLabel 一致');
+  }
+
+  /* ------------------------------------------------ 组装根：预算按轮 */
+
+  t.suite('harness · 组装根的 llm 通道守本轮预算');
+  {
+    const HARNESS_ROOT = require(path.join('..', 'assets', 'harness', 'index.js'));
+    let analyzeCalls = 0;
+    let seenDeadline = 'none';
+    const stubLLM = {
+      readConfig: () => ({ mode: 'auto', budgetMs: 15000, model: 'deepseek-chat', maxCalls: 100 }),
+      /* 与真 LLMClient 同语义：传了按轮截止就用按轮，没传则不限 */
+      remainingFor: (until) => (Number(until) > 0 ? Math.max(0, Number(until) - Date.now()) : Infinity),
+      analyze: async (input, opts) => {
+        analyzeCalls++;
+        seenDeadline = (opts && opts.deadlineAt) || 0;
+        return {
+          engine: 'llm', emotion: { score: 55 },
+          intents: [{ name: '常规咨询', tone: 'muted', confidence: 0.6 }],
+          risk: { level: 'low', score: 5, signals: [], advice: '' },
+          replies: [{ text: '模型的话术', confidence: 0.9 }],
+        };
+      },
+    };
+    const fullDeps = Object.assign({}, deps, { LLMClient: stubLLM });
+
+    /* 本轮预算已经花完 → 不该再发一次注定被掐断的请求 */
+    const h = HARNESS_ROOT.create({ name: 'budget', providerChain: ['llm', 'local'] });
+    const spent = jobFor('我的面霜用着刺痛');
+    spent.deadlineAt = Date.now() - 1;
+    const rSpent = await h.run(spent, fullDeps);
+    t.eq(analyzeCalls, 0, '预算用尽时一次模型都不调（不是「调了再失败」）');
+    t.eq(rSpent.provider, 'local', '直接落到本地引擎');
+    t.includes(rSpent.trace.decisions.join(' ｜ '), '本轮模型预算仅剩', '轨迹写明「是预算不够」');
+    t.includes(rSpent.trace.decisions.join(' ｜ '), '不再发起注定被掐断的调用', '轨迹给出处置而不是含糊的失败');
+    t.eq(rSpent.trace.facts.llmSkippedForBudget, true, '「因预算跳过」进 facts，面板能显示');
+    t.eq(rSpent.degraded, '', '预算不足是「不适用」，不记成模型故障');
+
+    /* 有预算时正常调用，并把本轮截止时刻传下去 */
+    const live = jobFor('我的面霜用着刺痛');
+    live.deadlineAt = Date.now() + 9000;
+    const rLive = await h.run(live, fullDeps);
+    t.eq(analyzeCalls, 1, '预算充足时正常调用模型');
+    t.eq(rLive.provider, 'llm', '采用模型结果');
+    t.eq(seenDeadline, live.deadlineAt, '调用时带上本轮的绝对截止时刻（不是读全局那一格）');
+    t.eq(rLive.trace.facts.llmSkippedForBudget, false, '未跳过时 facts 也如实为 false');
+
+    /* Agent 的子预算：本轮只剩一点点时，模型规划整段不启动，交给规则规划 */
+    const AGENT = require(path.join('..', 'assets', 'harness', 'agent.js'));
+    const tight = AGENT.subBudgetUntil({ deadlineAt: Date.now() + 1000 }, stubLLM);
+    t.ok(tight > 0 && tight <= Date.now() + 1000,
+      '子预算不超过本轮剩余：' + (tight - Date.now()) + 'ms ≤ 1000ms');
+    const roomy = AGENT.subBudgetUntil({ deadlineAt: Date.now() + 60000 }, stubLLM);
+    t.ok(roomy - Date.now() <= AGENT.SUB_BUDGET_CAP_MS + 5,
+      '剩余很多也被上限截住，不让 Agent 独占整轮：' + Math.round(roomy - Date.now()) + 'ms');
+    t.eq(AGENT.subBudgetUntil({}, stubLLM), 0, '没有按轮预算时返回 0（不限），老调用方行为不变');
+  }
+
+  /* ------------------------------------------------ Agent：步数由预算给 */
+
+  t.suite('harness · Agent 步数上限按子预算给（不按风险等级，避免第四个判级入口）');
+  {
+    const AG = require(path.join('..', 'assets', 'harness', 'agent.js'));
+
+    /* ① 纯函数：步数 = 子预算剩余 ÷ 单步下限，夹在 [1, MAX_STEPS] */
+    t.eq(AG.stepAllowance(Infinity), AG.MAX_STEPS, '预算不限时仍受 MAX_STEPS 约束');
+    t.eq(AG.stepAllowance(AG.SUB_BUDGET_CAP_MS), 3, '满子预算 9s → 3 步');
+    t.eq(AG.stepAllowance(6000), 2, '剩 6s → 2 步');
+    t.eq(AG.stepAllowance(AG.MIN_STEP_MS), 1, '刚好一步的钱 → 1 步');
+    t.eq(AG.stepAllowance(AG.MIN_STEP_MS - 1), 1, '低于单步下限也至少 1 步（跑不跑由 provider 判）');
+    t.eq(AG.stepAllowance(0), 1, '0 不会算成 0 步');
+    t.eq(AG.stepAllowance(-5), 1, '负数走保守值');
+    t.eq(AG.stepAllowance('abc'), 1, 'NaN 走保守值而不是 MAX_STEPS（读数坏掉时不能放行更多步）');
+    t.eq(AG.stepAllowance(60000), AG.MAX_STEPS, '再多钱也只买到 MAX_STEPS 步');
+
+    /* ② 真跑一轮模型规划：模型每步都「还要查」，步数必须在 allowance 处被截住 */
+    const cust = S.CRM.byScenario('allergy');
+    const def = { id: 'allergy' };
+    const pack = S.OrderContext.build(def, cust, '过敏投诉');
+
+    function mkState(deadlineAt) {
+      return {
+        input: { message: '我用了两天脸上刺痛发红，我要发小红书曝光', history: [], pack: pack },
+        job: { def: def, customer: cust, deadlineAt: deadlineAt },
+      };
+    }
+    function mkTrace() {
+      return {
+        stages: [], facts: {}, decisions: [],
+        stage: function (n, d, ok, msg) { this.stages.push(n + '|' + (ok ? 'ok' : 'fail') + '|' + (msg || '')); },
+        set: function (k, v) { this.facts[k] = v; },
+        decide: function (tt) { this.decisions.push(tt); },
+      };
+    }
+    /* 真 remainingFor 语义（按 deadlineAt 算剩余），但 chat 不花时间 → 步数完全由初始子预算决定 */
+    function mkLLM(counter) {
+      return {
+        SYSTEM_PROMPT: 'stub',
+        buildUserPrompt: function () { return 'stub'; },
+        normalize: function (raw) { return raw; },
+        readConfig: function () { return { mode: 'auto' }; },
+        remainingFor: function (u) { return Number(u) > 0 ? Math.max(0, Number(u) - Date.now()) : Infinity; },
+        chat: async function () {
+          counter.calls++;
+          return { content: JSON.stringify({ thought: '再核实一次', action: 'list_orders', args: {} }) };
+        },
+      };
+    }
+
+    const cases = [
+      { ms: 12000, want: 2 },   /* 子预算 = min(12000×0.6, 9000) = 7200 → 2 步 */
+      { ms: 100000, want: 3 },  /* 时间再多也被 SUB_BUDGET_CAP_MS 截住 → 3 步，不是 MAX_STEPS */
+      { ms: 6000, want: 1 },    /* 子预算 3600ms → 只够 1 步 */
+    ];
+    for (const c of cases) {
+      const counter = { calls: 0 };
+      const tr = mkTrace();
+      const res = await AG.provider(mkState(Date.now() + c.ms), { deps: Object.assign({}, deps, { LLMClient: mkLLM(counter) }), trace: tr });
+      t.eq(counter.calls, c.want,
+        '本轮子预算 ' + c.ms + 'ms 应只发起 ' + c.want + ' 次模型往返，实际 ' + counter.calls);
+      t.eq(res.agent.mode, 'local', '步数被截住后交给规则规划（同一套工具，结果仍完整）');
+      t.eq(tr.facts.agentStepsAllowed, c.want, 'trace 里记录的步数上限与实际一致');
+      t.includes(tr.decisions.join(' ｜ '), '子预算只够 ' + c.want + ' 步',
+        '轨迹写明「是预算只够这么多」，而不是含糊的模型失败');
+      t.ok(res.agent.steps.length > 0, '规则规划确实补出了工具轨迹');
+    }
+
+    /* ③ 模型自己早收敛时，allowance 不会逼它多走 */
+    const early = { calls: 0 };
+    const llmEarly = mkLLM(early);
+    llmEarly.chat = async function () {
+      early.calls++;
+      return { content: JSON.stringify({ thought: '事实够了', final: { engine: 'llm', replies: [{ text: '好的' }] } }) };
+    };
+    const trEarly = mkTrace();
+    const resEarly = await AG.provider(mkState(Date.now() + 12000), { deps: Object.assign({}, deps, { LLMClient: llmEarly }), trace: trEarly });
+    t.eq(early.calls, 1, '一步就出 final 时不多花往返');
+    t.eq(resEarly.agent.mode, 'model', '模型规划成功就用自己的结果');
+    t.eq(trEarly.facts.agentStepsAllowed, 2, '上限照样记账（界面上要能区分「收敛了」与「被截住」）');
   }
 };

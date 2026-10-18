@@ -1708,6 +1708,223 @@ const CHECKS = [
       return out;
     })()`,
   },
+  {
+    /* 风险对账闸必须要在**真实浏览器**里成立一次：
+       单测证明阶段函数算得对，这条证明页面真的把它装配进了管线（脚本清单、
+       加载顺序、window 挂载任何一处断了，界面上的分数就会退回模型自报的数）。
+       不依赖模型 —— 直接在页面上拿真 RiskPolicy 跑一次阶段的真实调用。 */
+    name: 'riskfloor-gate',
+    url: '/?nolive=1',
+    wait: 2000,
+    screenshot: false,
+    probe: `(() => {
+      const H = window.AnalysisHarness, S = window.HarnessStages, RP = window.RiskPolicy;
+      const stages = H.stageNames();
+      const risk = { level: 'low', score: 10, signals: ['皮肤刺激', '投诉倾向'], advice: '安抚一下就好' };
+      const facts = {}, decisions = [];
+      const ctx = { deps: { RiskPolicy: RP }, set: (k, v) => { facts[k] = v; }, decide: (tt) => { decisions.push(tt); } };
+      S.riskfloor({ provider: 'llm', job: { message: '我脸过敏烂脸了，你们这是要毁容，我要投诉12315' }, result: { risk: risk } }, ctx);
+      const out = {
+        order: stages.join('>'),
+        score: risk.score,
+        level: risk.level,
+        alias: (risk.recheck.alias || []).map((p) => p.from + '→' + p.to).join(','),
+        unknown: (risk.recheck.unknown || []).join(','),
+        hasAction: risk.advice.indexOf('立即升级资深客服') !== -1,
+        traceScoreFact: facts.riskScore,
+        trace: decisions[0] || '',
+      };
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(stages.indexOf('riskfloor') === stages.indexOf('generate') + 1, '浏览器里的管线没装配 riskfloor：' + out.order);
+      want(out.score === 80, '低报没被词典抬回，分数是 ' + out.score);
+      want(out.level === 'high', '等级没抬到高危，实为 ' + out.level);
+      want(out.alias.indexOf('皮肤刺激→皮肤不良反应') !== -1, '非标准信号名没被归一：' + out.alias);
+      want(out.unknown === '投诉倾向', '兜不住的名字没被记录：' + out.unknown);
+      want(out.hasAction === true, '处置文案没按新等级重算');
+      want(out.traceScoreFact === 80, 'trace 里记录的分数不是过闸后的：' + out.traceScoreFact);
+      if (bad.length) throw new Error('风险对账闸断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 「队列按会话分桶」+「预算按轮」在单测里各自绿，但装配层断了界面**不会报错**：
+       · jobqueue.js 没进 index.html → app.js 抛「JobQueue 未加载」（这条会崩，算好事）
+       · 脚本顺序错 / 预算回潮成 LLMClient 身上那一格全局 deadline → 静默退化：
+         界面又变回「一条串行队列 + 一份全局预算」，读数看着全都正常，只是并发时互相覆盖。
+       所以在真页面里钉五处：加载顺序、真实 window.JobQueue 的调度语义（FIFO / 并行 / 上限 /
+       失败隔离）、真实 LLMClient 的按轮口径、Agent 子预算的上限、真实管线（组装根 create）
+       守本轮预算且不写全局。 */
+    name: 'queue-buckets',
+    url: '/?nolive=1',
+    wait: 2200,
+    screenshot: false,
+    probe: `(async () => {
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      const JQ = window.JobQueue, H = window.AnalysisHarness, AG = window.HarnessAgent, LLM = window.LLMClient;
+      const tick = () => new Promise((r) => setTimeout(r, 0));
+      const out = {};
+
+      /* ---- ① 装载顺序：jobqueue 必须早于 app（app 一上来就要 create 队列） ---- */
+      const srcs = Array.prototype.slice.call(document.scripts).map((s) => s.getAttribute('src') || '');
+      const iJob = srcs.indexOf('assets/jobqueue.js');
+      const iApp = srcs.indexOf('assets/app.js');
+      out.scriptPos = iJob + '/' + iApp;
+      want(iJob !== -1 && iApp !== -1, 'index.html 里找不到 jobqueue.js 或 app.js');
+      want(iJob !== -1 && iJob < iApp, 'jobqueue.js 没排在 app.js 之前');
+      want(typeof JQ.create === 'function' && JQ.DEFAULT_MAX_CONCURRENT === 2,
+        'window.JobQueue 没挂上，或默认并发上限不再是 2');
+
+      /* ---- ② 真实 window 上的调度语义：桶内 FIFO / 桶间并行 / 全局上限 ---- */
+      const d = {};
+      const gate = (id) => {
+        let res, rej;
+        const p = new Promise((a, b) => { res = a; rej = b; });
+        d[id] = { p, res, rej };
+      };
+      const order1 = [];
+      let live = 0, peak = 0;
+      const q1 = JQ.create({
+        maxConcurrent: 2,
+        keyOf: (j) => j.k,
+        run: (j) => {
+          order1.push(j.id);
+          live++;
+          if (live > peak) peak = live;
+          return d[j.id].p.then(() => { live--; }, () => { live--; });
+        },
+      });
+      ['A1', 'A2', 'A3', 'B1'].forEach(gate);
+      const depths = [
+        q1.enqueue({ id: 'A1', k: 'A' }),
+        q1.enqueue({ id: 'A2', k: 'A' }),
+        q1.enqueue({ id: 'A3', k: 'A' }),
+        q1.enqueue({ id: 'B1', k: 'B' }),
+      ];
+      out.started = order1.join(',');
+      out.depths = depths.join(',');
+      out.reads = q1.running() + '/' + q1.waiting() + '/' + q1.buckets();
+      want(out.started === 'A1,B1', '同会话要排队、跨会话要并行，实际起跑 ' + out.started);
+      want(out.depths === '0,1,2,0', '入队返回值应是该会话此刻的排队深度（联系人上的「排队 N」用它），实际 ' + out.depths);
+      want(q1.waitingFor('A') === 2 && q1.busyFor('A') === true && q1.busyFor('C') === false,
+        '按会话读排队深度 / 忙不忙读错了');
+      d.A1.res(); await tick(); await tick();
+      want(order1.join(',') === 'A1,B1,A2', 'A 桶没按到达顺序补位：' + order1.join(','));
+      want(q1.running() === 2 && q1.waiting() === 1, '补位后并发读数说谎：' + q1.running() + '/' + q1.waiting());
+      d.A2.res(); await tick(); await tick();
+      d.A3.res(); d.B1.res(); await tick(); await tick();
+      out.peak = peak;
+      want(peak <= q1.maxConcurrent(), '并发峰值 ' + peak + ' 超过上限 ' + q1.maxConcurrent() + '，上游配额保护失效');
+      want(q1.stats().done === 4 && q1.stats().failed === 0, '全部完成后计数不对：' + JSON.stringify(q1.stats()));
+
+      /* ---- ③ 一条失败（含同步抛错）不阻断后续，也不混进别的账 ---- */
+      const errSeen = [];
+      const order2 = [];
+      const q2 = JQ.create({
+        maxConcurrent: 1,
+        keyOf: (j) => j.k,
+        run: (j) => {
+          if (j.boom) return Promise.reject(new Error('故意失败'));
+          if (j.sync) throw new Error('故意同步抛错');
+          order2.push(j.id);
+          return Promise.resolve();
+        },
+        onError: (j, e) => { errSeen.push(j.id + ':' + e.message); },
+      });
+      q2.enqueue({ id: 'X1', k: 'X', boom: true });
+      q2.enqueue({ id: 'X2', k: 'X', sync: true });
+      q2.enqueue({ id: 'X3', k: 'Y' });
+      q2.enqueue({ id: 'X4', k: 'Y' });
+      await tick(); await tick();
+      out.errSeen = errSeen.join(',');
+      out.afterFail = order2.join(',');
+      want(out.errSeen === 'X1:故意失败,X2:故意同步抛错',
+        '失败原因没原样交回调用方（坐席侧的 ack / 提示靠它）：' + out.errSeen);
+      want(out.afterFail === 'X3,X4', '一条失败后同桶与别的会话没继续跑：' + out.afterFail);
+      const s2 = q2.stats();
+      want(s2.failed === 2 && s2.done === 2 && s2.callbackErrors === 0,
+        '失败 / 完成 / 回调异常分开计数说谎：' + JSON.stringify(s2));
+
+      /* ---- ④ 真 LLMClient 的按轮口径（全局那一格取更紧者，用完立即复位） ---- */
+      want(typeof LLM.remainingFor === 'function', '页面上的 LLMClient 没有 remainingFor（按轮预算没装进来）');
+      out.noDeadlineIsInfinity = LLM.remainingFor(0) === Infinity;
+      LLM.setDeadline(Date.now() + 900);
+      const underGlobal = LLM.remainingFor(Date.now() + 60000);
+      LLM.setDeadline(0);
+      const roundOnly = LLM.remainingFor(Date.now() + 5000);
+      out.underGlobal = Math.round(underGlobal);
+      out.roundOnly = Math.round(roundOnly);
+      out.globalRestored = LLM.remainingMs() === Infinity;
+      want(out.noDeadlineIsInfinity === true, '没设全局闸门时 remainingFor(0) 应是不限');
+      want(underGlobal > 0 && underGlobal <= 900, '全局闸门更紧时没取更紧者：' + out.underGlobal + 'ms');
+      want(roundOnly > 4000 && roundOnly <= 5000, '按轮截止没被单独算出来：' + out.roundOnly + 'ms');
+      want(out.globalRestored === true, '探针没能把全局 deadline 复位（后面几条检查会被误伤）');
+      want(H.MIN_CALL_MS === 2000 && AG.MIN_STEP_MS === 3000,
+        '单次请求 / 单步的预算下限被改动，界面上的降级文案就对不上：' + H.MIN_CALL_MS + '/' + AG.MIN_STEP_MS);
+      const roomy = AG.subBudgetUntil({ deadlineAt: Date.now() + 60000 }, LLM);
+      out.agentSubMs = Math.round(roomy - Date.now());
+      want(out.agentSubMs > 0 && out.agentSubMs <= AG.SUB_BUDGET_CAP_MS + 60,
+        'Agent 子预算没被上限截住，一轮可能被它独占：' + out.agentSubMs + 'ms');
+      want(AG.subBudgetUntil({}, LLM) === 0, '没有按轮预算时子预算应返回 0（不限）');
+
+      /* 步数上限由子预算给。这里专门用**真实子预算的读数**去算步数：
+         浏览器里时钟是活的，subBudgetUntil 落到 8999ms 这类值时，
+         如果 stepAllowance 没有 STEP_SLACK_MS，就会在 2 步 / 3 步之间随机抖 ——
+         Node 单测用 stub 时间，永远照不出这种红绿灯，只能在这里照。 */
+      want(typeof AG.stepAllowance === 'function', 'agent.js 未导出 stepAllowance（步数上限没按预算给）');
+      out.agentSteps = AG.stepAllowance(roomy - Date.now());
+      want(out.agentSteps === 3, '满子预算应给 3 步，实际 ' + out.agentSteps + ' 步（读数 ' + Math.round(roomy - Date.now()) + 'ms）');
+      want(AG.stepAllowance(Infinity) === AG.MAX_STEPS, '不限预算时步数上限应回落到 MAX_STEPS：' + AG.stepAllowance(Infinity));
+      want(AG.stepAllowance(6000) === 2 && AG.stepAllowance(2999) === 1,
+        '剩余时间换算步数不对：6000→' + AG.stepAllowance(6000) + '，2999→' + AG.stepAllowance(2999));
+      want(AG.stepAllowance(NaN) === 1 && AG.stepAllowance(0) === 1,
+        '读数坏掉时必须保守（宁少走一步，不多放行）：' + AG.stepAllowance(NaN) + '/' + AG.stepAllowance(0));
+
+      /* ---- ⑤ 真实组装根：守本轮预算，且不回潮去写全局那一格 ---- */
+      const calls = [];
+      let globalWrites = 0;
+      const stub = {
+        readConfig: () => ({ mode: 'auto', budgetMs: 15000, model: 'browser-stub', maxCalls: 100 }),
+        remainingFor: (u) => (Number(u) > 0 ? Math.max(0, Number(u) - Date.now()) : Infinity),
+        remainingMs: () => Infinity,
+        setDeadline: () => { globalWrites++; },
+        analyze: (input, opts) => {
+          calls.push((opts && opts.deadlineAt) || 0);
+          return Promise.resolve({
+            engine: 'llm', emotion: { score: 55 },
+            intents: [{ name: '常规咨询', tone: 'muted', confidence: 0.6 }],
+            risk: { level: 'low', score: 5, signals: [], advice: '' },
+            replies: [{ text: '模型的话术', confidence: 0.9 }],
+          });
+        },
+      };
+      const hb = H.create({ name: 'browser-budget', providerChain: ['llm', 'local'] });
+      const deps = Object.assign({}, H.deps(), { LLMClient: stub });
+      const spent = { message: '我的面霜用了两天脸上刺痛发红', series: [], ctx: {}, customerId: 'probe' };
+      spent.deadlineAt = Date.now() - 1;
+      const rSpent = await hb.run(spent, deps);
+      const callsAfterSpent = calls.length;
+      const liveJob = { message: '我的面霜用了两天脸上刺痛发红', series: [], ctx: {}, customerId: 'probe' };
+      liveJob.deadlineAt = Date.now() + 9000;
+      const rLive = await hb.run(liveJob, deps);
+      out.spent = rSpent.provider + '/' + callsAfterSpent + '/' + rSpent.trace.facts.llmSkippedForBudget + '/' + (rSpent.degraded || 'none');
+      out.live = rLive.provider + '/' + calls.length + '/' + (rLive.trace.facts.budgetLeftMs || 0);
+      want(callsAfterSpent === 0, '预算耗尽那一轮一次模型都不该发，实际发了 ' + callsAfterSpent);
+      want(calls.length === 1, '有预算的那一轮应正好发一次模型请求，两轮合计 ' + calls.length);
+      want(rSpent.provider === 'local', '预算耗尽没落到本地引擎：' + rSpent.provider);
+      want(rSpent.trace.decisions.join(' ｜ ').indexOf('本轮模型预算仅剩') !== -1,
+        '轨迹里没写明「是本轮预算不够」，坐席只会看到一次莫名的本地降级');
+      want(rSpent.degraded === '', '预算不足被记成了模型故障：' + rSpent.degraded);
+      want(rSpent.trace.facts.llmSkippedForBudget === true && rLive.trace.facts.llmSkippedForBudget === false,
+        '「因预算跳过」这个事实读数没说真话（管线上要显示它）');
+      want(calls[0] === liveJob.deadlineAt, '调用模型时没带上本轮的绝对截止时刻，实际 ' + calls[0]);
+      want(globalWrites === 0, '管线又去写 LLMClient 的全局 deadline 了 —— 两轮重叠时会互相覆盖');
+
+      if (bad.length) throw new Error('队列与预算断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
 ];
 
 /* ------------------------------------------------------------------ CDP */

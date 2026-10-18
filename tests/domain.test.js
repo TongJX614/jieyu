@@ -362,4 +362,78 @@ module.exports = function (t) {
     t.eq(badLevel.length, 0, 'SEED 等级必须来自 RiskPolicy.LEVELS（不符：' +
       badLevel.map((r) => r.id).join('、') + '）');
   }
+
+  /* ================================================================
+     ⑤ engine · 视觉接地（识图 / 皮肤状态 / 妆容 进入话术）
+     ================================================================ */
+  t.suite('engine · 视觉接地（观察进入话术首位）');
+
+  {
+    const E = load(['assets/policy.js', 'assets/engine.js', 'assets/vision.js']);
+    const V = E.Vision;
+    /* 造一张 RGBA 像素图：底色肤色 + 指定比例的强红像素 */
+    function px(ratio) {
+      const n = 60 * 60;
+      const d = new Uint8ClampedArray(n * 4);
+      const red = Math.round(n * ratio);
+      for (let i = 0; i < n; i++) {
+        const r = i < red ? 196 : 222;
+        const g = i < red ? 58 : 184;
+        const b = i < red ? 52 : 158;
+        d[i * 4] = r; d[i * 4 + 1] = g; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+      }
+      return d;
+    }
+
+    /* 离线：重度泛红皮肤照片 */
+    const obs = V.observe(V.statsFromPixels(px(0.4), 60, 60));
+    const res = E.LocalEngine.analyze({ message: '我脸好红', image: { observation: obs }, pack: { available: false }, history: [] });
+    t.ok(res.replies[0].text.indexOf('我看到您发来') !== -1, '离线泛红照片 → 话术首位出现视觉开场白');
+    t.ok(res.replies[0].text.indexOf('泛红') !== -1, '视觉开场白点出泛红发现');
+    t.ok(res.replies[0].text.indexOf('皮肤科') !== -1, '严重情况引导专业评估（不越医疗边界）');
+
+    /* 无图片时不插入视觉开场白 */
+    const res2 = E.LocalEngine.analyze({ message: '你好', pack: { available: false }, history: [] });
+    t.eq(res2.replies[0].text.indexOf('我看到您发来'), -1, '无图片时不插入视觉开场白');
+
+    /* ---------- 闸门：类型未确认的图片不得被医疗化 ----------
+       旧实现不看 kind、不看是否真有发现：顾客附一张快递单截图问物流，
+       第一条推荐话术变成「为了您的皮肤安全，建议先停用功效型产品……尽快去皮肤科」。 */
+    function flat(r, g, b) {
+      const n = 60 * 60;
+      const d = new Uint8ClampedArray(n * 4);
+      for (let i = 0; i < n; i++) { d[i * 4] = r; d[i * 4 + 1] = g; d[i * 4 + 2] = b; d[i * 4 + 3] = 255; }
+      return d;
+    }
+    const waybill = V.observe(V.statsFromPixels(flat(250, 250, 250), 60, 60));
+    t.eq(waybill.kind, 'unknown', '白底快递单截图不被判成皮肤照片');
+    const res4 = E.LocalEngine.analyze({
+      message: '这个是我的快递单，到底什么时候发货', image: { observation: waybill },
+      pack: { available: false }, history: [],
+    });
+    const all4 = res4.replies.map((r) => r.text).join(' ');
+    t.eq(res4.replies[0].text.indexOf('我看到您发来'), -1, '类型未确认时视觉不抢第一条话术');
+    t.eq(all4.indexOf('停用功效型产品'), -1, '截图不会引出「停用功效型产品」');
+    t.eq(all4.indexOf('皮肤科'), -1, '截图不会引出「皮肤科」');
+
+    /* VLM 认出是商品：可以引用「我看到的是 X」，但残留的皮肤 findings 不再产出医疗建议 */
+    const productObs = V.observe(V.statsFromPixels(px(0.4), 60, 60));
+    productObs.kind = 'product';
+    productObs.object = { name: '精华液外盒', confidence: 0.88 };
+    const res5 = E.LocalEngine.analyze({
+      message: '这个包装怎么是这样的是不是假的', image: { observation: productObs },
+      pack: { available: false }, history: [],
+    });
+    t.includes(res5.replies[0].text, '精华液外盒', '真识别出商品时视觉仍然抢首位（信息量够）');
+    t.eq(res5.replies.map((r) => r.text).join(' ').indexOf('皮肤科'), -1, '判为商品就不给医疗建议（哪怕残留泛红 findings）');
+
+    /* VLM：识图 + 妆容推荐 */
+    const vlmObs = V.observe(V.statsFromPixels(px(0), 60, 60));
+    vlmObs.kind = 'product';
+    vlmObs.object = { name: '某品牌精华液', confidence: 0.9, note: 'VLM 识别' };
+    vlmObs.makeup = { style: '清透伪素颜', palette: ['裸粉'], products: [] };
+    const res3 = E.LocalEngine.analyze({ message: '这是什么', image: { observation: vlmObs }, pack: { available: false }, history: [] });
+    t.ok(res3.replies[0].text.indexOf('某品牌精华液') !== -1, 'VLM 识图结果进入话术');
+    t.ok(res3.replies[0].text.indexOf('清透伪素颜') !== -1, 'VLM 妆容推荐进入话术');
+  }
 };

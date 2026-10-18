@@ -112,7 +112,7 @@ module.exports = async function (t) {
 
   t.suite('llm · 配置读写（密钥只落 localStorage）');
   t.eq(L.readConfig().model, L.DEFAULT.model, '未保存过时用默认模型');
-  t.eq(L.readConfig().timeout, 20000, '默认单次超时 20s（45s 会拖停串行队列）');
+  t.eq(L.readConfig().timeout, 20000, '默认单次超时 20s（45s 会拖停同会话 FIFO 队列、白占并发额度）');
   t.eq(L.readConfig().budgetMs, 15000, '默认单轮预算 15s');
   t.eq(L.readConfig().maxCalls, 100, '默认会话调用上限 100 次');
   t.eq(L.writeConfig({ model: 'deepseek-reasoner' }).model, 'deepseek-reasoner', '写入后立即生效');
@@ -341,5 +341,50 @@ module.exports = async function (t) {
   await L.chat([{ role: 'user', content: '不要 JSON' }], { json: false });
   t.eq(f.calls[0].body.response_format, undefined, 'json:false 时不强制 JSON 输出');
 
+  /* ------------------------------------------------ 预算按轮隔离 */
+
+  t.suite('llm · 预算按轮隔离（并行时每条线路只守自己的分）');
+  L.resetCalls();
+  L.setDeadline(0);
+  t.eq(L.remainingFor(0), Infinity, '不传按轮预算时等于全局读数（老调用方行为不变）');
+  const untilSoon = Date.now() + 1200;
+  const leftSoon = L.remainingFor(untilSoon);
+  t.ok(leftSoon > 0 && leftSoon <= 1200, '按轮预算给出自己的剩余时间，实为 ' + leftSoon);
+  L.setDeadline(Date.now() + 5000);
+  t.ok(L.remainingFor(untilSoon) <= 1200, '两条线都在时取更紧的那条（本轮的分不因全局而放大）');
+  L.setDeadline(0);
+
+  setCfg({ maxCalls: 100 });
+  L.resetCalls();
+  f = fresh([{ ok: true, json: okBody('不该被调用') }]);
+  let perRunMsg = '';
+  try { await L.analyze({ profile: cust, message: '本轮预算已过' }, { deadlineAt: Date.now() - 1 }); } catch (e) { perRunMsg = e.message; }
+  t.includes(perRunMsg, '时间预算', '按轮预算用尽时如实报错（不静默换成不限预算重试）');
+  t.eq(f.calls.length, 0, '按轮预算用尽时一个请求都不发');
+
+  /* 这一轮预算用尽，不能顺带把另一轮也变成「没预算」 */
+  f = fresh([{ ok: true, json: okBody('另一轮照常') }]);
+  const other = await L.analyze({ profile: cust, message: '另一轮' }, { deadlineAt: Date.now() + 8000 });
+  t.eq(other.engine, 'llm', '同一时刻另一轮的预算照常可用（不再共用 LLMClient 里那一格）');
+
+  L.resetCalls();
+  f = fresh([{ ok: true, json: { choices: [{ finish_reason: 'stop', message: { content: '{}' } }] } }]);
+  let chatBudgetMsg = '';
+  try { await L.chat([{ role: 'user', content: '这一步该发吗' }], { deadlineAt: Date.now() - 1 }); } catch (e) { chatBudgetMsg = e.message; }
+  t.includes(chatBudgetMsg, '时间预算', 'Agent 的每一步守同一份按轮预算');
+  t.eq(f.calls.length, 0, '预算已过时 Agent 这一步不发请求');
+
+  /* 配额读数：上限来自配置，且触顶是常驻状态 */
+  setCfg({ maxCalls: 1 });
+  L.resetCalls();
+  f = fresh([{ ok: true, json: okBody('一次就满') }]);
+  await L.analyze({ profile: cust, message: '配额一次' });
+  t.eq(L.callStats().cap, 1, 'callStats 的上限读配置实际值，不是 DEFAULT 的 100');
+  t.eq(L.callStats().atCap, true, '用满后 atCap 持续为真（界面据此常驻提示，而不是只 toast 一次）');
+  setCfg({ maxCalls: 100 });
+  L.resetCalls();
+  t.eq(L.callStats().atCap, false, '清零（切会话）后恢复可用');
+
+  L.setDeadline(0);
   store.removeItem('beauty-cs-config');
 };

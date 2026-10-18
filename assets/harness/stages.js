@@ -1,10 +1,11 @@
 /* ==========================================================================
-   Harness Stages —— 默认分析管线的六个领域阶段
+   Harness Stages —— 默认分析管线的八个领域阶段
 
    顺序即「一条顾客消息必须依次穿过的事」：
 
      facts      先看清对方买了什么（订单事实包 + 落到模型输入）
      generate   生成话术（走 provider 降级链：agent → llm → local）
+     riskfloor  风险对账（模型自报的分数与信号，逐条压回词典口径）
      vision     视觉观察（顾客上传的皮肤照片 → 结构化观察 → 叠加风险信号）
      ground     接地校验（没引用订单事实的话术标出来，必要时用订单事实兜底）
      compliance 出站合规（逐条检测，标等级 + 给净化文本）
@@ -70,7 +71,95 @@
       (state.degraded ? '（降级原因：' + state.degraded + '）' : ''));
   }
 
-  /* ③ 视觉观察：顾客发的皮肤照片 → 结构化观察 → 并入风险判定
+  /* ③ 风险对账：把模型自报的结论压回词典口径 —— 判级只有一份标准，这一条是硬闸
+
+     为什么必须有这个阶段：`policy.js` 是全项目唯一的判级真源，但在模型路径上
+     采信的是**模型自己写的** score / signals：
+       · 模型把「烂脸 + 12315」写成 10 分 → 按纯阈值就是「安全」，红线消息安静地躺在低风险里；
+       · 模型写「皮肤刺激」「医疗建议」这种自然说法 → floorOf() 精确匹配失败，
+         连等级下限兜底都触发不了。
+     本地引擎路径走的是 RP.evaluate()，本来就和词典一致，所以本阶段对它是幂等的。
+
+     规则（只许就高，不许下调）：
+       score = max(模型自报, 词典逐条累加)
+       signals = 词典命中的（原话里有依据）∪ 模型主张的（先归一到标准名）
+       level = applyFloors(levelOf(score), signals) 再并上词典的组合下限
+     模型主张但原话里找不到依据的信号：**只用来抬等级下限，不参与计分**，并且整条
+     映射关系（归一 / 兜不住的名字）都写进 result.risk.recheck 与 trace ——
+     「模型说了什么」和「我们采信了什么」必须能分开核对，不假装是证据。
+
+     词典只看**顾客本轮这一条原话**：AI 生成的话术不是证据，不能自己给自己加分。 */
+  function riskfloor(state, ctx) {
+    var RP = need(ctx.deps, 'RiskPolicy');
+    var result = state.result;
+    if (!result) return;
+    if (!result.risk) result.risk = { level: 'low', score: 0, signals: [], advice: '' };
+
+    var job = state.job || {};
+    var claimedScore = Number(result.risk.score);
+    if (!isFinite(claimedScore)) claimedScore = 0;
+    claimedScore = Math.max(0, Math.min(100, Math.round(claimedScore)));
+    var claimedLevel = String(result.risk.level || 'low');
+    var claimedNames = Array.isArray(result.risk.signals) ? result.risk.signals.slice() : [];
+
+    var ev = RP.evaluate(job.message || '');
+    var norm = RP.normalizeSignals(claimedNames);
+    var signals = ev.signals.slice();
+    var unverified = [];
+    norm.signals.forEach(function (name) {
+      if (signals.indexOf(name) !== -1) return;
+      signals.push(name);
+      unverified.push(name);
+    });
+
+    var score = Math.max(claimedScore, ev.score);
+    var level = RP.applyFloors(RP.levelOf(score), signals);
+    (ev.floors || []).forEach(function (f) {
+      if (RP.rankOf(f) < RP.rankOf(level)) level = f;
+    });
+
+    /* 结论被动过 → 处置文案必须跟着改口径（看板与工单都读 advice） */
+    var raised = score > claimedScore || RP.rankOf(level) < RP.rankOf(claimedLevel);
+    result.risk.score = score;
+    result.risk.level = level;
+    result.risk.signals = signals;
+    if (raised || !result.risk.advice) result.risk.advice = RP.adviceFor(level, signals);
+    result.risk.recheck = {
+      provider: state.provider || '',
+      claimedScore: claimedScore,
+      claimedLevel: claimedLevel,
+      claimedSignals: claimedNames,
+      dictScore: ev.score,
+      score: score,
+      level: level,
+      verified: ev.signals.slice(),
+      claimedOnly: unverified,
+      alias: norm.map,
+      unknown: norm.unknown,
+      raised: raised,
+    };
+
+    var who = state.provider === 'local' ? '本地引擎' : '模型自报';
+    var line = '风险对账：' + who + ' ' + claimedScore + ' 分 / 词典 ' + ev.score +
+      ' 分 → 取 ' + score + ' 分，等级 ' + RP.labelOf(level) + '（' + level + '）';
+    if (unverified.length) {
+      line += '；「' + unverified.join('、') + '」原话里无依据，仅按等级下限就高、不计分';
+    }
+    if (norm.map.length) {
+      line += '；信号名归一：' + norm.map.map(function (p) { return p.from + '→' + p.to; }).join('、');
+    }
+    if (norm.unknown.length) {
+      line += '；兜不住的名字（只记录、不采信）：' + norm.unknown.join('、');
+    }
+    ctx.set('riskScore', score);
+    ctx.set('riskLevel', level);
+    ctx.set('riskClaimedScore', claimedScore);
+    ctx.set('riskDictScore', ev.score);
+    ctx.set('riskRaised', raised);
+    ctx.decide(line);
+  }
+
+  /* ④ 视觉观察：顾客发的皮肤照片 → 结构化观察 → 并入风险判定
      视觉信号与文本信号**共用同一份权重表**（RiskPolicy.SIGNALS），
      所以「照片看出泛红」和「顾客说刺痛」走的是同一套计分与分级口径，
      不存在第二套标准。没有图片时本阶段静默跳过（不产生降级告警）。 */
@@ -96,11 +185,23 @@
       });
       if (added) {
         var score = Math.max(0, Math.min(100, (result.risk.score || 0) + added));
+        var next = RP.applyFloors(RP.levelOf(score), sigs);
+        /* 只许就高：riskfloor 已确立的等级是下限，视觉叠加不得把它降回去
+           （applyFloors 只看单信号下限，看不到 COMBOS 的组合下限，这一步是必需的） */
+        if (RP.rankOf(next) > RP.rankOf(result.risk.level)) next = result.risk.level;
         result.risk.score = score;
-        result.risk.level = RP.applyFloors(RP.levelOf(score), sigs);
+        result.risk.level = next;
         result.risk.signals = sigs;
-        result.risk.advice = RP.adviceFor(result.risk.level, sigs);
+        result.risk.advice = RP.adviceFor(next, sigs);
         result.risk.visionBoost = added;
+        /* 审计口径跟着最终结论走：recheck 里的 score/level 永远是「界面看到的那个数」，
+           而 claimedScore / dictScore 保留对账时的原始分量，两者可分别核对 */
+        if (result.risk.recheck) {
+          result.risk.recheck.score = score;
+          result.risk.recheck.level = next;
+          result.risk.recheck.visionSignals = (obs.signals || []).slice();
+          result.risk.recheck.visionBoost = added;
+        }
       }
     }
 
@@ -112,7 +213,7 @@
         : ' → 未达泛红阈值，不叠加信号'));
   }
 
-  /* ④ 接地校验：话术必须落到订单事实上，否则标出未接地 */
+  /* ⑤ 接地校验：话术必须落到订单事实上，否则标出未接地 */
   function ground(state, ctx) {
     var OC = need(ctx.deps, 'OrderContext');
     var result = state.result;
@@ -158,7 +259,7 @@
       : '接地校验：' + grounded + '/' + result.replies.length + ' 条引用了订单事实');
   }
 
-  /* ⑤ 出站合规：只标注不删（发送环节还会再兜一次） */
+  /* ⑥ 出站合规：只标注不删（发送环节还会再兜一次） */
   function compliance(state, ctx) {
     var RG = need(ctx.deps, 'ReplyGuard');
     var result = state.result;
@@ -186,7 +287,7 @@
       : '最高等级 ' + summary.level + '（命中 ' + summary.flagged + ' 条，其中禁止发送 ' + summary.blocked + ' 条）'));
   }
 
-  /* ⑥ 逐句情绪：本句 + 会话此前序列 → 新序列 + 综合指数 + 走势 */
+  /* ⑦ 逐句情绪：本句 + 会话此前序列 → 新序列 + 综合指数 + 走势 */
   function emotion(state, ctx) {
     var EP = need(ctx.deps, 'EmotionPolicy');
     var result = state.result;
@@ -223,7 +324,7 @@
     ctx.set('emotionIndex', index);
   }
 
-  /* ⑦ 前文体检：把「这一句判定的依据」挂到结果上，界面据此可核对 */
+  /* ⑧ 前文体检：把「这一句判定的依据」挂到结果上，界面据此可核对 */
   function context(state, ctx) {
     var result = state.result;
     if (!result) return;
@@ -242,11 +343,12 @@
   return {
     facts: facts,
     generate: generate,
+    riskfloor: riskfloor,
     vision: vision,
     ground: ground,
     compliance: compliance,
     emotion: emotion,
     context: context,
-    ORDER: ['facts', 'generate', 'vision', 'ground', 'compliance', 'emotion', 'context'],
+    ORDER: ['facts', 'generate', 'riskfloor', 'vision', 'ground', 'compliance', 'emotion', 'context'],
   };
 });
