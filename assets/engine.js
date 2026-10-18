@@ -334,6 +334,13 @@ window.LocalEngine = (function () {
         level: ev.level,
         score: ev.score,
         signals: ev.signals,
+        /* 兜底是否真的抬过、抬完剩多少「纯分数等级」—— 这两项只给核对用（评测页 /
+           运行轨迹），不参与任何判定，因此不构成第二个判级入口。
+           没有 scoreLevel，「曝光一句话被判成关注」就分不清是分数到了档还是红线兜的。 */
+        scoreLevel: RP.levelOf(ev.score),
+        floors: ev.floors,
+        floorBy: ev.floorBy || [],
+        combos: ev.combos.map(function (c) { return c.label; }),
         advice: RP.adviceFor(ev.level, ev.signals),
       },
       replies: replies.slice(0, 3),

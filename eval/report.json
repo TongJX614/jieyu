@@ -1,52 +1,139 @@
 {
-  "count": 14,
+  "count": 46,
   "rates": {
     "intent": 100,
     "risk": 100,
-    "emotion": 100
+    "emotion": 100,
+    "floor": 100
   },
   "counts": {
     "intent": [
-      14,
-      14
+      46,
+      46
     ],
     "risk": [
-      14,
-      14
+      46,
+      46
     ],
     "emotion": [
-      14,
-      14
+      46,
+      46
+    ],
+    "floor": [
+      4,
+      4
     ]
   },
   "highRecall": 100,
-  "highExp": 3,
-  "highTp": 3,
+  "highExp": 10,
+  "highTp": 10,
   "highMiss": [],
   "confusion": {
     "high": {
-      "high": 3,
+      "high": 10,
       "medium": 0,
       "low": 0
     },
     "medium": {
       "high": 0,
-      "medium": 7,
+      "medium": 23,
       "low": 0
     },
     "low": {
       "high": 0,
       "medium": 0,
-      "low": 4
+      "low": 13
     }
   },
   "misses": [],
+  "floorCoverage": [
+    {
+      "name": "影像可见明显皮损",
+      "floor": "medium",
+      "kind": "信号",
+      "textReachable": false,
+      "selfReaching": false,
+      "provableByDialogue": false,
+      "declared": 0,
+      "proved": 0,
+      "fired": 0,
+      "failed": [],
+      "ok": true
+    },
+    {
+      "name": "公开平台曝光倾向",
+      "floor": "medium",
+      "kind": "信号",
+      "textReachable": true,
+      "selfReaching": false,
+      "provableByDialogue": true,
+      "declared": 1,
+      "proved": 1,
+      "fired": 8,
+      "failed": [],
+      "ok": true
+    },
+    {
+      "name": "监管投诉路径",
+      "floor": "medium",
+      "kind": "信号",
+      "textReachable": true,
+      "selfReaching": true,
+      "provableByDialogue": false,
+      "declared": 0,
+      "proved": 0,
+      "fired": 2,
+      "failed": [],
+      "ok": true
+    },
+    {
+      "name": "法律追责风险",
+      "floor": "medium",
+      "kind": "信号",
+      "textReachable": true,
+      "selfReaching": false,
+      "provableByDialogue": true,
+      "declared": 1,
+      "proved": 1,
+      "fired": 3,
+      "failed": [],
+      "ok": true
+    },
+    {
+      "name": "医疗健康建议边界",
+      "floor": "medium",
+      "kind": "信号",
+      "textReachable": true,
+      "selfReaching": false,
+      "provableByDialogue": true,
+      "declared": 1,
+      "proved": 1,
+      "fired": 11,
+      "failed": [],
+      "ok": true
+    },
+    {
+      "name": "高价值会员权益异议",
+      "floor": "medium",
+      "kind": "组合",
+      "textReachable": true,
+      "selfReaching": false,
+      "provableByDialogue": true,
+      "declared": 1,
+      "proved": 1,
+      "fired": 5,
+      "failed": [],
+      "ok": true
+    }
+  ],
+  "floorGaps": [],
   "rows": [
     {
       "scenario": "presale",
       "name": "售前咨询 · 敏感肌抗老",
       "i": 1,
       "text": "你好，我28岁，脸上皮肤比较敏感，想找一款抗老的精华，你们家哪款比较合适？",
+      "why": "",
       "expect": {
         "intent": "产品咨询",
         "risk": "low",
@@ -58,19 +145,26 @@
         "riskScore": 0,
         "signals": [],
         "emotion": "平稳",
-        "emotionScore": 66
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "presale",
       "name": "售前咨询 · 敏感肌抗老",
       "i": 2,
       "text": "我之前用含视黄醇的会泛红刺痛，有没有温和一点的成分推荐？",
+      "why": "",
       "expect": {
         "intent": "成分安全",
         "risk": "medium",
@@ -84,19 +178,26 @@
           "皮肤不良反应"
         ],
         "emotion": "不满",
-        "emotionScore": 38
+        "emotionScore": 38,
+        "scoreLevel": "medium",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "presale",
       "name": "售前咨询 · 敏感肌抗老",
       "i": 3,
       "text": "那这个玻色因的，孕妇能用吗？我朋友也在备孕，我帮她问一下。",
+      "why": "「孕妇 / 备孕」只计 20 分，纯分数落在安全档；是医疗红线把它抬到关注 —— 这条是红线真阳。",
       "expect": {
         "intent": "医疗咨询",
         "risk": "medium",
@@ -111,19 +212,30 @@
           "医疗健康建议边界"
         ],
         "emotion": "平稳",
-        "emotionScore": 66
+        "emotionScore": 66,
+        "scoreLevel": "medium",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "医疗健康建议边界"
+        ],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "presale",
       "name": "售前咨询 · 敏感肌抗老",
       "i": 4,
       "text": "好的，那我就先加购物车了，主要就是想确认一下我这个肤质会不会过敏。",
+      "why": "",
       "expect": {
         "intent": "成分安全",
         "risk": "medium",
@@ -138,19 +250,30 @@
           "医疗健康建议边界"
         ],
         "emotion": "犹豫",
-        "emotionScore": 51
+        "emotionScore": 51,
+        "scoreLevel": "medium",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "医疗健康建议边界"
+        ],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "allergy",
       "name": "过敏投诉 · 舆情外溢",
       "i": 1,
       "text": "上周买的抗老精华，用了两天脸上开始刺痛发红，这是怎么回事？",
+      "why": "",
       "expect": {
         "intent": "过敏投诉",
         "risk": "medium",
@@ -164,19 +287,26 @@
           "皮肤不良反应"
         ],
         "emotion": "不满",
-        "emotionScore": 36
+        "emotionScore": 36,
+        "scoreLevel": "medium",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "allergy",
       "name": "过敏投诉 · 舆情外溢",
       "i": 2,
       "text": "我截图了，你们这个成分是不是有问题？我要发小红书。",
+      "why": "",
       "expect": {
         "intent": "内容舆情",
         "risk": "high",
@@ -191,19 +321,30 @@
           "公开平台曝光倾向"
         ],
         "emotion": "不满",
-        "emotionScore": 38
+        "emotionScore": 38,
+        "scoreLevel": "high",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "公开平台曝光倾向"
+        ],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "allergy",
       "name": "过敏投诉 · 舆情外溢",
       "i": 3,
       "text": "我现在整个脸颊都是红的，已经不敢出门了，这算不算毁容？",
+      "why": "",
       "expect": {
         "intent": "过敏投诉",
         "risk": "high",
@@ -219,19 +360,30 @@
           "公开平台曝光倾向"
         ],
         "emotion": "愤怒",
-        "emotionScore": 22
+        "emotionScore": 22,
+        "scoreLevel": "high",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "公开平台曝光倾向"
+        ],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "allergy",
       "name": "过敏投诉 · 舆情外溢",
       "i": 4,
       "text": "我朋友说这种情况可以找消协，你们打算怎么赔？",
+      "why": "",
       "expect": {
         "intent": "监管投诉",
         "risk": "high",
@@ -249,19 +401,32 @@
           "索偿诉求"
         ],
         "emotion": "不满",
-        "emotionScore": 44
+        "emotionScore": 44,
+        "scoreLevel": "high",
+        "floors": [
+          "medium",
+          "medium"
+        ],
+        "floorBy": [
+          "公开平台曝光倾向",
+          "监管投诉路径"
+        ],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "logistics",
       "name": "物流纠纷 · 退款施压",
       "i": 1,
       "text": "我下单一周了还没发货，页面写的是48小时内发出的。",
+      "why": "",
       "expect": {
         "intent": "物流履约",
         "risk": "low",
@@ -275,19 +440,26 @@
           "履约时效问题"
         ],
         "emotion": "犹豫",
-        "emotionScore": 52
+        "emotionScore": 52,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "logistics",
       "name": "物流纠纷 · 退款施压",
       "i": 2,
       "text": "算了，我不想要了，直接帮我退款吧。",
+      "why": "",
       "expect": {
         "intent": "退换货",
         "risk": "low",
@@ -302,19 +474,26 @@
           "履约时效问题"
         ],
         "emotion": "犹豫",
-        "emotionScore": 48
+        "emotionScore": 48,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "logistics",
       "name": "物流纠纷 · 退款施压",
       "i": 3,
       "text": "你们这效率，我以后不会再来买了。",
+      "why": "",
       "expect": {
         "intent": "流失倾向",
         "risk": "medium",
@@ -330,19 +509,26 @@
           "履约时效问题"
         ],
         "emotion": "不满",
-        "emotionScore": 40
+        "emotionScore": 40,
+        "scoreLevel": "medium",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "loyalty",
       "name": "会员挽回 · 权益流失",
       "i": 1,
       "text": "你好，我发现我的会员积分突然少了两万，规则是什么时候改的？",
+      "why": "",
       "expect": {
         "intent": "会员权益",
         "risk": "low",
@@ -356,19 +542,26 @@
           "高价值会员异议"
         ],
         "emotion": "平稳",
-        "emotionScore": 66
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "loyalty",
       "name": "会员挽回 · 权益流失",
       "i": 2,
       "text": "我一年在你们这儿买好几千，现在积分直接折半，说实话挺失望的。",
+      "why": "会员异议 10 + 情绪升级 12 = 22 分，纯分数是安全档；靠组合红线抬到关注 —— 组合真阳。",
       "expect": {
         "intent": "会员权益",
         "risk": "medium",
@@ -383,19 +576,32 @@
           "高价值会员异议"
         ],
         "emotion": "犹豫",
-        "emotionScore": 52
+        "emotionScore": 52,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "高价值会员权益异议"
+        ],
+        "combos": [
+          "高价值会员权益异议"
+        ]
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     },
     {
       "scenario": "loyalty",
       "name": "会员挽回 · 权益流失",
       "i": 3,
       "text": "我刚看了下竞品，人家同等级的权益比你们好很多，我在考虑要不要换。",
+      "why": "",
       "expect": {
         "intent": "流失倾向",
         "risk": "medium",
@@ -411,18 +617,1190 @@
           "高价值会员异议"
         ],
         "emotion": "犹豫",
-        "emotionScore": 58
+        "emotionScore": 58,
+        "scoreLevel": "medium",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "高价值会员权益异议"
+        ],
+        "combos": [
+          "高价值会员权益异议"
+        ]
       },
       "hit": {
         "intent": true,
         "risk": true,
-        "emotion": true
-      }
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "spill",
+      "name": "履约瑕疵 · 舆情红线",
+      "i": 1,
+      "text": "我在你们直播间抢的那瓶精华，收到时瓶盖是松的，漏了小半瓶出来。",
+      "why": "漏液本身在标准里没有任何信号词 —— 判低是词典的边界，不是引擎漏判。",
+      "expect": {
+        "intent": "常规咨询",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "常规咨询",
+        "risk": "low",
+        "riskScore": 0,
+        "signals": [],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "spill",
+      "name": "履约瑕疵 · 舆情红线",
+      "i": 2,
+      "text": "客服说补我一张十元券，就这样？",
+      "why": "",
+      "expect": {
+        "intent": "常规咨询",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "常规咨询",
+        "risk": "low",
+        "riskScore": 0,
+        "signals": [],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "spill",
+      "name": "履约瑕疵 · 舆情红线",
+      "i": 3,
+      "text": "行。视频我已经剪好了，标题就写「精华漏液」，准备发小红书。",
+      "why": "曝光红线单发只值 26 分（<28，纯分数是安全档），必须由下限抬到关注 —— 信号级红线真阳。",
+      "expect": {
+        "intent": "内容舆情",
+        "risk": "medium",
+        "emotion": "犹豫",
+        "floor": "公开平台曝光倾向"
+      },
+      "got": {
+        "intent": "内容舆情",
+        "risk": "medium",
+        "riskScore": 26,
+        "signals": [
+          "公开平台曝光倾向"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 50,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "公开平台曝光倾向"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": true
+      },
+      "floorName": "公开平台曝光倾向"
+    },
+    {
+      "scenario": "spill",
+      "name": "履约瑕疵 · 舆情红线",
+      "i": 4,
+      "text": "删评论的话，我就打 12315 找消协举报，让大家看看。",
+      "why": "",
+      "expect": {
+        "intent": "监管投诉",
+        "risk": "medium",
+        "emotion": "愤怒"
+      },
+      "got": {
+        "intent": "监管投诉",
+        "risk": "medium",
+        "riskScore": 56,
+        "signals": [
+          "公开平台曝光倾向",
+          "监管投诉路径"
+        ],
+        "emotion": "愤怒",
+        "emotionScore": 6,
+        "scoreLevel": "medium",
+        "floors": [
+          "medium",
+          "medium"
+        ],
+        "floorBy": [
+          "公开平台曝光倾向",
+          "监管投诉路径"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "legal",
+      "name": "涉法咨询 · 律师与起诉",
+      "i": 1,
+      "text": "东西本身没问题，我就问一句：发票能补开吗？",
+      "why": "",
+      "expect": {
+        "intent": "常规咨询",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "常规咨询",
+        "risk": "low",
+        "riskScore": 0,
+        "signals": [],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "legal",
+      "name": "涉法咨询 · 律师与起诉",
+      "i": 2,
+      "text": "那我把材料整理一下，已经在咨询律师了。",
+      "why": "法律红线 26 分同样够不到关注档，靠下限抬起 —— 单说「咨询律师」不许算安全。",
+      "expect": {
+        "intent": "法律索赔",
+        "risk": "medium",
+        "emotion": "不满",
+        "floor": "法律追责风险"
+      },
+      "got": {
+        "intent": "法律索赔",
+        "risk": "medium",
+        "riskScore": 26,
+        "signals": [
+          "法律追责风险"
+        ],
+        "emotion": "不满",
+        "emotionScore": 44,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "法律追责风险"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": true
+      },
+      "floorName": "法律追责风险"
+    },
+    {
+      "scenario": "legal",
+      "name": "涉法咨询 · 律师与起诉",
+      "i": 3,
+      "text": "协商不成就走起诉程序，材料律师会一并提交。",
+      "why": "",
+      "expect": {
+        "intent": "法律索赔",
+        "risk": "medium",
+        "emotion": "愤怒"
+      },
+      "got": {
+        "intent": "法律索赔",
+        "risk": "medium",
+        "riskScore": 26,
+        "signals": [
+          "法律追责风险"
+        ],
+        "emotion": "愤怒",
+        "emotionScore": 20,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "法律追责风险"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "legal",
+      "name": "涉法咨询 · 律师与起诉",
+      "i": 4,
+      "text": "烂脸的事赔偿由我律师跟你们谈，我不露面。",
+      "why": "",
+      "expect": {
+        "intent": "法律索赔",
+        "risk": "high",
+        "emotion": "愤怒"
+      },
+      "got": {
+        "intent": "法律索赔",
+        "risk": "high",
+        "riskScore": 72,
+        "signals": [
+          "皮肤不良反应",
+          "法律追责风险",
+          "索偿诉求"
+        ],
+        "emotion": "愤怒",
+        "emotionScore": 6,
+        "scoreLevel": "high",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "法律追责风险"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "prenatal",
+      "name": "孕产哺乳 · 医疗边界",
+      "i": 1,
+      "text": "我怀孕 28 周，你们这款面霜孕妇能用吗？",
+      "why": "20 分纯分数是安全档；医疗红线抬到关注。宁可被判定「需要谨慎」，也不许把孕期咨询放成无需关注。",
+      "expect": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "emotion": "平稳",
+        "floor": "医疗健康建议边界"
+      },
+      "got": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "riskScore": 20,
+        "signals": [
+          "医疗健康建议边界"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": true
+      },
+      "floorName": "医疗健康建议边界"
+    },
+    {
+      "scenario": "prenatal",
+      "name": "孕产哺乳 · 医疗边界",
+      "i": 2,
+      "text": "哺乳期也能用吗？宝宝五个多月。",
+      "why": "",
+      "expect": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "riskScore": 20,
+        "signals": [
+          "医疗健康建议边界"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "prenatal",
+      "name": "孕产哺乳 · 医疗边界",
+      "i": 3,
+      "text": "医生说是接触性皮炎，开了处方，让我来问你们能不能继续用。",
+      "why": "",
+      "expect": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "riskScore": 20,
+        "signals": [
+          "医疗健康建议边界"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "prenatal",
+      "name": "孕产哺乳 · 医疗边界",
+      "i": 4,
+      "text": "那你们不能给医学建议的话，我就只能退货了。",
+      "why": "",
+      "expect": {
+        "intent": "退换货",
+        "risk": "medium",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "退换货",
+        "risk": "medium",
+        "riskScore": 34,
+        "signals": [
+          "医疗健康建议边界",
+          "退换诉求"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 58,
+        "scoreLevel": "medium",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "mixed",
+      "name": "中英混打 · 成分党",
+      "i": 1,
+      "text": "I just used the new retinol serum，脸上起了 rash 还一直 itching。",
+      "why": "英文写法（rash / itching）必须和中文「泛红 / 痒」拿同一档分 —— 只配中文等于英文顾客一律算平稳。",
+      "expect": {
+        "intent": "过敏投诉",
+        "risk": "medium",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "过敏投诉",
+        "risk": "medium",
+        "riskScore": 34,
+        "signals": [
+          "皮肤不良反应"
+        ],
+        "emotion": "不满",
+        "emotionScore": 40,
+        "scoreLevel": "medium",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "mixed",
+      "name": "中英混打 · 成分党",
+      "i": 2,
+      "text": "Is this safe in pregnancy? 我还在备孕，不想赌。",
+      "why": "pregnancy / 备孕 与上一轮的 rash 累加到 54 分，纯分数已经是关注档 —— 这里不点名红线：分数自己到档时，红线不算「起作用的那一步」（想点名请看 prenatal #1）。",
+      "expect": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "医疗咨询",
+        "risk": "medium",
+        "riskScore": 54,
+        "signals": [
+          "皮肤不良反应",
+          "医疗健康建议边界"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "medium",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "mixed",
+      "name": "中英混打 · 成分党",
+      "i": 3,
+      "text": "If you can't show the full ingredient formula，我就只能 refund，还要 post 到 xiaohongshu。",
+      "why": "",
+      "expect": {
+        "intent": "成分安全",
+        "risk": "high",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "成分安全",
+        "risk": "high",
+        "riskScore": 94,
+        "signals": [
+          "皮肤不良反应",
+          "公开平台曝光倾向",
+          "医疗健康建议边界",
+          "退换诉求"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 58,
+        "scoreLevel": "high",
+        "floors": [
+          "medium",
+          "medium"
+        ],
+        "floorBy": [
+          "公开平台曝光倾向",
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "mixed",
+      "name": "中英混打 · 成分党",
+      "i": 4,
+      "text": "算了，先停用观察两天，你们把 batch number 发我一份就行。",
+      "why": "本轮自身没有任何意图词 → 回退到全量上下文判定；上下文里成分词更多（ingredient / formula / retinol 三个 vs rash / itch 两个），所以 Top1 是成分安全。风险维持 high 是因为红线只抬不压，「先停用观察」不会把已经出现的皮损与曝光记录抹掉。",
+      "expect": {
+        "intent": "成分安全",
+        "risk": "high",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "成分安全",
+        "risk": "high",
+        "riskScore": 94,
+        "signals": [
+          "皮肤不良反应",
+          "公开平台曝光倾向",
+          "医疗健康建议边界",
+          "退换诉求"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "high",
+        "floors": [
+          "medium",
+          "medium"
+        ],
+        "floorBy": [
+          "公开平台曝光倾向",
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "diamond",
+      "name": "钻石卡权益 · 组合红线",
+      "i": 1,
+      "text": "我是你们五年的钻石卡会员，这次生日礼为什么变成要抢的？",
+      "why": "单有会员异议 10 分是安全档 —— 红线要等情绪信号同时出现，不许提前误报。",
+      "expect": {
+        "intent": "会员权益",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "会员权益",
+        "risk": "low",
+        "riskScore": 10,
+        "signals": [
+          "高价值会员异议"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "diamond",
+      "name": "钻石卡权益 · 组合红线",
+      "i": 2,
+      "text": "规则改了不提前说，我很失望。",
+      "why": "会员 10 + 情绪 12 = 22 分，纯分数安全；组合红线抬到关注 —— COMBOS 表里这条必须有真阳例。",
+      "expect": {
+        "intent": "会员权益",
+        "risk": "medium",
+        "emotion": "犹豫",
+        "floor": "高价值会员权益异议"
+      },
+      "got": {
+        "intent": "会员权益",
+        "risk": "medium",
+        "riskScore": 22,
+        "signals": [
+          "情绪升级",
+          "高价值会员异议"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 52,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "高价值会员权益异议"
+        ],
+        "combos": [
+          "高价值会员权益异议"
+        ]
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": true
+      },
+      "floorName": "高价值会员权益异议"
+    },
+    {
+      "scenario": "diamond",
+      "name": "钻石卡权益 · 组合红线",
+      "i": 3,
+      "text": "隔壁那家的同类精华便宜三分之一，我在考虑要不要换。",
+      "why": "",
+      "expect": {
+        "intent": "流失倾向",
+        "risk": "medium",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "流失倾向",
+        "risk": "medium",
+        "riskScore": 22,
+        "signals": [
+          "情绪升级",
+          "高价值会员异议"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "高价值会员权益异议"
+        ],
+        "combos": [
+          "高价值会员权益异议"
+        ]
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "diamond",
+      "name": "钻石卡权益 · 组合红线",
+      "i": 4,
+      "text": "先把积分差额补回来，不然我去别家，真的不会再来买了。",
+      "why": "",
+      "expect": {
+        "intent": "流失倾向",
+        "risk": "medium",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "流失倾向",
+        "risk": "medium",
+        "riskScore": 36,
+        "signals": [
+          "情绪升级",
+          "流失与口碑风险",
+          "高价值会员异议"
+        ],
+        "emotion": "不满",
+        "emotionScore": 34,
+        "scoreLevel": "medium",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "高价值会员权益异议"
+        ],
+        "combos": [
+          "高价值会员权益异议"
+        ]
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "lesion",
+      "name": "疑似皮肤损伤 · 高危",
+      "i": 1,
+      "text": "用完第三天脸上开始脱皮，现在持续泛红。",
+      "why": "",
+      "expect": {
+        "intent": "过敏投诉",
+        "risk": "medium",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "过敏投诉",
+        "risk": "medium",
+        "riskScore": 34,
+        "signals": [
+          "皮肤不良反应"
+        ],
+        "emotion": "不满",
+        "emotionScore": 40,
+        "scoreLevel": "medium",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "lesion",
+      "name": "疑似皮肤损伤 · 高危",
+      "i": 2,
+      "text": "痒得整夜睡不着，已经不敢出门了。",
+      "why": "",
+      "expect": {
+        "intent": "过敏投诉",
+        "risk": "medium",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "过敏投诉",
+        "risk": "medium",
+        "riskScore": 50,
+        "signals": [
+          "皮肤不良反应",
+          "疑似皮肤损伤"
+        ],
+        "emotion": "不满",
+        "emotionScore": 36,
+        "scoreLevel": "medium",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "lesion",
+      "name": "疑似皮肤损伤 · 高危",
+      "i": 3,
+      "text": "皮肤科医生说屏障受损，可能留疤，让我来找你们。",
+      "why": "到这一轮已经是 皮损 34 + 疑似皮肤损伤（留疤）16 + 医疗边界（医生）20 = 70 分 → 高危。标注原先按「只是补充信息」写了关注，是标注错：就医结论 + 可能留疤正是必须接管的组合。",
+      "expect": {
+        "intent": "医疗咨询",
+        "risk": "high",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "医疗咨询",
+        "risk": "high",
+        "riskScore": 70,
+        "signals": [
+          "皮肤不良反应",
+          "疑似皮肤损伤",
+          "医疗健康建议边界"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 46,
+        "scoreLevel": "high",
+        "floors": [
+          "medium"
+        ],
+        "floorBy": [
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "lesion",
+      "name": "疑似皮肤损伤 · 高危",
+      "i": 4,
+      "text": "你们要是还说没问题，我就发小红书曝光，并且要赔偿。",
+      "why": "",
+      "expect": {
+        "intent": "内容舆情",
+        "risk": "high",
+        "emotion": "愤怒"
+      },
+      "got": {
+        "intent": "内容舆情",
+        "risk": "high",
+        "riskScore": 100,
+        "signals": [
+          "皮肤不良反应",
+          "疑似皮肤损伤",
+          "公开平台曝光倾向",
+          "医疗健康建议边界",
+          "索偿诉求"
+        ],
+        "emotion": "愤怒",
+        "emotionScore": 12,
+        "scoreLevel": "high",
+        "floors": [
+          "medium",
+          "medium"
+        ],
+        "floorBy": [
+          "公开平台曝光倾向",
+          "医疗健康建议边界"
+        ],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "quiet",
+      "name": "常规咨询 · 不误报",
+      "i": 1,
+      "text": "你好，我想问下你们门店的地址在哪里？",
+      "why": "这一段是**真阴样本**：正常咨询、正常收货、正常比价都不许被红线抬成关注。第一句必须不带任何词表词，才能证明「常规咨询」这条路还存在（后面几句会按上下文回退，见 slow #4）。",
+      "expect": {
+        "intent": "常规咨询",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "常规咨询",
+        "risk": "low",
+        "riskScore": 0,
+        "signals": [],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "quiet",
+      "name": "常规咨询 · 不误报",
+      "i": 2,
+      "text": "收到快递了，包装完好，我就是确认一下批号。",
+      "why": "「快递」是物流履约的意图词，但履约**风险**信号要的是「还没发货 / 几天没 / 延迟」—— 收到货不该算风险。",
+      "expect": {
+        "intent": "物流履约",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "物流履约",
+        "risk": "low",
+        "riskScore": 0,
+        "signals": [],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "quiet",
+      "name": "常规咨询 · 不误报",
+      "i": 3,
+      "text": "有没有别的规格可以先买小支试试？",
+      "why": "",
+      "expect": {
+        "intent": "产品咨询",
+        "risk": "low",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "产品咨询",
+        "risk": "low",
+        "riskScore": 0,
+        "signals": [],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "quiet",
+      "name": "常规咨询 · 不误报",
+      "i": 4,
+      "text": "好的，谢谢，那就先这样。",
+      "why": "",
+      "expect": {
+        "intent": "产品咨询",
+        "risk": "low",
+        "emotion": "满意"
+      },
+      "got": {
+        "intent": "产品咨询",
+        "risk": "low",
+        "riskScore": 0,
+        "signals": [],
+        "emotion": "满意",
+        "emotionScore": 79,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "slow",
+      "name": "发货缓慢 · 隐性流失",
+      "i": 1,
+      "text": "下单十天了还没发货，我天天在催。",
+      "why": "",
+      "expect": {
+        "intent": "物流履约",
+        "risk": "low",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "物流履约",
+        "risk": "low",
+        "riskScore": 12,
+        "signals": [
+          "履约时效问题"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 50,
+        "scoreLevel": "low",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "slow",
+      "name": "发货缓慢 · 隐性流失",
+      "i": 2,
+      "text": "再拖我就只能退货了，不需要补偿。",
+      "why": "",
+      "expect": {
+        "intent": "退换货",
+        "risk": "medium",
+        "emotion": "犹豫"
+      },
+      "got": {
+        "intent": "退换货",
+        "risk": "medium",
+        "riskScore": 38,
+        "signals": [
+          "退换诉求",
+          "履约时效问题",
+          "索偿诉求"
+        ],
+        "emotion": "犹豫",
+        "emotionScore": 58,
+        "scoreLevel": "medium",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "slow",
+      "name": "发货缓慢 · 隐性流失",
+      "i": 3,
+      "text": "我同事在别家买的第二天就到了，你们这速度真的太差。",
+      "why": "",
+      "expect": {
+        "intent": "流失倾向",
+        "risk": "high",
+        "emotion": "不满"
+      },
+      "got": {
+        "intent": "流失倾向",
+        "risk": "high",
+        "riskScore": 64,
+        "signals": [
+          "情绪升级",
+          "退换诉求",
+          "流失与口碑风险",
+          "履约时效问题",
+          "索偿诉求"
+        ],
+        "emotion": "不满",
+        "emotionScore": 44,
+        "scoreLevel": "high",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
+    },
+    {
+      "scenario": "slow",
+      "name": "发货缓慢 · 隐性流失",
+      "i": 4,
+      "text": "先把这一单退掉吧，以后要不要买再说。",
+      "why": "本轮句子没有任何意图词 → 按上下文判定（intentSource=context），前文物流词更密，所以 Top1 是物流履约。标注如实写引擎口径，不写成「人觉得像退换」。",
+      "expect": {
+        "intent": "物流履约",
+        "risk": "high",
+        "emotion": "平稳"
+      },
+      "got": {
+        "intent": "物流履约",
+        "risk": "high",
+        "riskScore": 64,
+        "signals": [
+          "情绪升级",
+          "退换诉求",
+          "流失与口碑风险",
+          "履约时效问题",
+          "索偿诉求"
+        ],
+        "emotion": "平稳",
+        "emotionScore": 66,
+        "scoreLevel": "high",
+        "floors": [],
+        "floorBy": [],
+        "combos": []
+      },
+      "hit": {
+        "intent": true,
+        "risk": true,
+        "emotion": true,
+        "floor": null
+      },
+      "floorName": null
     }
   ],
-  "generatedAt": "2026-10-18T15:16:26.292Z",
+  "generatedAt": "2026-10-18T18:42:47.290Z",
   "suite": "美妆客服场景标注集",
-  "version": "2026.1",
+  "version": "2026.2",
   "engine": "local",
   "riskPolicyVersion": "2026.1",
   "levels": [

@@ -88,7 +88,7 @@ if (!fs.existsSync(casesPath)) {
   process.exit(1);
 }
 const pack = JSON.parse(fs.readFileSync(casesPath, 'utf8'));
-const report = KIT.runAll(pack.cases, LE);
+const report = KIT.runAll(pack.cases, LE, { policy: RP });
 
 report.generatedAt = new Date().toISOString();
 report.suite = pack.name;
@@ -119,6 +119,19 @@ console.log('  高危召回率        ' + String(report.highRecall).padStart(5) 
 console.log('  情绪分级准确率    ' + String(report.rates.emotion).padStart(5) + '%  ' + bar(report.rates.emotion) +
   '  (' + report.counts.emotion[0] + '/' + report.counts.emotion[1] + ')');
 
+/* 红线兜底覆盖：每条带下限的信号 / 组合都要有「确实是它抬起来的」真阳例。
+   只写「等级碰巧对」不算 —— 分数自己到档的用例证明不了闸门在工作。 */
+if ((report.floorCoverage || []).length) {
+  console.log('\n红线兜底覆盖（标了 expect.floor 且纯分数判不出该等级，才算证到）');
+  report.floorCoverage.forEach((c) => {
+    const why = !c.textReachable ? '（文本命不中 · 由单测负责）'
+      : c.selfReaching ? '（权重自己就到档 · 兜底只在模型路径对账时起作用，由单测负责）' : '';
+    console.log('  ' + (c.ok ? '✓' : '✗') + ' ' + c.name.padEnd(12) + ' [' + c.kind + ' → ' + c.floor + ']' +
+      ' 点名 ' + String(c.declared).padStart(2) + ' 条 · 证到 ' + String(c.proved).padStart(2) + ' 条 · 实际触发 ' + c.fired + ' 次' + why +
+      (c.failed.length ? ' · 没抬起来的：' + c.failed.join(', ') : ''));
+  });
+}
+
 console.log('\n风险混淆矩阵（行 = 人工标注，列 = 引擎判定）');
 console.log('           ' + RP.LEVELS.map((l) => l.label.padStart(6)).join(''));
 RP.LEVELS.forEach((l) => {
@@ -132,6 +145,7 @@ if (report.misses.length) {
     if (r.hit.intent === false) diff.push('意图 期望「' + r.expect.intent + '」实际「' + r.got.intent + '」');
     if (r.hit.risk === false) diff.push('风险 期望「' + r.expect.risk + '」实际「' + r.got.risk + '」(分 ' + r.got.riskScore + ')');
     if (r.hit.emotion === false) diff.push('情绪 期望「' + r.expect.emotion + '」实际「' + r.got.emotion + '」(分 ' + r.got.emotionScore + ')');
+    if (r.hit.floor === false) diff.push('兜底 点名「' + r.floorName + '」但没由它抬起来（纯分数已判到 ' + r.got.scoreLevel + '）');
     console.log('  · [' + r.scenario + ' #' + r.i + '] ' + diff.join(' | '));
     console.log('    «' + r.text + '»');
   });

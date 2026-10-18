@@ -595,6 +595,59 @@ check('ST21', '静态结构', '安全闸必须 fail-closed（riskfloor 抛错不
     : { status: 'pass', detail: '闸名单在 stages.FATAL · 组装按名单接线 · core 对 fatal 阶段中止整轮 · fatalStages() 可在运行时核对' };
 });
 
+check('ST22', '静态结构', '评测集规模与红线覆盖不许退化', () => {
+  /* 评测页最容易悄悄烂掉的两件事：
+       ① 用例缩水 —— 缩到只剩「能认过敏」的那几条，四项指标照样 100%，什么都证明不了；
+       ② 「红线兜底」从没被真正验证过 —— 等级判对往往是分数自己到的，
+          下限一步都没起作用，而承诺里写的恰恰是下限。
+     所以这里钉住：规模下限、中英混打必须有用例撞、
+     每条**文本可命中且权重不够到档**的红线必须被 expect.floor 点名（真阳），
+     词典里的英文 / 拼音写法不许被删回去，文档写的条数 = 实测条数。 */
+  const bad = [];
+  let pack;
+  try { pack = JSON.parse(read('eval/cases.json')); } catch (e) { return { status: 'fail', detail: 'eval/cases.json 解析失败：' + e.message }; }
+  const cases = pack.cases || [];
+  const turns = cases.reduce((a, c) => a + ((c.turns || []).length), 0);
+  if (turns < 40) bad.push('用例只有 ' + turns + ' 轮（约定 ≥40）');
+  if (cases.length < 10) bad.push('剧本只有 ' + cases.length + ' 段（约定 ≥10）');
+  const mixed = cases.reduce((a, c) => a + (c.turns || []).filter((x) => /[a-zA-Z]{4,}/.test(x.text || '')).length, 0);
+  if (mixed < 4) bad.push('中英混打用例只有 ' + mixed + ' 条（≥4，否则英文词典等于没被走过）');
+  const lows = cases.reduce((a, c) => a + (c.turns || []).filter((x) => x.expect && x.expect.risk === 'low').length, 0);
+  if (lows < 12) bad.push('安全档（真阴）样本只有 ' + lows + ' 条（≥12，全是阳例的评测集只会证明词典很凶）');
+
+  const { win } = loadIsolated(['assets/policy.js']);
+  const RP = win.RiskPolicy, IP = win.IntentPolicy;
+  if (!RP || !IP) return { status: 'fail', detail: 'policy.js 未能单独加载（ST22 依赖它核对红线与词典）' };
+  const named = new Set();
+  cases.forEach((c) => (c.turns || []).forEach((x) => { if (x.expect && x.expect.floor) named.add(x.expect.floor); }));
+  RP.SIGNALS.filter((s) => s.floor && (s.k || []).length && (s.w || 0) < RP.THRESHOLDS.medium)
+    .forEach((s) => { if (!named.has(s.name)) bad.push('红线「' + s.name + '」没有点名的真阳例（权重 ' + s.w + ' 够不到关注档，必须由下限抬起）'); });
+  (RP.COMBOS || []).forEach((cb) => {
+    if (cb.floor && !named.has(cb.label)) bad.push('组合红线「' + cb.label + '」没有被 expect.floor 点名');
+  });
+
+  const riskK = RP.SIGNALS.reduce((a, s) => a + ',' + (s.k || []).join(','), '');
+  ['rash', 'allerg', 'itch', 'xiaohongshu', 'lawyer', 'pregnan', 'guomin', 'refund', 'delay']
+    .forEach((w) => { if (riskK.indexOf(w) === -1) bad.push('风险词典缺英文 / 拼音写法「' + w + '」'); });
+  const intentK = IP.INTENTS.reduce((a, i) => a + ',' + (i.k || []).join(','), '');
+  ['rash', 'refund', 'ingredient', 'xiaohongshu'].forEach((w) => {
+    if (intentK.indexOf(w) === -1) bad.push('意图词典缺「' + w + '」');
+  });
+  if (RP.SIGNALS.length !== 14) bad.push('信号数变成 ' + RP.SIGNALS.length + '（约定 14：补说法不等于加信号）');
+
+  const KIT = read('eval/kit.js');
+  if (!/floorCoverage/.test(KIT) || !/provableByDialogue/.test(KIT)) bad.push('eval/kit.js 未输出红线覆盖表（对话证明与单测证明混在一起）');
+  if (!/\bscoreLevel\b/.test(read('assets/engine.js'))) bad.push('engine.js 未返回纯分数等级（分不清分数到档还是红线下限）');
+
+  const DOC = read('项目结构与功能说明.md');
+  if (!new RegExp(turns + '\\s*条').test(DOC)) bad.push('文档没写当前用例条数（应为 ' + turns + ' 条）');
+  if (new RegExp('(14)\\s*条(?:人工标注)?用例').test(DOC)) bad.push('文档仍写着 14 条用例（旧规模）');
+  if (/14\/14/.test(DOC)) bad.push('文档出现「14/14」这种把条数当命中率的写法');
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: turns + ' 轮 / ' + cases.length + ' 段 · 混打 ' + mixed + ' 条 · 点名红线 ' + named.size + ' 条' };
+});
+
 /* ============================== 运行时契约 ============================== */
 /** 独立 window 对象加载：可检测未声明的顶层变量泄漏 */
 function loadIsolated(files) {

@@ -2178,7 +2178,7 @@
       '<div><b>判低一档最要命</b><span>该报警判成了不报警，这条对话就没人接手 —— 所以「高危不漏」单独一列。</span></div>' +
       '</div>';
 
-    /* 覆盖范围：14 条这个数字说明不了什么，得看它来自几个场景 ——
+    /* 覆盖范围：条数本身说明不了什么，得看它来自几个场景、每条红线有没有被点到 ——
        一条用例只考「能不能认过敏」，另一条要同时考过敏 + 履约 + 权益 */
     var byScene = {};
     rep.rows.forEach(function (r) { byScene[r.scenario] = (byScene[r.scenario] || 0) + 1; });
@@ -2191,6 +2191,37 @@
         return '<span class="ev-chip"><b>' + esc(sceneLabel(s)) + '</b><i class="num">' + byScene[s] + ' 条</i></span>';
       }).join('') + '</div></div>';
 
+    /* 红线兜底覆盖：这张表回答的是另一个问题 ——「等级判对了，是分数自己到的，
+       还是合规红线抬的？」只看四项指标看不出来，而恰恰是后者才是本项目承诺的东西。
+       两种「证不到」必须写明去向而不是留空：文本永远命不中的（影像类）、
+       权重自己就够到关注档的（监管路径 —— 它的下限实际作用在模型路径的对账上）。 */
+    var cov = rep.floorCoverage || [];
+    if (cov.length) {
+      var provable = cov.filter(function (c) { return c.provableByDialogue; });
+      var provedN = provable.filter(function (c) { return c.proved > 0; }).length;
+      h += '<div class="ev-block"><div class="ev-bhead"><b>红线兜底有没有真的起作用</b>' +
+        '<span class="sp">' + provable.length + ' 条能靠对话验证 · 已证到 ' + provedN + ' 条</span></div>' +
+        '<table class="risk-table ev-table ev-floors"><thead><tr>' +
+        '<th>红线</th><th>类型</th><th>下限</th><th>点名它的用例</th><th>确实是它抬的</th><th>整批触发</th><th>口径</th></tr></thead><tbody>';
+      cov.forEach(function (c) {
+        var note = !c.textReachable ? '文本永远命不中 · 由单元测试负责'
+          : c.selfReaching ? '权重自己就到档 · 下限用于模型自报低分时对账'
+            : (c.proved ? '对话里由它抬起' : '缺一条真阳例');
+        h += '<tr><td>' + esc(c.name) + '</td>' +
+          '<td style="color:var(--tx-2)">' + esc(c.kind) + '</td>' +
+          '<td>' + esc(RP.labelOf(c.floor)) + '</td>' +
+          '<td class="num">' + c.declared + '</td>' +
+          '<td>' + (!c.provableByDialogue
+            ? '<span class="ev-na">–</span>'
+            : (c.proved ? '<span class="ev-ok">✓ ' + c.proved + '</span>' : '<span class="ev-bad">✗ 0</span>')) + '</td>' +
+          '<td class="num">' + c.fired + '</td>' +
+          '<td style="color:var(--tx-3)">' + esc(note) + (c.failed.length ? ' · 没抬起来：' + esc(c.failed.join(', ')) : '') + '</td></tr>';
+      });
+      h += '</tbody></table>' +
+        '<p class="ev-ms-note">「点名」= 用例里写了 expect.floor 的那条红线；「确实是它抬的」= 同一轮用纯分数判出来是更轻的一档。' +
+        '分数自己就够高的用例不算证到 —— 那样任何一条高危对话都能冒充红线被验证过。</p></div>';
+    }
+
     /* 判错清单只在真有错时出现 —— 全绿的时候它只是噪音 */
     if (rep.misses.length) {
       h += '<div class="ev-block"><div class="ev-bhead"><b>判错的几条</b><span class="sp">' +
@@ -2200,6 +2231,7 @@
         if (r.hit.intent === false) diff.push('意图 期望「' + r.expect.intent + '」实际「' + r.got.intent + '」');
         if (r.hit.risk === false) diff.push('风险 期望「' + r.expect.risk + '」实际「' + r.got.risk + '」（分 ' + r.got.riskScore + '）');
         if (r.hit.emotion === false) diff.push('情绪 期望「' + r.expect.emotion + '」实际「' + r.got.emotion + '」（分 ' + r.got.emotionScore + '）');
+        if (r.hit.floor === false) diff.push('兜底 点名「' + r.floorName + '」但纯分数已经判到 ' + (r.got.scoreLevel || '—') + '，这条不算证到');
         h += '<li><div class="em-head"><span class="em-src">' + esc(sceneLabel(r.scenario)) + ' #' + r.i + '</span>' +
           '<span class="em-diff">' + esc(diff.join('　|　')) + '</span></div>' +
           '<div class="em-text">«' + esc(r.text) + '»</div></li>';

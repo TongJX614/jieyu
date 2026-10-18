@@ -35,6 +35,18 @@ window.EmotionPolicy = (function () {
     失望: -14, 生气: -14, 离谱: -14, 恶心: -16, 太差: -16, 什么破: -16, 无语: -12,
     再来: -12, 换一家: -14, 换品牌: -14, 竞品: -8, 别家: -6,
     还没: -8, 一周: -6, 催: -8, 着急: -8, 慢: -6,
+    /* 英文 / 拼音写法：顾客（尤其跨境与成分党）会中英混着打，只配中文就等于
+       「英文抱怨一律算平稳」。排序仍守上面那条**长词在前**的规则 ——
+       'itching' / 'itchy' 必须排在 'itch' 之前，'disappointed' 排在 'disappoint' 之前。
+       已知子串误伤（挑 ≥4 字母仍挡不住的那几个，落笔前要知道）：
+       'rash' 落在 crash 里、'scar' 落在 scared 里、'itch' 落在 bitch 里。
+       宁可按词扣一次分、也不给它们做词形还原 —— 这里没有分词器，
+       真要收紧就改成正则并按「命中即整词」，别在 indexOf 上自欺。 */
+    'allergic reaction': -20, 'breaking out': -16, breakout: -16, swelling: -18,
+    itching: -12, itchy: -12, burning: -16, scarring: -20, scar: -20, rash: -14,
+    disappointed: -14, disappoint: -14, furious: -18, angry: -14, disgusting: -16,
+    terrible: -16, worst: -16, complaint: -18, refund: -8, lawyer: -22,
+    'never coming': -26, 'switched to': -18,
     谢谢: 8, 好的: 5, 满意: 12, 喜欢: 10, 太好了: 12,
   };
 
@@ -48,6 +60,11 @@ window.EmotionPolicy = (function () {
   ];
 
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  /* 匹配前的唯一一步归一：转小写（词典里的英文条目一律小写，'Rash' / 'LAWYER' 也得命中）。
+     三套标准各留一份同样的一行函数，故意不抽成跨模块共用 —— 情绪 / 意图 / 风险要能被
+     单独拿去复用（llm.js 只读风险、评测只读情绪），谁也不该因另一套被迫一起加载。 */
+  function norm(s) { return String(s == null ? '' : s).toLowerCase(); }
 
   function labelOf(score) {
     var s = Number(score);
@@ -68,9 +85,11 @@ window.EmotionPolicy = (function () {
    * 单句情绪分：基准分起算，逐词累加后夹取。
    * 长词先占位：命中的字符区间会被标记，后续短词不再重复计分 ——
    * 保证「不会再来」只按整词扣一次，而不是同时命中「不会再来」和「再来」。
+   * 先转小写：词典里的英文条目一律写小写，顾客打成 'Rash' / 'LAWYER' 也得命中
+   * （中文不受影响，因此这一步对原有判定是纯增不减）。
    */
   function score(text) {
-    var t = String(text || '');
+    var t = norm(String(text || ''));
     var keys = Object.keys(LEX);
     var total = BASE;
     var matched = [];
@@ -165,36 +184,54 @@ window.IntentPolicy = (function () {
      这条规则来自评测集发现的一处误判（售前场景被识别为过敏投诉）。
      pat 是可选的句式识别：词表只能抓「竞品」这类名词，抓不到
      「我在考虑要不要换」这种**动词型流失表达**。命中句式按 2 个词计分，
-     让它在与普通咨询同时出现时能排到 Top1 —— 流失是必须优先处理的信号。 */
+     让它在与普通咨询同时出现时能排到 Top1 —— 流失是必须优先处理的信号。
+
+     英文 / 拼音写法与 risk 词典同源补充（中英混打是真实输入）。两条已知边界，
+     不要当成已经做完：① neg / onset 这两条**句式正则仍只有中文** —— 纯英文的
+     假设句「will I get a rash?」会被按既成事实算，要收紧就补英文句式；
+     ② 子串匹配天生会误伤，所以只收 ≥4 字母、且在护肤客服语境里没有歧义碎片的词
+     （刻意不收 sue / late / review 这种「issue / related / preview」里的子串）。
+     词表顺序即优先级，新增时先看会不会与更长词重叠。 */
   var INTENTS = [
     {
       name: '过敏投诉', tone: 'danger',
       neg: /(会不会|是否|怕|担心|有点怕|害怕|会不会有)[^。！？；]{0,8}(过敏|刺激|泛红|刺痛|不适|不耐受)/,
       onset: /(已经|开始|用完|用了|刚用|现在|这两天|昨天|这两天)/,
-      k: ['过敏', '刺痛', '红肿', '发红', '泛红', '烂脸', '痒', '灼烧', '爆痘', '脱皮'],
+      k: ['过敏', '刺痛', '红肿', '发红', '泛红', '烂脸', '痒', '灼烧', '爆痘', '脱皮',
+        'rash', 'allerg', 'itch', 'burning', 'breakout', 'swelling', 'peeling'],
     },
-    { name: '内容舆情', tone: 'warn', k: ['小红书', '微博', '曝光', '发帖', '差评', '评价', '黑猫'] },
+    { name: '内容舆情', tone: 'warn', k: ['小红书', '微博', '曝光', '发帖', '差评', '评价', '黑猫',
+      'xiaohongshu', 'weibo', 'douyin', 'rednote'] },
     { name: '监管投诉', tone: 'danger', k: ['消协', '12315', '315', '药监', '工商', '举报', '监管'] },
-    { name: '法律索赔', tone: 'danger', k: ['起诉', '律师', '法律', '赔偿', '追责'] },
-    { name: '医疗咨询', tone: 'accent', k: ['孕妇', '备孕', '哺乳', '医生', '药用', '治疗'] },
+    { name: '法律索赔', tone: 'danger', k: ['起诉', '律师', '法律', '赔偿', '追责',
+      'lawyer', 'lawsuit', 'attorney', 'legal'] },
+    { name: '医疗咨询', tone: 'accent', k: ['孕妇', '备孕', '哺乳', '医生', '药用', '治疗',
+      'pregnan', 'breastfeed', 'doctor', 'dermatologist'] },
     { name: '产品咨询', tone: 'teal', k: ['哪款', '合适', '推荐', '适合', '怎么选', '有没有'] },
-    { name: '成分安全', tone: 'teal', k: ['成分', '配方', '视黄醇', '玻色因', '刺激', '温和', '安全', '肤质'] },
-    { name: '物流履约', tone: 'warn', k: ['发货', '物流', '快递', '没收到', '没发货', '配送'] },
-    { name: '退换货', tone: 'warn', k: ['退款', '退货', '退钱', '不想要'] },
-    { name: '会员权益', tone: 'warn', k: ['积分', '会员', '等级', '权益', '规则'] },
+    { name: '成分安全', tone: 'teal', k: ['成分', '配方', '视黄醇', '玻色因', '刺激', '温和', '安全', '肤质',
+      'ingredient', 'formula', 'retinol', 'gentle'] },
+    { name: '物流履约', tone: 'warn', k: ['发货', '物流', '快递', '没收到', '没发货', '配送',
+      'shipped', 'shipping', 'delivery', 'tracking', 'logistics'] },
+    { name: '退换货', tone: 'warn', k: ['退款', '退货', '退钱', '不想要', 'refund', 'exchange'] },
+    { name: '会员权益', tone: 'warn', k: ['积分', '会员', '等级', '权益', '规则',
+      'member', 'membership', 'points', 'vip'] },
     {
       name: '流失倾向', tone: 'warn',
-      k: ['不会再来', '换一家', '竞品', '别家', '换品牌', '再也不', '流失'],
+      k: ['不会再来', '换一家', '竞品', '别家', '换品牌', '再也不', '流失',
+        'competitor', 'other brand', 'never buy again'],
       pat: /(考虑|打算|要不要|在想要不要|犹豫)[^。！？；]{0,8}(换|转投|买别家|不买|别家)/,
     },
   ];
 
   var FALLBACK = { name: '常规咨询', tone: 'muted', confidence: 0.6 };
 
+  /* 与情绪标准同一条归一（转小写），也同理由：英文关键词一律小写进表 */
+  function norm(s) { return String(s == null ? '' : s).toLowerCase(); }
+
   /** 文本命中的意图，按命中度降序，最多 max 条。
       命中度 = 关键词命中数 + 句式命中加成（pat 命中按 2 个词计）。 */
   function detect(text, max) {
-    var t = String(text || '');
+    var t = norm(text);
     var out = [];
     for (var i = 0; i < INTENTS.length; i++) {
       /* 假设 / 否定语境：没有既成事实标志时，这类句子不算「投诉」 */
@@ -274,62 +311,75 @@ window.RiskPolicy = (function () {
      而 floorOf()/weightOf() 按标准名**精确匹配** —— 名字差一个字，医疗红线与
      曝光红线的等级下限就一条都不触发，风险被算低。alias 负责把这些说法兜回表里的名字。
      注意 alias ≠ k：k 是「顾客原话里的关键词」（命中即计分），
-     alias 是「模型对信号的称呼」（只做改名，不产生证据、不加分）。 */
+     alias 是「模型对信号的称呼」（只做改名，不产生证据、不加分）。
+
+     英文 / 拼音同样只补进 k（顾客真会中英混打）；alias 补英文是为了模型用英文
+     标签时也能兜回标准名。约束不变：**一张表、14 个信号**，补说法不等于加信号。
+     挑选口径：只收 ≥4 字母、在护肤客服语境里无歧义碎片的写法 ——
+     刻意不收 sue（issue / tissue 里）、late（related 里）、rash 只在 k 里收
+     （crash 的误伤概率远低于漏掉「I got a rash」的代价，情绪词典同理）。 */
   var SIGNALS = [
     {
-      name: '皮肤不良反应', w: 34, k: ['刺痛', '红肿', '发红', '泛红', '过敏', '烂脸', '毁容', '灼烧', '痒', '脱皮', '爆痘', '溃烂'],
-      alias: ['皮肤', '脸部', '面部', '脸', '过敏', '刺激', '不适', '不良', '反应', '泛红', '红肿', '发红', '刺痛', '痒', '灼烧', '脱皮', '爆痘', '溃烂'],
+      name: '皮肤不良反应', w: 34, k: ['刺痛', '红肿', '发红', '泛红', '过敏', '烂脸', '毁容', '灼烧', '痒', '脱皮', '爆痘', '溃烂',
+        'rash', 'allerg', 'itch', 'burning', 'breakout', 'swelling', 'peeling', 'guomin'],
+      alias: ['皮肤', '脸部', '面部', '脸', '过敏', '刺激', '不适', '不良', '反应', '泛红', '红肿', '发红', '刺痛', '痒', '灼烧', '脱皮', '爆痘', '溃烂',
+        'skin', 'rash', 'allerg', 'itch', 'burning', 'reaction'],
     },
     {
-      name: '疑似皮肤损伤', w: 16, k: ['毁容', '不敢出门', '留疤', '色素沉着', '溃烂'],
-      alias: ['损伤', '毁容', '留疤', '疤痕', '色素', '不敢出门', '溃烂', '烂脸'],
+      name: '疑似皮肤损伤', w: 16, k: ['毁容', '不敢出门', '留疤', '色素沉着', '溃烂', 'scarring', 'disfigure'],
+      alias: ['损伤', '毁容', '留疤', '疤痕', '色素', '不敢出门', '溃烂', '烂脸', 'damage', 'scar', 'disfigure'],
     },
     /* 无关键词信号：由「视觉通道」命中（消费者上传的皮肤照片），权重与文本信号同表同源。
        k 为空表示它不可能被文本命中 —— evaluate() 因此天然忽略它，不会重复计分。 */
-    { name: '影像可见皮肤异常', w: 18, k: [], alias: ['影像', '照片', '图片', '视觉', '画面'] },
+    { name: '影像可见皮肤异常', w: 18, k: [], alias: ['影像', '照片', '图片', '视觉', '画面', 'image', 'photo'] },
     /* 视觉通道升级信号：真 VLM 判出明显皮损 / 肿胀时返回（离线像素统计判不出，故 k 为空）。
        与「影像可见皮肤异常」同源、同表，只是性质更重 —— 单张照片若真看出皮损，
        风险至少「关注」，避免把肉眼可见的严重皮肤问题放成「安全」。 */
-    { name: '影像可见明显皮损', w: 22, floor: 'medium', k: [], alias: ['皮损', '肿胀', '破溃', '严重损伤'] },
+    { name: '影像可见明显皮损', w: 22, floor: 'medium', k: [], alias: ['皮损', '肿胀', '破溃', '严重损伤', 'lesion', 'swelling'] },
     {
-      name: '公开平台曝光倾向', w: 26, floor: 'medium', k: ['小红书', '微博', '曝光', '发帖', '发到', '评价区', '黑猫'],
-      alias: ['曝光', '小红书', '微博', '抖音', '黑猫', '发帖', '差评', '评价', '媒体', '公开'],
+      name: '公开平台曝光倾向', w: 26, floor: 'medium', k: ['小红书', '微博', '曝光', '发帖', '发到', '评价区', '黑猫',
+        'xiaohongshu', 'weibo', 'douyin', 'rednote'],
+      alias: ['曝光', '小红书', '微博', '抖音', '黑猫', '发帖', '差评', '评价', '媒体', '公开', 'social', 'post'],
     },
     {
       name: '监管投诉路径', w: 30, floor: 'medium', k: ['消协', '12315', '315', '药监', '工商', '举报', '监管'],
-      alias: ['监管', '消协', '药监', '工商', '举报', '12315', '315', '主管部门', '监管部门'],
+      alias: ['监管', '消协', '药监', '工商', '举报', '12315', '315', '主管部门', '监管部门', 'regulator', 'authority'],
     },
     {
-      name: '法律追责风险', w: 26, floor: 'medium', k: ['起诉', '律师', '法律', '追责'],
-      alias: ['法律', '律师', '起诉', '诉讼', '追责', '仲裁', '司法'],
+      name: '法律追责风险', w: 26, floor: 'medium', k: ['起诉', '律师', '法律', '追责', 'lawyer', 'lawsuit', 'attorney', 'legal'],
+      alias: ['法律', '律师', '起诉', '诉讼', '追责', '仲裁', '司法', 'legal', 'lawyer', 'litigation'],
     },
     {
-      name: '医疗健康建议边界', w: 20, floor: 'medium', k: ['孕妇', '备孕', '哺乳', '医生', '药用', '治疗', '处方'],
-      alias: ['医疗', '医学', '医用', '药用', '医生', '医院', '孕妇', '孕期', '备孕', '哺乳', '用药', '治疗', '处方'],
+      name: '医疗健康建议边界', w: 20, floor: 'medium', k: ['孕妇', '备孕', '哺乳', '医生', '药用', '治疗', '处方',
+        'pregnan', 'breastfeed', 'doctor', 'dermatologist'],
+      alias: ['医疗', '医学', '医用', '药用', '医生', '医院', '孕妇', '孕期', '备孕', '哺乳', '用药', '治疗', '处方',
+        'medical', 'health', 'pregnan', 'doctor'],
     },
     {
-      name: '情绪升级', w: 12, k: ['失望', '生气', '离谱', '恶心', '太差', '什么破', '无语', '火大'],
-      alias: ['情绪', '失望', '生气', '愤怒', '火大', '无语', '恶心', '离谱', '不满'],
+      name: '情绪升级', w: 12, k: ['失望', '生气', '离谱', '恶心', '太差', '什么破', '无语', '火大',
+        'disappoint', 'furious', 'angry', 'disgusting', 'terrible'],
+      alias: ['情绪', '失望', '生气', '愤怒', '火大', '无语', '恶心', '离谱', '不满', 'emotion', 'angry'],
     },
     {
-      name: '退换诉求', w: 14, k: ['退款', '退货', '退钱', '不想要'],
-      alias: ['退款', '退货', '换货', '退换', '不想要'],
+      name: '退换诉求', w: 14, k: ['退款', '退货', '退钱', '不想要', 'refund', 'return it', 'exchange'],
+      alias: ['退款', '退货', '换货', '退换', '不想要', 'refund', 'return', 'exchange'],
     },
     {
-      name: '流失与口碑风险', w: 14, k: ['不会再来', '换一家', '竞品', '别家', '换品牌', '再也不'],
-      alias: ['流失', '不会再来', '再也不', '换一家', '换品牌', '别家', '竞品', '转投'],
+      name: '流失与口碑风险', w: 14, k: ['不会再来', '换一家', '竞品', '别家', '换品牌', '再也不',
+        'competitor', 'other brand', 'never buy again'],
+      alias: ['流失', '不会再来', '再也不', '换一家', '换品牌', '别家', '竞品', '转投', 'churn', 'competitor'],
     },
     {
-      name: '履约时效问题', w: 12, k: ['还没发货', '没发货', '延迟', '几天没', '一周', '配送慢'],
-      alias: ['发货', '物流', '快递', '延迟', '配送', '时效', '没收到'],
+      name: '履约时效问题', w: 12, k: ['还没发货', '没发货', '延迟', '几天没', '一周', '配送慢', 'delay', 'not shipped'],
+      alias: ['发货', '物流', '快递', '延迟', '配送', '时效', '没收到', 'shipping', 'delivery', 'logistics'],
     },
     {
-      name: '索偿诉求', w: 12, k: ['赔', '补偿', '怎么处理', '给个说法'],
-      alias: ['赔偿', '补偿', '赔', '说法', '索赔'],
+      name: '索偿诉求', w: 12, k: ['赔', '补偿', '怎么处理', '给个说法', 'compensat'],
+      alias: ['赔偿', '补偿', '赔', '说法', '索赔', 'compensat'],
     },
     {
-      name: '高价值会员异议', w: 10, k: ['钻石卡', '金卡', '积分', '会员', '权益'],
-      alias: ['会员', '积分', '权益', '钻石', '金卡', '等级'],
+      name: '高价值会员异议', w: 10, k: ['钻石卡', '金卡', '积分', '会员', '权益', 'diamond', 'membership', 'vip'],
+      alias: ['会员', '积分', '权益', '钻石', '金卡', '等级', 'member', 'points', 'loyalty'],
     },
   ];
 
@@ -383,6 +433,8 @@ window.RiskPolicy = (function () {
     return 0;
   }
 
+  function norm(s) { return String(s == null ? '' : s).toLowerCase(); }
+
   /**
    * 把「模型对信号的称呼」归一到表里的标准名。
    * 规则是确定的，不看运气：
@@ -391,9 +443,11 @@ window.RiskPolicy = (function () {
    *     权重也相同则取表里靠前的（SIGNALS 的顺序就是优先级）；
    *   ③ 一条片段都不命中 → null。返回 null 不是失败，是「这个名字我们兜不住」，
    *     调用方必须把它**原样记录下来**而不是硬凑一个标准名 —— 凑出来的名字会变成假证据。
+   * 大小写不敏感：模型返回 'Skin Reaction' 与 'skin reaction' 必须落到同一个信号，
+   * 否则同一条红线会因为一个首字母大写而兜不住（等级下限失效）。
    */
   function normalizeSignal(raw) {
-    var t = String(raw == null ? '' : raw).trim();
+    var t = norm(raw).trim();
     if (!t) return null;
     var i;
     for (i = 0; i < SIGNALS.length; i++) if (SIGNALS[i].name === t) return { from: t, to: t, exact: true };
@@ -441,11 +495,16 @@ window.RiskPolicy = (function () {
     return lv;
   }
 
-  /** 逐条命中信号并累加分数（同一信号只计一次），再应用「等级下限 + 组合下限」兜底 */
+  /** 逐条命中信号并累加分数（同一信号只计一次），再应用「等级下限 + 组合下限」兜底。
+      匹配前转小写，英文关键词因此不分大小写。 */
   function evaluate(text) {
-    var t = String(text || '');
+    var t = norm(text);
     var signals = [];
     var floors = [];
+    /* floorBy：**哪几条**红线命中了。floors 记的是下限档位（'medium'），
+       同一档有三条红线时它分不清是哪条兜的 —— 评测要按红线逐条核对覆盖率，
+       只靠 floors 会把「曝光兜住了」记成「医疗兜住了」。 */
+    var floorBy = [];
     var combos = [];
     var total = 0;
     for (var i = 0; i < SIGNALS.length; i++) {
@@ -454,7 +513,7 @@ window.RiskPolicy = (function () {
         if (t.indexOf(s.k[j]) !== -1) {
           signals.push(s.name);
           total += s.w;
-          if (s.floor) floors.push(s.floor);
+          if (s.floor) { floors.push(s.floor); floorBy.push(s.name); }
           break;
         }
       }
@@ -468,7 +527,7 @@ window.RiskPolicy = (function () {
       for (var a = 0; a < cb.all.length; a++) {
         if (signals.indexOf(cb.all[a]) === -1) { all = false; break; }
       }
-      if (all) { combos.push(cb); floors.push(cb.floor); }
+      if (all) { combos.push(cb); floors.push(cb.floor); floorBy.push(cb.label); }
     }
 
     /* 等级 = 分数判定结果 与 命中信号的等级下限 取更严重者 */
@@ -476,7 +535,7 @@ window.RiskPolicy = (function () {
     for (var f = 0; f < floors.length; f++) {
       if (rankOf(floors[f]) < rankOf(level)) level = floors[f];
     }
-    return { score: total, level: level, signals: signals, floors: floors, combos: combos };
+    return { score: total, level: level, signals: signals, floors: floors, floorBy: floorBy, combos: combos };
   }
 
   /** 统一的处置建议文案：命中信号 + 该等级的标准动作 */

@@ -105,4 +105,65 @@ module.exports = function (t) {
   t.eq(out.engine, 'local', '引擎标识为 local');
   t.eq(out.replies.length, 3, '永远给出 3 条候选话术');
   t.eq(out.emotion.series.length > 0, true, '情绪序列非空');
+  /* 兜底明细：界面 / 评测要能分清「分数自己到档」与「红线抬起来的」，
+     否则一条 26 分的曝光被判成关注，看不出是阈值起作用还是下限起作用。 */
+  const floorOut = LE.analyze({ message: '我要发小红书', history: [], profile: {}, pack: null });
+  t.eq(floorOut.risk.scoreLevel, 'low', '纯分数判出来是安全档（26 分 < 28）');
+  t.eq(floorOut.risk.level, 'medium', '最终等级由红线抬起');
+  t.eq(floorOut.risk.floorBy.join(''), '公开平台曝光倾向', 'floorBy 记的是哪几条红线命中（不是档位）');
+
+  t.suite('policy · 红线逐条可证（带下限的信号一条都不许是哑规则）');
+  {
+    /* 覆盖表只统计「对话里确实被抬起过」，而这里要保证的是另一件事：
+       表里每一条红线**在语义上**都能抬起等级 —— 单发命中即不低于其下限。
+       文本命不中的（影像类）用 applyFloors 直接证，不许因为它进不了评测集就跳过。 */
+    const withFloor = RP.SIGNALS.filter((s) => s.floor);
+    t.ok(withFloor.length >= 5, '带等级下限的红线至少 5 条（实为 ' + withFloor.length + '）');
+    withFloor.forEach((s) => {
+      t.eq(RP.applyFloors('low', [s.name]), s.floor, s.name + ' 的下限能把安全抬到 ' + s.floor);
+      if (!s.k.length) { t.eq(s.k.length, 0, s.name + ' 无关键词 · 只由视觉通道命中'); return; }
+      const hit = RP.evaluate('刚才的事 ' + s.k[0]);
+      t.ok(hit.signals.indexOf(s.name) !== -1, s.name + ' 单词命中（' + s.k[0] + '）');
+      t.eq(RP.rankOf(hit.level) <= RP.rankOf(s.floor), true, s.name + ' 单发命中后等级不低于下限');
+    });
+    /* 权重自己就 ≥ 中风险阈值的红线：本地分数路径上永远不会是「抬起等级的那一步」，
+       它的实际作用是模型自报低分时的对账兜底。这条口径必须写下来，
+       否则「监管路径的 floor 从没被评测证到」会被当成缺陷反复排查。 */
+    const noop = withFloor.filter((s) => s.k.length && s.w >= RP.THRESHOLDS.medium).map((s) => s.name);
+    t.ok(noop.indexOf('监管投诉路径') !== -1, '监管投诉路径属于「权重自己到档」的红线（30 ≥ 28）');
+    t.eq(RP.levelOf(RP.evaluate('我要找消协').score), 'medium', '纯分数已经是关注档，不依赖 floor');
+  }
+
+  t.suite('policy · 多语言写法（英文 / 拼音与中文同分）');
+  {
+    /* 顾客中英混打是真实输入。只配中文 = 英文抱怨一律算「平稳 + 安全」，
+       那正是本项目最要命的失效方式：红线下限一条都不触发。 */
+    t.eq(RP.evaluate('我过敏了').score, 34, '中文「过敏」= 皮肤不良反应 34 分');
+    t.eq(RP.evaluate('I got a RASH on my cheek').score, 34, '英文大写同样计 34 分（匹配前转小写）');
+    t.eq(RP.evaluate('脸上起疹子了，guomin 了').score, 34, '拼音 guomin 也算皮肤不良反应');
+    t.eq(RP.evaluate('I will post this on xiaohongshu').level, 'medium', '拼音平台名照样触发曝光红线');
+    t.eq(RP.evaluate('my lawyer will handle this').level, 'medium', '英文 lawyer 触发法律红线');
+    t.eq(RP.evaluate('is it safe during pregnancy').level, 'medium', '英文 pregnancy 触发医疗红线');
+    t.eq(RP.evaluate('please refund, my order is delayed and the tracking shows nothing').signals.join('>'),
+      '退换诉求>履约时效问题', '英文退款 / 物流词按同一张表累加，不新开一套');
+    t.eq(RP.evaluate('please refund, my order is delayed and the tracking shows nothing').level, 'low',
+      '补了英文不等于见词就抬：26 分仍是安全档（只有带下限的红线才抬等级）');
+
+    t.eq(IP.detect('I got a rash and it is itching', 3)[0].name, '过敏投诉', '英文不良反应判成过敏投诉');
+    t.eq(IP.detect('please refund my order', 3)[0].name, '退换货', '英文退款判成退换货');
+    t.eq(IP.detect('what is the ingredient formula', 3)[0].name, '成分安全', '英文成分词判成成分安全');
+    t.eq(IP.detect('今天天气不错', 3)[0].name, '常规咨询', '补了英文之后中文回退行为不变');
+
+    t.eq(EP.score('我过敏了').score, 46, '中文情绪分不因转小写而改变');
+    t.eq(EP.score('I am very disappointed').score, 52, '英文失望词进情绪词典（66-14）');
+    t.eq(EP.labelOf(EP.score('This is terrible, I am furious').score), '不满', '英文怒气词落进「不满」档');
+    t.eq(EP.score('I am disappointed').matched.join(','), 'disappointed',
+      '长词 disappointed 先占位，短词 disappoint 不重复扣分');
+
+    t.eq(RP.normalizeSignal('Skin Reaction').to, '皮肤不良反应', '模型写英文标签也兜回标准名（大小写不敏感）');
+    t.eq(RP.normalizeSignal('MEDICAL ADVICE').to, '医疗健康建议边界', '全大写同样兜底，floor 不因写法失效');
+    const b = RP.normalizeSignals(['rash', 'Lawyer', '投诉']);
+    t.eq(b.signals.join('>'), '皮肤不良反应>法律追责风险', '英文说法归一后按标准名计分');
+    t.eq(b.unknown.join(''), '投诉', '裸词「投诉」依旧不采信（英文别名不会放宽中文口径）');
+  }
 };

@@ -200,6 +200,15 @@ const CHECKS = [
         steps: document.querySelectorAll('#evalBody .ev-step').length,
         sample: !!document.querySelector('#evalBody .ev-sample'),
         sampleFlag: ((document.querySelector('.evs-flag') || {}).textContent || '').trim(),
+        /* 红线兜底覆盖表：证明「判对了」不只是分数自己到的档。
+           浏览器里跑的是同一份 eval/kit.js，所以这张表与 npm run eval 的输出同源。 */
+        floorRows: document.querySelectorAll('#evalBody .ev-floors tbody tr').length,
+        floorProved: [...document.querySelectorAll('#evalBody .ev-floors tbody tr')]
+          .filter(tr => /✓/.test(tr.textContent)).length,
+        floorUnproven: [...document.querySelectorAll('#evalBody .ev-floors tbody tr')]
+          .filter(tr => /✗\s*0/.test(tr.textContent)).map(tr => tr.children[0].textContent),
+        floorKinds: [...document.querySelectorAll('#evalBody .ev-floors tbody tr')]
+          .map(tr => tr.children[0].textContent + ':' + tr.children[1].textContent),
       };
       const bad = [];
       const want = (c, l) => { if (!c) bad.push(l); };
@@ -210,6 +219,10 @@ const CHECKS = [
       want(out.steps === 3, '「出题 / AI 答 / 对答案」三步应齐全，实为 ' + out.steps);
       want(out.sample === true, '应有一条示范用例（AI 判 vs 人工标）');
       want(/判对|判错/.test(out.sampleFlag), '示范用例应给出判对 / 判错结论，实为「' + out.sampleFlag + '」');
+      want(out.floorRows >= 6, '红线兜底覆盖表应逐条列出带下限的信号与组合，实为 ' + out.floorRows + ' 行');
+      want(out.floorProved >= 4, '至少 4 条红线在对话里被证明抬起了等级，实为 ' + out.floorProved);
+      want(out.floorUnproven.length === 0, '有红线点名了却没证到：' + out.floorUnproven.join(', '));
+      want(out.floorKinds.some(x => /组合/.test(x)), '覆盖表应包含组合红线，实为 ' + out.floorKinds.join(' / '));
       if (bad.length) throw new Error('评测页断言失败：' + bad.join(' | '));
       return out;
     })()`,
