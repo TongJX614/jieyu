@@ -1,74 +1,76 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>解语 Jieyu · 美妆客服共情副驾</title>
 <meta name="description" content="解语（Jieyu）—— 面向美妆消费者服务场景的 AI 实时坐席辅助系统：多源数据融合、情绪与意图识别、风险预警与话术推荐。每一条回复都依据订单事实生成。">
+<link rel="icon" href="assets/img/favicon.png" type="image/png">
 <link rel="stylesheet" href="assets/styles.css">
 </head>
 <body>
 
-<div class="app" id="app">
+<!-- data-view 决定外壳是「三列」还是「两列」：
+     只有坐席工作台需要会话列表，其余四个模块是运营与质检的单页，
+     强留一列会话只会让它们在自己的地盘上被挤窄 -->
+<div class="app" id="app" data-view="workbench">
 
-  <!-- ==================== ① 左侧导航栏 ==================== -->
+  <!-- ==================== ① 左侧导航栏 ====================
+       带字导航：六个模块各占一行，「这是哪一屏」永远不用猜。
+       接待 / 运营 两组分开 —— 前两个是坐席每分钟都在用的，后四个是运营与质检才进的。 -->
   <aside class="rail">
 
     <div class="rail-brand" title="解语 Jieyu · 美妆客服共情副驾">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 3l2.2 5.4L20 10l-4.4 3.2L16.6 19 12 16 7.4 19l1-5.8L4 10l5.8-1.6z"/>
-      </svg>
-    </div>
-    <!-- 品牌名：只有图标的话，坐席和评委在界面里都看不出这个项目叫什么 -->
-    <div class="rail-brand-name" title="解语 Jieyu · 美妆客服共情副驾">解语</div>
-
-    <!-- 登录坐席 -->
-    <div class="me" id="meCard" title="当前登录坐席">
-      <span class="me-avatar">佟</span>
-      <span class="me-name">佟佳鑫</span>
-      <span class="me-role">客服 · L3</span>
-      <span class="me-state"><i class="dot live"></i>在线接待中</span>
+      <!-- 品牌标志是单色掩膜：图形存在 assets/img/brand-lockup.png 的 alpha 通道里，
+           颜色由 --brand-ink 给，深浅两套主题自动换色，不用维护两张位图。
+           窄屏下换成纯图标那一张（JY 单体），字标直接收掉而不是截断。 -->
+      <span class="brand-lockup" role="img" aria-label="解语 Jieyu"></span>
+      <span class="brand-mark" role="img" aria-label="解语 Jieyu"></span>
     </div>
 
     <nav class="rail-nav" id="railNav" aria-label="功能导航">
-      <button class="rail-btn" data-view="workbench" aria-current="true" title="坐席工作台">
+      <div class="rail-sec">接待</div>
+
+      <button class="rail-btn" data-view="workbench" aria-current="true" title="坐席工作台：实时会话 + 客情 + 话术建议">
         <span class="ri">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3.2" y="4.4" width="17.6" height="15.2" rx="3"/><path d="M3.2 9.4h17.6M9.6 9.4v10.2"/>
           </svg>
         </span>
-        <span class="rl">工作台</span>
+        <span class="rl">坐席工作台</span>
       </button>
 
-      <button class="rail-btn" data-view="care" title="主动关怀雷达（复购 / 权益 / 成分冲突）">
+      <button class="rail-btn" data-view="care" title="主动关怀：复购 / 权益 / 成分冲突">
         <span class="ri">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="8.4"/><circle cx="12" cy="12" r="4.1"/><path d="M12 12l5.9-5.9"/><circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none"/>
           </svg>
         </span>
-        <span class="rl">关怀</span>
+        <span class="rl">主动关怀</span>
         <span class="rail-badge care" id="navCareBadge" hidden>0</span>
       </button>
 
-      <button class="rail-btn" data-view="channels" title="多渠道接入（淘宝 / 天猫 / 京东 / 拼多多 / 抖音 / 小红书 / 微信 / 官网）">
+      <div class="rail-sec">运营与质检</div>
+
+      <button class="rail-btn" data-view="channels" title="多渠道接入：淘宝 / 天猫 / 京东 / 拼多多 / 抖音 / 小红书 / 微信 / 官网">
         <span class="ri">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="5.4" cy="12" r="2.4"/><circle cx="18.6" cy="5.8" r="2.4"/><circle cx="18.6" cy="18.2" r="2.4"/>
             <path d="M7.6 11l8.8-4.2M7.6 13l8.8 4.2"/>
           </svg>
         </span>
-        <span class="rl">渠道</span>
+        <span class="rl">渠道接入</span>
         <span class="rail-badge" id="navChannelBadge" hidden>0</span>
       </button>
 
-      <button class="rail-btn" data-view="dashboard" title="风险预警看板">
+      <button class="rail-btn" data-view="dashboard" title="风险看板：事件流与闭环状态">
         <span class="ri">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 3.2l7 2.6v5.8c0 4.3-2.9 7.4-7 8.8-4.1-1.4-7-4.5-7-8.8V5.8z"/><path d="M12 8.6v4.2"/>
             <circle cx="12" cy="15.8" r="1" fill="currentColor" stroke="none"/>
           </svg>
         </span>
-        <span class="rl">看板</span>
+        <span class="rl">风险看板</span>
         <span class="rail-badge alert" id="navBadge" hidden>0</span>
       </button>
 
@@ -78,15 +80,16 @@
             <path d="M4.2 5.2A1.8 1.8 0 0 1 6 3.4h12.6v14.2H6a1.8 1.8 0 0 0-1.8 1.8z"/><path d="M4.2 5.2v14.6"/><path d="M9 8h6.4M9 11.2h4.4"/>
           </svg>
         </span>
-        <span class="rl">话术库</span>
+        <span class="rl">话术知识库</span>
       </button>
-      <button class="rail-btn" data-view="eval" title="效果评测（准确率与错例）">
+
+      <button class="rail-btn" data-view="eval" title="效果评测：准确率与错例">
         <span class="ri">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M4 20V4"/><path d="M4 20h16"/><path d="M8 20v-6.4M12.4 20V9.2M16.8 20v-9"/>
           </svg>
         </span>
-        <span class="rl">评测</span>
+        <span class="rl">效果评测</span>
       </button>
 
     </nav>
@@ -98,14 +101,23 @@
       </button>
       <button class="rail-btn" id="btnSettings" title="模型与推理设置">
         <span class="ri">
-          <!-- 这里原来是一个「圆 + 八道射线」，和正上方的主题切换按钮（太阳）几乎一模一样，
-               19px 下两个按钮读成同一个东西。设置改推子/滑杆，语义直接对上「模型与推理参数」 -->
+          <!-- 主题是太阳、设置推子/滑杆：19px 下「圆 + 射线」会被读成同一个东西 -->
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
             <path d="M3.2 8.6h5.4M13.4 8.6h7.4M3.2 15.4h7.6M15.4 15.4h5.4"/>
             <circle cx="11" cy="8.6" r="2.3"/><circle cx="13" cy="15.4" r="2.3"/>
           </svg>
         </span>
         <span class="rl">设置</span>
+      </button>
+
+      <!-- 登录坐席：常驻在导航底部，回答「以谁的身份在接待」。
+           它本身就是一个入口 —— 点开能看当前状态、切换坐席、登录 / 退出。 -->
+      <button class="me" id="meCard" type="button" aria-haspopup="dialog"
+              aria-controls="accountRoot" title="当前坐席 · 点开查看状态与切换账号">
+        <span class="me-avatar" id="meAvatar">佟</span>
+        <span class="me-name" id="meName">佟佳鑫</span>
+        <span class="me-role" id="meRole">客服 · L3</span>
+        <span class="me-state" id="meState"><i class="dot live"></i>在线接待中</span>
       </button>
     </div>
   </aside>
@@ -147,6 +159,14 @@
           <path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
         </svg>
       </button>
+
+      <!-- 非会话视图的顶栏身份：坐席在这里看的是「哪个模块、这页看什么」，
+           而不是某一位顾客 —— 顾客上下文只属于会话流 -->
+      <span class="wb-scope" id="wbScope">
+        <b id="wbTitle">—</b>
+        <span id="wbSub">—</span>
+      </span>
+
       <span class="avatar" id="curAvatar">客</span>
       <span class="cur-txt">
         <b id="curName">—</b>
@@ -179,7 +199,19 @@
 
       <section class="band" id="band" aria-label="实时数据">
         <div class="band-strip" id="bandStrip"></div>
-        <div class="band-detail" id="bandDetail" hidden></div>
+        <!-- 展开按钮是常驻节点，不随数据条重绘：重绘会换掉节点、把键盘焦点丢掉 -->
+        <button class="bs-toggle" id="bandToggle" type="button" data-band="toggle"
+                aria-expanded="false" aria-controls="bandDetail" title="展开 / 收起顾客全景数据">
+          <span class="bs-toggle-tx">全部数据</span>
+          <span class="bs-chev" aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.4l6 6 6-6"/></svg>
+          </span>
+        </button>
+        <!-- 遮罩与弹窗都是 fixed：挂在这里只是为了跟着「实时数据」一起被视图隐藏 -->
+        <div class="band-scrim" id="bandScrim" hidden></div>
+        <div class="band-detail" id="bandDetail" role="dialog" aria-modal="true"
+             aria-label="顾客全景数据" tabindex="-1" hidden></div>
       </section>
 
       <section class="chat" aria-label="实时会话流">
@@ -213,10 +245,12 @@
       </section>
     </div>
 
-    <!-- 主动关怀雷达：出事之前先说话 -->
+    <!-- 主动关怀雷达：出事之前先说话。
+         客户一多，「一人一卡往下堆」就变成一条拉不到底的长图 ——
+         这里改成「左边选人、右边看事」：索引列自己滚，正文自己滚，互不拖累。 -->
     <div class="view" id="viewCare" hidden>
       <section class="metrics" id="careMetrics" aria-label="关怀指标"></section>
-      <section class="panel">
+      <section class="panel care-panel">
         <div class="panel-head">
           <h2>主动关怀雷达</h2>
           <span class="hint">三路信号：复购周期 · 权益挽留 · 成分冲突</span>
@@ -225,59 +259,57 @@
           <span class="hint num" id="careCover">—</span>
           <button class="btn ghost small" id="btnCareRefresh">重新扫描</button>
         </div>
-        <div class="panel-body" id="careBody"></div>
-      </section>
-      <section class="panel" style="margin-top:12px">
-        <div class="panel-head">
-          <h2>推算口径</h2>
-          <span class="hint">每条建议都可按此处口径复算</span>
-          <span class="spacer"></span>
-          <span class="hint num" id="careVer">—</span>
-        </div>
-        <div class="panel-body" id="careNotes"></div>
+        <div class="panel-body care-body" id="careBody"></div>
       </section>
     </div>
 
     <!-- 风险预警看板 -->
     <div class="view" id="viewDashboard" hidden>
       <section class="metrics" id="dashMetrics" aria-label="看板指标"></section>
-      <div class="dash-grid">
-        <section class="panel">
-          <div class="panel-head">
-            <h2>风险事件流</h2>
-            <span class="hint">按等级与时间排序 · 点行展开处置</span>
-            <span class="spacer"></span>
-            <span class="hint num" id="riskCount">0 起</span>
-          </div>
-          <div class="panel-body" id="riskTableWrap"></div>
-        </section>
-        <div>
-          <section class="panel" style="margin-bottom:12px">
-            <div class="panel-head"><h2>闭环状态分布</h2>
-              <span class="spacer"></span>
-              <span class="hint">工单流转 · 时限可达</span>
-            </div>
-            <div class="panel-body" id="caseDist"></div>
-          </section>
-          <section class="panel" style="margin-bottom:12px">
-            <div class="panel-head"><h2>风险等级分布</h2>
-              <span class="spacer"></span>
-              <span class="hint">本场情绪均值 <b class="num" id="dashAvg">—</b></span>
-            </div>
-            <div class="panel-body" id="riskDistLevel"></div>
-          </section>
-          <section class="panel" style="margin-bottom:12px">
-            <div class="panel-head"><h2>信号类型分布</h2></div>
-            <div class="panel-body" id="riskDistSignal"></div>
-          </section>
-          <section class="panel">
-            <div class="panel-head"><h2>风险分级标准</h2>
-              <span class="spacer"></span>
-              <span class="hint" id="riskStdVer">—</span>
-            </div>
-            <div class="panel-body" id="riskStandard"></div>
-          </section>
+
+      <!-- 风险事件流独占一整行：8 列挤在半屏里会全部折行，读不出「哪条最急」 -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>风险事件流</h2>
+          <span class="hint">按等级与时间排序 · 点行展开处置</span>
+          <span class="spacer"></span>
+          <span class="hint num" id="riskCount">0 起</span>
         </div>
+        <div class="panel-body" id="riskTableWrap"></div>
+      </section>
+
+      <!-- 分布与分级标准同处一行的四列：它们讲的是同一批事件的四种切面
+           （怎么流转 / 多急 / 因为什么 / 按什么定的级），
+           横向并列才读得出关系；分级标准单独沉底只会多占一屏。 -->
+      <div class="dash-row">
+        <section class="panel">
+          <div class="panel-head"><h2>闭环状态</h2>
+            <span class="spacer"></span>
+            <span class="hint num" id="caseClosure" title="工单流转">—</span>
+          </div>
+          <div class="panel-body" id="caseDist"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>风险等级</h2>
+            <span class="spacer"></span>
+            <span class="hint">情绪均值 <b class="num" id="dashAvg">—</b></span>
+          </div>
+          <div class="panel-body" id="riskDistLevel"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>信号类型</h2>
+            <span class="spacer"></span>
+            <span class="hint">命中次数</span>
+          </div>
+          <div class="panel-body" id="riskDistSignal"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>分级标准</h2>
+            <span class="spacer"></span>
+            <span class="hint num" id="riskStdVer">—</span>
+          </div>
+          <div class="panel-body" id="riskStandard"></div>
+        </section>
       </div>
     </div>
 
@@ -288,6 +320,9 @@
           <h2>话术知识库</h2>
           <span class="hint" id="kbMeta">—</span>
           <span class="spacer"></span>
+          <button class="btn ghost small" id="btnKbNew" title="手工录入一条可以复用的回复">
+            <span class="btn-plus" aria-hidden="true">+</span>新增话术
+          </button>
           <span class="csearch kb-search">
             <span class="csearch-icon">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
@@ -357,10 +392,13 @@
   </button>
 </div>
 
-<!-- ==================== 设置抽屉 ==================== -->
-<div id="drawerRoot" hidden>
+<!-- ==================== 模型与推理设置 ====================
+     入口只有一处：右上角的状态药丸。这里回答「怎么想」——
+     走哪条模型通道、允许多慢、降级到哪、接入与管线长什么样。
+     站点外观、起始页、账号这些「怎么用」的东西归网站设置，两处不再重复。 -->
+<div id="engineRoot" hidden>
   <div class="scrim" id="scrim"></div>
-  <aside class="drawer" role="dialog" aria-modal="true" aria-label="设置">
+  <aside class="drawer" role="dialog" aria-modal="true" aria-label="模型与推理设置">
     <div class="drawer-head">
       <h2>模型与推理设置</h2>
       <span class="spacer"></span>
@@ -496,6 +534,145 @@
   </aside>
 </div>
 
+<!-- ==================== 网站设置 ====================
+     这里只放「这间店怎么用」的东西：外观、起始页、助手、提醒、本机数据、账号。
+     模型与 Key 不在这里 —— 那是右上角状态药丸的事，两处都给入口只会让人不知道该点哪个。 -->
+<div id="drawerRoot" hidden>
+  <div class="scrim" id="prefScrim"></div>
+  <aside class="drawer" role="dialog" aria-modal="true" aria-label="网站设置">
+    <div class="drawer-head">
+      <h2>网站设置</h2>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="btnClosePrefs">关闭</button>
+    </div>
+    <div class="drawer-body">
+
+      <div class="form-block">
+        <label>外观</label>
+        <div class="seg" id="prefTheme" role="radiogroup" aria-label="主题">
+          <button type="button" data-theme-opt="light">浅色</button>
+          <button type="button" data-theme-opt="dark">深色</button>
+          <button type="button" data-theme-opt="auto">跟随系统</button>
+        </div>
+        <div class="form-note">默认浅色；夜间值班可切深色。选择记在本机，带 <code>?theme=</code> 的链接优先。</div>
+      </div>
+
+      <div class="form-block">
+        <label for="prefStartView">打开时先看哪一屏</label>
+        <select id="prefStartView">
+          <option value="workbench">坐席工作台</option>
+          <option value="care">主动关怀</option>
+          <option value="dashboard">风险看板</option>
+          <option value="channels">渠道接入</option>
+          <option value="kb">话术知识库</option>
+          <option value="eval">效果评测</option>
+        </select>
+        <div class="form-note">下次打开直接落到这一屏；用 <code>?view=</code> 打开时以链接为准。</div>
+      </div>
+
+      <div class="form-block">
+        <label>话术小助手</label>
+        <div class="pref-row">
+          <label class="chk"><input type="checkbox" id="prefSprite"> 在工作台显示</label>
+          <label class="chk"><input type="checkbox" id="prefAutoBubble"> 命中风险时自动弹出建议</label>
+        </div>
+        <div class="inline-row" style="margin-top:8px">
+          <button class="btn ghost" id="btnResetSprite">助手归位</button>
+        </div>
+        <div class="form-note">小助手可拖到任意位置，双击也能归位。</div>
+      </div>
+
+      <div class="form-block">
+        <label>提醒</label>
+        <div class="pref-row">
+          <label class="chk"><input type="checkbox" id="prefSlaTick"> 工单响应时限实时走秒</label>
+          <label class="chk"><input type="checkbox" id="prefRiskToast"> 新风险事件弹提示</label>
+        </div>
+        <div class="form-note">走秒只在看板打开时生效；关掉后时限仍会在重新进入时算准，只是不每秒跳。</div>
+      </div>
+
+      <div class="form-block">
+        <label>数据与隐私</label>
+        <div class="inline-row">
+          <button class="btn ghost" id="btnAuditExport">导出审计日志（脱敏）</button>
+          <button class="btn ghost" id="btnWipeLocal">清空本机数据</button>
+        </div>
+        <div class="form-note">导出前按确定性规则脱敏（手机号 / 邮箱 / 证件号 / 订单号 / 姓名）。「清空本机数据」只清本机偏好、话术缓存与 API Key，不动服务端已保存的账号与话术。</div>
+      </div>
+
+      <div class="form-block">
+        <label>账号</label>
+        <div class="pref-row">
+          <span class="pref-me" id="prefAccount">—</span>
+          <span class="spacer"></span>
+          <button class="btn ghost" id="btnOpenAccount">账号与坐席</button>
+        </div>
+      </div>
+
+      <div class="form-block">
+        <label>关于</label>
+        <div class="form-note" id="prefAbout">—</div>
+        <div class="form-note">回复接地与出站合规的完整口径，见「模型与推理设置」底部。</div>
+      </div>
+
+    </div>
+  </aside>
+</div>
+
+<!-- ==================== 账号与坐席 ====================
+     导航底部的身份卡点开就是这里：我现在什么状态、今天接了多少、换个人值班怎么切。
+     账号与在线状态存服务端，换设备登录同一个工号能接上。 -->
+<div id="accountRoot" hidden>
+  <div class="scrim" id="accountScrim"></div>
+  <aside class="drawer" role="dialog" aria-modal="true" aria-label="账号与坐席">
+    <div class="drawer-head">
+      <h2>账号与坐席</h2>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="btnCloseAccount">关闭</button>
+    </div>
+    <div class="drawer-body">
+
+      <div class="acct-hero" id="acctHero"></div>
+
+      <div class="form-block">
+        <label>我的状态</label>
+        <div class="seg" id="acctPresence" role="radiogroup" aria-label="在线状态">
+          <button type="button" data-presence="online">在线接待</button>
+          <button type="button" data-presence="busy">忙碌</button>
+          <button type="button" data-presence="away">离开</button>
+        </div>
+        <div class="form-note">忙碌时不自动分配新会话，正在接的会话不受影响。</div>
+      </div>
+
+      <div class="form-block">
+        <label>今天的账</label>
+        <div class="acct-stats" id="acctStats"></div>
+      </div>
+
+      <div class="form-block" id="acctSwitchBlock">
+        <label>切换坐席</label>
+        <div class="acct-list" id="acctList"></div>
+        <div class="form-note">点一位坐席即可切过去，正在编辑的内容不会丢。</div>
+      </div>
+
+      <div class="form-block">
+        <label>登录</label>
+        <div class="acct-login">
+          <input id="acctId" type="text" placeholder="工号，如 CS013" autocomplete="username" spellcheck="false">
+          <input id="acctPin" type="password" placeholder="口令" autocomplete="current-password">
+          <button class="btn primary" id="btnLogin">登录</button>
+        </div>
+        <div class="form-note" id="acctNote">—</div>
+      </div>
+
+      <div class="form-block" id="acctOutBlock">
+        <button class="btn ghost" id="btnLogout">退出登录</button>
+      </div>
+
+    </div>
+  </aside>
+</div>
+
 <!-- ==================== 会话复盘 · 交接摘要 ==================== -->
 <div id="recapRoot" hidden>
   <div class="scrim" id="recapScrim"></div>
@@ -508,6 +685,58 @@
     </div>
     <div class="drawer-body" id="recapBody"></div>
   </aside>
+</div>
+
+<!-- ==================== 新增 / 收编话术 ====================
+     两个入口共用同一张表单：手写一条，或把 Agent 建议的回复收进库里。
+     表单不直接落库 —— 分类、依据、把握程度都要经人确认，库里才不会有来路不明的话术。 -->
+<div class="wz-scrim" id="kbEditor" hidden>
+  <div class="wz-card kbe-card" role="dialog" aria-modal="true" aria-labelledby="kbeTitle" tabindex="-1">
+    <div class="wz-head">
+      <span class="wz-mark" id="kbeMark"></span>
+      <div class="wz-ht">
+        <b id="kbeTitle">新增话术</b>
+        <span id="kbeFrom"></span>
+      </div>
+      <button class="wz-x" type="button" data-kbe="close" title="关闭" aria-label="关闭">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/></svg>
+      </button>
+    </div>
+    <div class="kbe-body">
+      <label class="kbe-f">
+        <span>用在哪种情况<em>必填</em></span>
+        <select id="kbeCat"></select>
+      </label>
+      <label class="kbe-f">
+        <span>话术正文<em>必填</em></span>
+        <textarea id="kbeText" rows="4" placeholder="顾客能直接看到的那段话。写具体承诺与时间点，不要写「尽快处理」这类空话。"></textarea>
+      </label>
+      <div class="kbe-grid">
+        <label class="kbe-f">
+          <span>依据哪条规则 / 条款</span>
+          <input id="kbeKb" type="text" placeholder="如：依据《化妆品监督管理条例》第 5.2 条" spellcheck="false">
+        </label>
+        <label class="kbe-f">
+          <span>把握程度</span>
+          <span class="kbe-conf">
+            <input id="kbeConf" type="number" min="0" max="100" step="1" value="90" spellcheck="false">
+            <i>%</i>
+          </span>
+        </label>
+      </div>
+      <label class="kbe-f">
+        <span>什么时候用</span>
+        <input id="kbeWhy" type="text" placeholder="如：已下单且反馈过敏，需要先止血再谈补偿" spellcheck="false">
+      </label>
+      <div class="kbe-err" id="kbeErr" hidden></div>
+    </div>
+    <div class="wz-foot">
+      <button class="btn ghost" type="button" data-kbe="close">取消</button>
+      <span class="spacer"></span>
+      <span class="wz-hint" id="kbeStore">—</span>
+      <button class="btn primary" type="button" data-kbe="save">收进话术库</button>
+    </div>
+  </div>
 </div>
 
 <!-- 会话抽屉遮罩（仅 ≤1040 生效，桌面态被 CSS 强制隐藏） -->

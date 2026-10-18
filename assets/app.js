@@ -75,9 +75,20 @@
     composerMode: 'agent',
     pendingImage: null,            // 待发送的图片附件（含视觉观察）
     careOpen: {},                  // 关怀雷达里展开话术预览的条目（重渲染不丢）
+    careSel: '',                   // 关怀雷达左侧索引里选中的客户
+    careFilter: 'all',             // 关怀等级筛选：all / high / medium / low
     careToday: null,               // 关怀推算的基准日（默认随系统时间，可用 ?today= 固定，便于演示复现）
+    /* 网站设置（本机偏好，与模型配置分开）：外观、起始页、助手与提醒开关 */
+    prefs: {
+      theme: 'light',              // light | dark | auto
+      startView: 'workbench',
+      sprite: true,
+      autoBubble: true,
+      slaTick: true,
+      riskToast: true,
+    },
     /* 数据带默认收起为紧凑条 —— 右栏以对话为主，全景数据按需展开 */
-    bandOpen: (function () { try { return localStorage.getItem('beauty-cs-band') === '1'; } catch (e) { return false; } })(),
+    bandOpen: false,
     live: { connected: false, note: '', lastSeq: 0, es: null, announced: false },
   };
 
@@ -371,8 +382,11 @@
       state.degraded = run.degraded || '';
       recordRisk(idx, result, job.mid);
 
-      /* 顾客全景浮层展开时不自动弹话术气泡，避免两层浮层互相遮挡 */
-      if (result.replies.length && !state.bandOpen) state.bubbleOpen = true;
+      /* 顾客全景弹窗展开时不自动弹话术气泡，避免两层浮层互相遮挡；
+         用户也可以在「网站设置」里彻底关掉「命中风险时自动弹出」 */
+      if (result.replies.length && !state.bandOpen && state.prefs.autoBubble !== false) {
+        state.bubbleOpen = true;
+      }
       settled = true;
       ack();
     } catch (e) {
@@ -392,7 +406,7 @@
         if (settled && state.degraded && window.LLMClient.readConfig().mode !== 'local') {
           toast('大模型不可用，已切换本地兜底引擎：' + state.degraded, 'warn');
         }
-        if (settled && !$('drawerRoot').hidden) renderHarness();
+        if (settled && !$('engineRoot').hidden) renderHarness();
         if (failMsg) toast(failMsg, 'danger');
       } else {
         renderContacts();
@@ -420,6 +434,11 @@
     };
     state.liveRisks.push(ev);
     S.riskLog.push(ev);          // 复盘只看本会话自己的风险，不混入全局
+    /* 弹不弹提示由「网站设置 → 提醒」决定：值班时想安静就关掉。
+       关掉的只是打扰，事件本身照常入册 —— 记录与提醒是两件事 */
+    if (state.prefs.riskToast !== false && result.risk.level === 'high') {
+      toast(c.name + ' 触发高危信号：' + (ev.signals[0] || '需当场接管'), 'danger');
+    }
   }
 
   /* ==================== 联系人列表 ==================== */
@@ -630,7 +649,7 @@
     return d;
   }
 
-  function sparkSVG(scores) {
+  function sparkSVG(scores, mini) {
     var W = 340, H = 46, pad = 7;
     var n = scores.length;
     if (!n) return '';
@@ -646,9 +665,11 @@
     }
     var d = smoothPath(pts, lo, hi);
     var col = TONE_VAR[EP.toneOf(scores[n - 1])];
-    var area = n > 1 ? '<path d="' + d + ' L' + W + ',' + H + ' L0,' + H + ' Z" fill="' + col + '" opacity="0.12"/>' : '';
+    /* mini 版（常驻条里 76×24 那一格）不铺面积：340×46 的填充被压到 1/4 尺寸后
+       读起来是一条实心色带，不是趋势线 */
+    var area = (!mini && n > 1) ? '<path d="' + d + ' L' + W + ',' + H + ' L0,' + H + ' Z" fill="' + col + '" opacity="0.12"/>' : '';
     var dots = '';
-    if (n > 1) {
+    if (n > 1 && !mini) {
       for (i = 0; i < n; i++) {
         dots += '<circle cx="' + pts[i].x.toFixed(1) + '" cy="' + pts[i].y.toFixed(1) +
           '" r="1.7" fill="' + col + '" vector-effect="non-scaling-stroke"/>';
@@ -656,24 +677,32 @@
     }
     return '<svg class="spark-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
       area +
-      '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="1.7" ' +
+      '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="' + (mini ? 2.4 : 1.7) + '" ' +
       'vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>' + dots + '</svg>';
   }
 
-  function cell(k, v) {
-    return '<div class="profile-cell"><div class="pk">' + esc(k) + '</div><div class="pv" title="' +
-      esc(v == null ? '—' : v) + '">' + esc(v == null ? '—' : v) + '</div></div>';
+  /* 画像行（弹窗里用）：一行一对「标签 / 值」。
+     原来 8 个描边格子铺在窄栏里，光边框就吃掉 40px 高度，还把卡撑得比订单卡还高 */
+  function prow(k, v, wide) {
+    var t = v == null || v === '' ? '—' : v;
+    return '<div class="pr-row' + (wide ? ' wide' : '') + '">' +
+      '<span class="pr-k">' + esc(k) + '</span>' +
+      '<span class="pr-v" title="' + esc(t) + '">' + esc(t) + '</span></div>';
   }
 
-  function orderBlock(c) {
+  function orderBlock(c, bare) {
     if (!c.crm || !c.crm.orders.length) {
-      return '<div class="order-block"><div class="ob-head">关联订单<span class="ob-note">订单中心 OMS</span></div>' +
+      return '<div class="order-block' + (bare ? ' bare' : '') + '">' +
+        (bare ? '' : '<div class="ob-head">关联订单<span class="ob-note">订单中心 OMS</span></div>') +
         '<div class="ob-empty">该客户暂无订单记录 —— AI 不会引用商品、金额与物流结论</div></div>';
     }
     var o = CRM.primaryOrder(c.def.id);
     var d = CRM.byOrderNo(o.orderNo) || o;
-    var html = '<div class="order-block"><div class="ob-head">关联订单' +
-      '<span class="ob-note">订单中心 OMS · 共 ' + c.crm.orders.length + ' 单</span></div>';
+    var html = '<div class="order-block' + (bare ? ' bare' : '') + '">';
+    if (!bare) {
+      html += '<div class="ob-head">关联订单' +
+        '<span class="ob-note">订单中心 OMS · 共 ' + c.crm.orders.length + ' 单</span></div>';
+    }
     html += '<div class="ob-main">' +
       '<span class="ob-no num">' + esc(o.orderNo) + '</span>' +
       '<span class="ob-prod" title="' + esc(o.product) + '">' + esc(o.product) + '</span>' +
@@ -728,15 +757,25 @@
     renderBandDetail();
   }
 
-  function setBandOpen(v) {
+  function setBandOpen(v, opts) {
+    var was = state.bandOpen;
     state.bandOpen = !!v;
-    try { localStorage.setItem('beauty-cs-band', state.bandOpen ? '1' : '0'); } catch (e) { /* ignore */ }
+    /* 不写本地偏好：它是「按需看一眼」的弹窗，刷新后自己弹出来会挡住正在接的会话
+       （深链 ?band=1 仍然可以把它打开，供演示与截图使用） */
     /* 浮层是覆盖层：展开时收起话术气泡，避免两个浮层叠成半遮状态 */
     if (state.bandOpen && state.bubbleOpen) {
       state.bubbleOpen = false;
       safe('sprite', renderSprite);
     }
+    $('bandScrim').hidden = !state.bandOpen;
     renderBand();
+    if (state.bandOpen && !was) {
+      trapOverlay($('bandDetail'));
+    } else if (!state.bandOpen && was) {
+      /* 触发按钮是常驻节点，焦点可以正常归还；切视图时按钮会随工作台一起隐藏，
+         那种情况不还焦点（keepFocus），否则焦点会落进 display:none 里 */
+      releaseOverlay($('bandDetail'), opts && opts.keepFocus);
+    }
   }
 
   /* --- 紧凑条：一行看全四个关键读数，不再挤占对话高度 --- */
@@ -747,16 +786,15 @@
     var def = c.def;
     var h = '';
 
-    /* 情绪 */
+    /* 情绪：曲线 + 分数 + 情绪标签。趋势与指数在浮层里，条上不重复 */
     h += '<div class="bs-cell bs-em"><span class="bs-k">情绪走势</span><span class="bs-row">';
     if (!a) {
       h += '<span class="bs-spark is-empty"></span><b class="bs-v">—</b><span class="bs-sub">待采样</span>';
     } else {
       var last = a.emotion.score;
-      h += '<span class="bs-spark">' + sparkSVG(S.series) + '</span>' +
+      h += '<span class="bs-spark">' + sparkSVG(S.series, true) + '</span>' +
         '<b class="bs-v" style="color:' + TONE_VAR[EP.toneOf(last)] + '">' + last + '</b>' +
-        '<span class="chip ' + EP.toneOf(last) + '">' + esc(a.emotion.label) + '</span>' +
-        '<span class="bs-sub">本句' + esc(trendTxt(a.emotion.trend)) + ' · 指数 ' + a.emotion.index + '</span>';
+        '<span class="chip ' + EP.toneOf(last) + '">' + esc(a.emotion.label) + '</span>';
     }
     h += '</span></div><span class="bs-sep"></span>';
 
@@ -769,12 +807,14 @@
       var allIt = a.intents.map(function (x) { return x.name + ' ' + Math.round(x.confidence * 100) + '%'; }).join(' · ');
       h += '<b class="bs-v" title="' + esc(allIt) + '">' + esc(it0.name) + '</b>' +
         '<span class="bs-sub num">' + Math.round(it0.confidence * 100) + '%' +
-        (a.intents.length > 1 ? ' · 另有 ' + (a.intents.length - 1) + ' 项' : '') + '</span>';
+        (a.intents.length > 1 ? ' · 共 ' + a.intents.length + ' 项' : '') + '</span>';
     }
     h += '</span></div><span class="bs-sep"></span>';
 
-    /* 风险 */
-    h += '<div class="bs-cell bs-risk"><span class="bs-k">风险评估</span><span class="bs-row">';
+    /* 风险：等级徽标 + 风险分；SLA 写在标签行里（它属于「多久之内必须处理」，
+       不是「现在是几级」，混在一行会读成两个数字在比大小） */
+    h += '<div class="bs-cell bs-risk"><span class="bs-k">风险评估' +
+      (a ? ' · SLA ' + esc(RP.slaOf(a.risk.level)) : '') + '</span><span class="bs-row">';
     if (!a) {
       h += '<span class="risk-badge low">待判定</span><span class="bs-sub">标准 v' + RP.VERSION + '</span>';
     } else {
@@ -782,14 +822,14 @@
       h += '<span class="risk-badge ' + r0.level + '">' + esc(RP.labelOf(r0.level)) + '</span>' +
         (a.vision ? '<span class="bs-vision lv-' + a.vision.level + '" title="' +
           esc(a.vision.summary) + '">影像 ' + esc(a.vision.label) + '</span>' : '') +
-        '<span class="bs-sub num">风险分 ' + r0.score + ' · SLA ' + esc(RP.slaOf(r0.level)) + '</span>' +
-        (r0.signals.length ? '<span class="bs-sub" title="' + esc(r0.signals.join('、')) + '">· ' +
+        '<span class="bs-sub num">风险分 ' + r0.score + '</span>' +
+        (r0.signals.length ? '<span class="bs-sub bs-sig" title="' + esc(r0.signals.join('、')) + '">· ' +
           esc(r0.signals[0]) + (r0.signals.length > 1 ? ' 等 ' + r0.signals.length + ' 项' : '') + '</span>' : '');
     }
     h += '</span></div><span class="bs-sep"></span>';
 
     /* 关联订单：商品名是坐席最需要的信息，优先给它空间；完整订单号在浮层里 */
-    h += '<div class="bs-cell bs-order"><span class="bs-k">关联订单 · 订单中心 OMS</span><span class="bs-row">';
+    h += '<div class="bs-cell bs-order"><span class="bs-k">关联订单 · OMS</span><span class="bs-row">';
     var o = c.crm && c.crm.orders.length ? CRM.primaryOrder(def.id) : null;
     if (!o) {
       h += '<b class="bs-v">—</b><span class="bs-sub">该客户暂无订单记录</span>';
@@ -798,25 +838,29 @@
       var oTip = o.orderNo + ' · ' + o.product + ' · ¥' + o.amount + ' · ' + o.status + ' · ' + o.paidAt +
         (od.batch ? ' · 批次 ' + od.batch : '') + (od.returnable ? ' · 在退换期内' : '') +
         (od.trace && od.trace.length ? ' · 物流：' + od.trace[od.trace.length - 1].text : '');
-      h += '<span class="bs-veri" title="已凭订单号联查商品 / 批次 / 成分 / 物流 / 退换期">已核单</span>' +
+      h += '<span class="bs-veri" title="已凭订单号联查商品 / 批次 / 成分 / 物流 / 退换期">' + ICON.check + '</span>' +
         '<span class="bs-sub bs-prod" title="' + esc(oTip) + '">' + esc(o.product) + '</span>' +
         '<span class="bs-sub num bs-amt">¥' + esc(o.amount) + '</span>' +
         '<span class="ob-status ' + (/待|异常|超时/.test(o.status) ? 'warn' : 'ok') + '">' + esc(o.status) + '</span>' +
-        '<a class="ob-link" href="' + esc(o.productUrl) + '" target="_blank" rel="noopener noreferrer" title="' +
-        esc(CRM.LINK_NOTE) + '">查看商品</a>';
+        '<a class="ob-link ob-link-i" href="' + esc(o.productUrl) + '" target="_blank" rel="noopener noreferrer" ' +
+        'title="' + esc(CRM.LINK_NOTE) + '" aria-label="查看商品详情">' +
+        '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 16L16 8M9.4 8H16v6.6"/></svg></a>';
     }
     h += '</span></div>';
 
-    /* 展开 / 收起 */
-    h += '<button class="bs-toggle" type="button" data-band="toggle" aria-expanded="' +
-      (state.bandOpen ? 'true' : 'false') + '" aria-controls="bandDetail" title="展开 / 收起顾客全景数据">' +
-      '<span class="bs-toggle-tx">' + (state.bandOpen ? '收起' : '全部数据') + '</span>' +
-      '<span class="bs-chev">' + ICON.chev + '</span></button>';
-
+    /* 展开 / 收起：按钮是常驻节点，只更新它的状态，不参与这段重绘 */
     $('bandStrip').innerHTML = h;
+    var tgl = $('bandToggle');
+    if (tgl) {
+      tgl.setAttribute('aria-expanded', state.bandOpen ? 'true' : 'false');
+      tgl.title = state.bandOpen ? '收起顾客全景数据' : '展开 / 收起顾客全景数据';
+      var tx = tgl.querySelector('.bs-toggle-tx');
+      if (tx) tx.textContent = state.bandOpen ? '收起' : '全部数据';
+    }
   }
 
-  /* --- 全景浮层：四张明细卡，浮在对话区之上，不改变对话区高度 --- */
+  /* --- 全景弹窗：判断 → 档案 → 订单，一屏读完，不再靠滚动找被截断的半张卡 --- */
   function renderBandDetail() {
     var S = cur();
     var a = S.analyzed;
@@ -824,13 +868,19 @@
     var def = c.def;
     var cu = def.customer;
 
+    var who = [def.name.split(' · ')[0], cu.member, cu.skin].filter(Boolean).join(' · ');
     var html = '<div class="bd-head">' +
-      '<b>顾客全景数据</b>' +
-      '<span class="hint">多源融合：会员中心 · 订单中心 OMS · 肤质档案 · 工单系统</span>' +
+      '<div class="bd-title"><b>顾客全景数据</b><span class="bd-who">' + esc(who) + '</span></div>' +
       '<span class="spacer"></span>' +
-      '<span class="hint">风险标准 v' + RP.VERSION + '</span>' +
-      '<button class="btn ghost small" type="button" data-band="close">收起</button>' +
-      '</div><div class="band-grid">';
+      '<span class="bd-src">会员中心 · 订单中心 OMS · 肤质档案 · 工单系统</span>' +
+      '<button class="bd-close" type="button" data-band="close" aria-label="关闭顾客全景数据">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>' +
+      '</button>' +
+      /* 两列「案卷」：左列是此刻的判断（情绪 → 意图 → 风险，竖着读一条因果），
+         右列是事实（画像 → 订单）。两列各自按内容高度堆叠，卡片不会被拉高，
+         所以不会出现「一张短卡里散着 60px 行距」那种空洞 */
+      '</div><div class="bd-body"><div class="bd-cols"><div class="bd-col">';
 
     /* --- 情绪走势（逐句采样） --- */
     html += '<section class="card card-emotion"><div class="card-head">情绪走势<span class="spacer"></span>' +
@@ -866,21 +916,16 @@
           '</div>';
       }
       html += '</div>';
+      /* 把「判的是哪句话」摊开：只给一个意图名，坐席没法核对结论对不对 */
+      var quote = '';
+      for (var qi = S.chat.length - 1; qi >= 0; qi--) {
+        if (S.chat[qi].role !== 'agent' && S.chat[qi].text && S.chat[qi].text !== '[发送了皮肤照片]') {
+          quote = S.chat[qi].text; break;
+        }
+      }
+      if (quote) html += '<div class="intent-quote" title="' + esc(quote) + '">判据 · 当前这句：「' + esc(quote) + '」</div>';
     }
     html += '</section>';
-
-    /* --- 多源画像 + 关联订单 --- */
-    html += '<section class="card card-profile"><div class="card-head">多源用户画像<span class="spacer"></span>' +
-      '<span class="tone">会员/订单/肤质/工单</span></div>' +
-      '<div class="profile-grid">' +
-      cell('客户编号', c.crm ? c.crm.crmId : '外部接入') +
-      cell('会员等级', cu.member) + cell('肤质档案', cu.skin) +
-      cell('近90天订单', cu.orders90d + ' 单') + cell('历史工单', cu.tickets + ' 件') +
-      cell('来源渠道', cu.channel) +
-      '</div>' +
-      '<div class="profile-grid">' + cell('行为标签', (cu.tags || []).join(' / ')) +
-      cell('数据来源', (c.crm && c.crm.sources ? c.crm.sources.join(' / ') : '外部系统接入')) + '</div>' +
-      orderBlock(c) + '</section>';
 
     /* --- 风险评估 --- */
     html += '<section class="card card-risk"><div class="card-head">风险评估<span class="spacer"></span>' +
@@ -903,34 +948,59 @@
     }
     html += '</section>';
 
-    html += '</div>';
+    /* --- 右列：这个人是谁、买了什么 --- */
+    html += '</div><div class="bd-col">';
 
-    /* --- 主动关怀雷达：把「出事之后接住」前移成「出事之前先开口」 --- */
-    html += careBlockHTML(c);
+    /* --- 多源画像 --- */
+    html += '<section class="card card-profile"><div class="card-head">多源用户画像<span class="spacer"></span>' +
+      '<span class="tone">会员/订单/肤质/工单</span></div>' +
+      '<div class="profile-list">' +
+      prow('客户编号', c.crm ? c.crm.crmId : '外部接入') +
+      prow('会员等级', cu.member) + prow('肤质档案', cu.skin) +
+      prow('近90天订单', cu.orders90d + ' 单') + prow('历史工单', cu.tickets + ' 件') +
+      prow('来源渠道', cu.channel) +
+      prow('行为标签', (cu.tags || []).join(' / '), true) +
+      prow('数据来源', (c.crm && c.crm.sources ? c.crm.sources.join(' / ') : '外部系统接入'), true) +
+      '</div></section>';
+
+    /* --- 关联订单（单独成卡：它是最长的一块，塞进画像卡会把整行拉到 400px） --- */
+    html += '<section class="card card-order"><div class="card-head">关联订单<span class="spacer"></span>' +
+      '<span class="tone">订单中心 OMS' +
+      (c.crm && c.crm.orders.length ? ' · 共 ' + c.crm.orders.length + ' 单' : '') + '</span></div>' +
+      orderBlock(c, true) + '</section>';
+
+    html += '</div></div>' + careHintHTML(c) + '</div>';
 
     $('bandDetail').innerHTML = html;
   }
 
-  /** 顾客全景里的关怀卡：只放最紧急的前几条，全量在「关怀」视图 */
-  function careBlockHTML(c) {
+  /** 弹窗底部的关怀索引：这里只回答「有没有事要做」，明细在「关怀」视图 */
+  function careHintHTML(c) {
     if (!CARE) return '';
     var cv = careOf(c.idx);
     if (!cv) return '';
-    var head = '<section class="card card-care"><div class="card-head">主动关怀雷达' +
-      (cv.items.length ? '（' + cv.items.length + ' 条）' : '') +
-      '<span class="spacer"></span><span class="tone">复购周期 · 权益挽留 · 成分冲突</span></div>';
+    var h = '<div class="bd-care"><span class="bd-care-k">主动关怀</span>';
     if (!cv.items.length) {
-      return head + '<div class="empty" style="padding:10px 4px;width:100%">' +
-        '该客户暂无到期的关怀项（复购未到提醒线 · 权益无缺口 · 成分无冲突）</div></section>';
+      h += '<span class="bd-care-none">暂无到期项（复购未到提醒线 · 权益无缺口 · 成分无冲突）</span>';
+    } else {
+      h += '<span class="bd-care-n">' + cv.items.length + ' 条待触达</span>';
+      h += cv.items.slice(0, 2).map(function (it) {
+        var due = '';
+        if (it.dueIn != null) {
+          due = it.dueIn < 0 ? '已超期 ' + (-it.dueIn) + ' 天'
+            : it.dueIn === 0 ? '今天到期' : '还剩 ' + it.dueIn + ' 天';
+        }
+        return '<span class="bd-care-it ' + esc(it.level) + '"><i></i>' + esc(it.title) +
+          (due ? '<em>' + esc(due) + '</em>' : '') + '</span>';
+      }).join('');
+      if (cv.items.length > 2) h += '<span class="bd-care-more">另 ' + (cv.items.length - 2) + ' 条</span>';
     }
-    return head +
-      cv.items.slice(0, 4).map(function (it) { return careItemHTML(it, c.idx, true); }).join('') +
-      (cv.items.length > 4
-        ? '<div class="cc-more">另有 ' + (cv.items.length - 4) + ' 条，见左侧「关怀」雷达全览</div>'
-        : '') +
-      '</section>';
+    h += '<span class="spacer"></span>' +
+      '<button class="btn ghost small" type="button" data-band="care">打开关怀雷达</button>';
+    return h + '</div>';
   }
 
+  /** 顾客全景里的关怀卡：只放最紧急的前几条，全量在「关怀」视图 */
   function trendTxt(t) { return t === 'down' ? '走低' : t === 'up' ? '回升' : '持平'; }
 
   /* ==================== 会话流 ==================== */
@@ -1402,6 +1472,8 @@
             (blocked ? '禁止发送' : used ? '已采用' : '采用') + '</button>' +
           (g.level === 'block' || g.level === 'rewrite'
             ? '<button class="mini fix" data-fix="' + i + '">一键净化</button>' : '') +
+          /* 好用的建议不该只在「这一轮」里存在一次 —— 收进话术库，下次直接可查 */
+          '<button class="mini" data-kb-save="' + i + '" title="把这条建议收进话术库，之后随时可复用">存入库</button>' +
           '<button class="mini" data-why="' + i + '">推荐依据</button>' +
         '</div></div>';
     }
@@ -1420,12 +1492,15 @@
       '<div class="sub">' + esc(sub) + '</div></div>';
   }
 
-  function distRow(name, val, max, color) {
-    var w = Math.round((val / max) * 100);
-    return '<div class="dist-row">' +
-      '<span class="dist-name">' + esc(name) + '</span>' +
-      '<span class="dist-track"><i style="width:' + w + '%;background:' + color + '"></i></span>' +
-      '<span class="dist-num">' + val + '</span></div>';
+  /* 分布行：只给「名称 + 数量」。
+     横条长度只能表达相对大小，而这一列要回答的是「几起」——
+     绝对数量本身就是答案，横条只是把整列宽度吃掉、把页面顶长。
+     tone 只点出等级语义（高危红 / 关注黄 / 安全绿），落在文字上，不再上色块。 */
+  function srow(name, val, tone) {
+    var zero = Number(val) === 0;
+    return '<div class="srow' + (tone ? ' is-' + tone : '') + (zero ? ' is-zero' : '') + '">' +
+      '<span class="srow-name" title="' + esc(name) + '">' + esc(name) + '</span>' +
+      '<span class="srow-n">' + val + '</span></div>';
   }
 
   /* ---------- 闭环：状态徽标 / 时限 / 处置详情 ---------- */
@@ -1559,7 +1634,7 @@
    * 正在输入的处置结论失去焦点。走秒只碰那几个 span。
    */
   function tickSla() {
-    if (!CF || state.view !== 'dashboard') return;
+    if (!CF || state.view !== 'dashboard' || state.prefs.slaTick === false) return;
     var wrap = $('riskTableWrap');
     if (!wrap) return;
     var nodes = wrap.querySelectorAll('[data-sla]');
@@ -1615,64 +1690,236 @@
 
     $('riskTableWrap').innerHTML = renderRiskTable(all);
 
-    var maxLv = Math.max(high, mid, low, 1);
+    /* 风险等级分布：三档的真实数量。等级文字本身带语义色，不需要再用横条强调 */
     $('riskDistLevel').innerHTML =
-      distRow(RP.labelOf('high'), high, maxLv, TONE_VAR.danger) +
-      distRow(RP.labelOf('medium'), mid, maxLv, TONE_VAR.warn) +
-      distRow(RP.labelOf('low'), low, maxLv, TONE_VAR.ok);
+      srow(RP.labelOf('high'), high, 'danger') +
+      srow(RP.labelOf('medium'), mid, 'warn') +
+      srow(RP.labelOf('low'), low, 'ok');
 
     var keys = Object.keys(sigCount).sort(function (a, b) { return sigCount[b] - sigCount[a]; }).slice(0, 6);
     if (!keys.length) {
       $('riskDistSignal').innerHTML = '<div class="empty">暂无信号数据</div>';
     } else {
-      var maxS = sigCount[keys[0]];
       var sh = '';
-      for (var m = 0; m < keys.length; m++) sh += distRow(keys[m], sigCount[keys[m]], maxS, TONE_VAR.accent);
+      for (var m = 0; m < keys.length; m++) sh += srow(keys[m], sigCount[keys[m]]);
       $('riskDistSignal').innerHTML = sh;
     }
 
-    /* 闭环状态分布：每个状态的真实数量，配闭环率 / 首响达标率 —— 赛题「闭环状态跟踪」的度量面 */
+    /* 闭环状态：每个状态的真实数量。闭环率 / 超时数移到卡头当读数 ——
+       首响达标率与平均首响在上方指标条里已经有了，这里不再重复一遍 */
     if (cs) {
-      var maxC = Math.max(cs.pending, cs.states.resolved, cs.states.archived, cs.states.open, cs.states.escalated, 1);
       var ch = '';
       CF.STATES.forEach(function (st) {
-        ch += distRow(st.label, cs.states[st.key] || 0, maxC, TONE_VAR[st.tone] || TONE_VAR.muted);
+        ch += srow(st.label, cs.states[st.key] || 0, st.tone);
       });
-      ch += '<div class="cd-sum">闭环率 <b class="num">' + (cs.closureRate == null ? '—' : cs.closureRate + '%') +
-        '</b> · 首响达标率 <b class="num">' + (cs.respondRate == null ? '—' : cs.respondRate + '%') +
-        '</b> · 平均首响 <b class="num">' + (cs.avgRespondMs == null ? '—' : esc(CF.fmtDur(cs.avgRespondMs))) + '</b>' +
-        (cs.overdue ? ' · <span class="cd-over">超时未响应 ' + cs.overdue + ' 起</span>' : '') + '</div>';
       $('caseDist').innerHTML = ch;
+      var clo = $('caseClosure');
+      if (clo) {
+        clo.textContent = '闭环 ' + (cs.closureRate == null ? '—' : cs.closureRate + '%');
+        clo.title = '闭环率 ' + (cs.closureRate == null ? '—' : cs.closureRate + '%') +
+          ' · 首响达标率 ' + (cs.respondRate == null ? '—' : cs.respondRate + '%') +
+          ' · 超时未响应 ' + cs.overdue + ' 起';
+      }
     }
 
-    /* 风险分级标准：直接由 RiskPolicy 渲染，界面与判定口径永远一致 */
+    /* 分级标准：直接由 RiskPolicy 渲染，界面与判定口径永远一致。
+       四分之一列放不下二十多字的处置动作 —— 动作原文进 title，
+       屏幕上只留「等级 / 分数区间 / 时限」三件事 */
     var std = '';
     RP.LEVELS.forEach(function (lv) {
       var range = lv.key === 'high' ? '≥ ' + RP.THRESHOLDS.high
         : lv.key === 'medium' ? RP.THRESHOLDS.medium + ' – ' + (RP.THRESHOLDS.high - 1)
           : '< ' + RP.THRESHOLDS.medium;
-      std += '<div class="std-row">' +
+      std += '<div class="std-row" title="' + esc(lv.desc + '。处置：' + lv.action) + '">' +
         '<span class="lvl ' + lv.key + '">' + esc(lv.label) + '</span>' +
-        '<span class="std-range num">' + esc(range) + '</span>' +
+        '<span class="std-range num">' + esc(range) + ' 分</span>' +
         '<span class="std-sla">SLA ' + esc(lv.sla) + '</span>' +
-        '<span class="std-desc">' + esc(lv.action) + '</span>' +
         '</div>';
     });
     $('riskStandard').innerHTML = std;
-    $('riskStdVer').textContent = '标准 v' + RP.VERSION + ' · 阈值/动作与 AI 判定同源';
+    if ($('riskStdVer')) {
+      $('riskStdVer').textContent = 'v' + RP.VERSION;
+      $('riskStdVer').title = '阈值与处置动作由 policy.js 统一给出，与 AI 判定同源';
+    }
   }
 
   /* ==================== 话术知识库 ==================== */
 
-  function kbEntries() {
+  /* 自建话术：存服务端（server/data/db.json），断网 / 双击打开时退化为本机缓存。
+     引擎自带的话术是只读基线，人工新增或收编的条目单独标记 ——
+     「这句话谁写的」在合规场景里必须一眼可辨。 */
+  var kbCustom = [];
+  var kbSource = 'local';          // 'server' | 'local'
+  var kbOpener = null;             // 打开入库表单的那个按钮，关闭时还焦点用
+
+  function kbBuiltins() {
     var map = (window.LocalEngine && window.LocalEngine.REPLY_MAP) || {};
     var out = [];
     Object.keys(map).forEach(function (cat) {
       (map[cat] || []).forEach(function (r) {
-        out.push({ cat: cat, text: r.text, rationale: r.rationale, kb: r.kb, confidence: r.confidence });
+        out.push({
+          id: '', cat: cat, text: r.text, rationale: r.rationale,
+          kb: r.kb, confidence: r.confidence, custom: false,
+        });
       });
     });
     return out;
+  }
+
+  function kbEntries() { return kbCustom.concat(kbBuiltins()); }
+
+  /** 分类候选：与本地引擎的话术表同源，不另维护一份清单 */
+  function kbCats() {
+    var map = (window.LocalEngine && window.LocalEngine.REPLY_MAP) || {};
+    var keys = Object.keys(map);
+    if (!keys.length) return [{ key: 'default', label: '通用兜底' }];
+    return keys.map(function (k) { return { key: k, label: k === 'default' ? '通用兜底' : k }; });
+  }
+
+  function kbCacheWrite() {
+    /* 隐私模式下 localStorage 会抛错 —— 写不进去不影响本次会话，只是刷新后回到服务端那份 */
+    try { localStorage.setItem('beauty-cs-kb', JSON.stringify(kbCustom)); } catch (e) { /* ignore */ }
+  }
+
+  function kbCacheRead() {
+    try {
+      var raw = localStorage.getItem('beauty-cs-kb');
+      var arr = raw ? JSON.parse(raw) : [];
+      kbCustom = Array.isArray(arr) ? arr : [];
+    } catch (e) { kbCustom = []; }
+  }
+
+  /** 载入自建话术：优先进服务端，失败就用本机缓存（界面会如实标出来源） */
+  function kbLoad() {
+    return fetch('/api/kb', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (j) {
+        kbCustom = (j && j.items) || [];
+        kbSource = 'server';
+        kbCacheWrite();
+        return kbCustom;
+      })
+      .catch(function () {
+        kbSource = 'local';
+        kbCacheRead();
+        return kbCustom;
+      });
+  }
+
+  function kbNewId() {
+    return 'kb-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  }
+
+  function kbErr(msg) {
+    var el = $('kbeErr');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.hidden = !msg;
+  }
+
+  /**
+   * 打开入库表单。
+   * 手写时全空；来自 Agent 建议时预填正文与依据 —— 但分类和把握程度仍要人确认：
+   * 建议是「这一轮」的产物，进库是「以后都用」，这两件事不能自动等号。
+   */
+  function openKbEditor(pre) {
+    pre = pre || {};
+    var sel = $('kbeCat');
+    var cats = kbCats();
+    sel.innerHTML = cats.map(function (c) {
+      return '<option value="' + esc(c.key) + '">' + esc(c.label) + '</option>';
+    }).join('');
+    var hit = false;
+    for (var i = 0; i < cats.length; i++) if (cats[i].key === pre.cat) hit = true;
+    sel.value = hit ? pre.cat : cats[0].key;
+
+    $('kbeTitle').textContent = pre.from ? '把这条建议收进话术库' : '新增话术';
+    $('kbeFrom').textContent = pre.from || '';
+    $('kbeMark').textContent = '语';
+    $('kbeText').value = pre.text || '';
+    $('kbeKb').value = pre.kb || '';
+    $('kbeWhy').value = pre.rationale || '';
+    $('kbeConf').value = pre.confidence == null ? 90 : Math.round(pre.confidence * 100);
+    $('kbeStore').textContent = kbSource === 'server' ? '保存到服务端 · 换设备可见' : '服务端不可用 · 先存本机';
+    kbErr('');
+    /* 记下「谁打开的」，关闭时优先还给它 —— 不能只依赖 releaseOverlay 记录的
+       document.activeElement：脚本或快捷键打开时它还是 body，还回去等于丢焦点。 */
+    kbOpener = (document.activeElement && document.activeElement !== document.body)
+      ? document.activeElement : $('btnKbNew');
+    $('kbEditor').hidden = false;
+    trapOverlay($('kbEditor'));
+    window.setTimeout(function () { try { $('kbeText').focus(); } catch (e) { /* ignore */ } }, 30);
+  }
+
+  function closeKbEditor() {
+    var root = $('kbEditor');
+    if (!root || root.hidden) return;
+    var back = kbOpener;
+    kbOpener = null;
+    releaseOverlay(root);
+    root.hidden = true;
+    /* 触发按钮可能已经被重绘换掉（工作台的「存入库」按钮就在卡片里），
+       也可能整个视图被切走 —— 这两种情况退回常驻的「新增话术」按钮；
+       连它都不可见（不在知识库页）就别抢焦点了。 */
+    var alive = function (el) { return el && el.isConnected && el.offsetParent !== null; };
+    if (!alive(back)) back = $('btnKbNew');
+    if (alive(back)) { try { back.focus(); } catch (e) { /* ignore */ } }
+  }
+
+  function saveKb() {
+    var text = String($('kbeText').value || '').trim();
+    if (!text) { kbErr('话术正文不能为空 —— 顾客看到的就是这段字'); $('kbeText').focus(); return; }
+    if (text.length > 800) { kbErr('正文超过 800 字，请拆成两条再存'); return; }
+    var item = {
+      id: kbNewId(),
+      cat: $('kbeCat').value || 'default',
+      text: text,
+      kb: String($('kbeKb').value || '').trim() || '人工录入 · 未标注条款',
+      rationale: String($('kbeWhy').value || '').trim() || '人工录入 · 未标注适用场景',
+      confidence: clamp(Number($('kbeConf').value) || 0, 0, 100) / 100,
+      origin: $('kbeFrom').textContent || '手工录入',
+      custom: true,
+      at: new Date().toISOString(),
+    };
+    /* 先落本机再打服务端：网络断了也不能让刚写完的话丢掉 */
+    kbCustom.unshift(item);
+    kbCacheWrite();
+    renderKb();
+    closeKbEditor();
+    toast('已收进话术库：' + item.cat, 'ok');
+
+    fetch('/api/kb', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(item),
+    }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      if (j && j.item && j.item.id) {
+        item.id = j.item.id;
+        kbSource = 'server';
+        kbCacheWrite();
+        renderKb();
+      }
+    }).catch(function () {
+      kbSource = 'local';
+      renderKb();
+      toast('服务端暂时不可用，这条先存在本机', 'warn');
+    });
+  }
+
+  function delKb(id) {
+    var keep = [];
+    var gone = null;
+    kbCustom.forEach(function (e) { if (e.id === id) gone = e; else keep.push(e); });
+    if (!gone) return;
+    kbCustom = keep;
+    kbCacheWrite();
+    renderKb();
+    toast('已从话术库删除', 'ok');
+    fetch('/api/kb/' + encodeURIComponent(id), { method: 'DELETE' })
+      .catch(function () { toast('服务端未同步删除，下次联网可能重新出现', 'warn'); });
   }
 
   function renderKb() {
@@ -1691,12 +1938,15 @@
       byCat[e.cat].push(e);
     });
 
-    $('kbMeta').textContent = q
+    var customN = all.filter(function (e) { return e.custom; }).length;
+    $('kbMeta').textContent = (q
       ? '命中 ' + list.length + ' / ' + all.length + ' 条'
-      : '共 ' + all.length + ' 条 · ' + cats.length + ' 类意图';
+      : '共 ' + all.length + ' 条 · ' + cats.length + ' 类意图') +
+      (customN ? ' · 自建 ' + customN : '') +
+      (kbSource === 'local' ? ' · 存在本机' : '');
 
     if (!list.length) {
-      $('kbList').innerHTML = '<div class="empty">没有匹配的话术<br>试试「过敏」「退款」「会员」等关键词</div>';
+      $('kbList').innerHTML = '<div class="empty">没有匹配的话术<br>试试「过敏」「退款」「会员」等关键词，或点右上角「新增话术」手写一条</div>';
       return;
     }
 
@@ -1705,15 +1955,19 @@
       html += '<div class="kb-group"><div class="kb-group-head">' + esc(cat === 'default' ? '通用兜底' : cat) +
         '<span class="n">' + byCat[cat].length + ' 条</span></div>';
       byCat[cat].forEach(function (e) {
-        html += '<div class="kb-row">' +
+        html += '<div class="kb-row' + (e.custom ? ' is-custom' : '') + '">' +
           '<div class="kb-text">' + esc(e.text) + '</div>' +
           '<div class="kb-meta">' +
+            (e.custom ? '<span class="kb-tag">自建</span>' : '') +
             '<span>知识库：' + esc(e.kb) + '</span>' +
             '<span>·</span><span>' + esc(e.rationale) + '</span>' +
             '<span class="spacer"></span>' +
             '<span class="kb-conf">置信度 ' + Math.round((e.confidence || 0) * 100) + '%</span>' +
             '<button class="mini use" data-kb="' + esc(e.text) + '">填入输入框</button>' +
-          '</div></div>';
+            (e.custom
+              ? '<button class="kb-del" type="button" data-kb-del="' + esc(e.id) + '" title="从库里删掉这条">删除</button>'
+              : '') +
+            '</div></div>';
       });
       html += '</div>';
     });
@@ -1744,45 +1998,46 @@
   function paintEval(rep) {
     var RPv = RP.VERSION;
     var levels = RP.LEVELS;
+    var cf = rep.confusion || {};
+    var trial = rep.count;
+    var pass = rep.misses.length === 0;
     var h = '';
 
-    h += '<div class="ev-metrics">' +
-      evalMetric('意图 Top1 准确率', rep.rates.intent + '%',
-        rep.counts.intent[0] + ' / ' + rep.counts.intent[1] + ' 条命中', '') +
-      evalMetric('风险分级一致率', rep.rates.risk + '%',
-        rep.counts.risk[0] + ' / ' + rep.counts.risk[1] + ' · 回归基线', '') +
-      evalMetric('高危召回率', rep.highRecall + '%',
-        rep.highTp + ' / ' + rep.highExp + ' 起应判高危未漏', rep.highRecall >= 100 ? 'ok' : 'warn') +
-      evalMetric('情绪分级准确率', rep.rates.emotion + '%',
-        rep.counts.emotion[0] + ' / ' + rep.counts.emotion[1] + ' 条命中', '') +
+    /* 先给结论：这一页到底在说什么，一句话讲完。
+       原来的版本上来就是「Top1 准确率 / 混淆矩阵 / 回归基线」，
+       看得懂的人不用解释，看不懂的人也不知道该看哪一行。 */
+    h += '<div class="ev-hero">' +
+      '<div class="ev-verdict' + (pass ? '' : ' warn') + '">' +
+        '<b>' + (pass ? '全部通过' : rep.misses.length + ' 条判错，需要复核') + '</b>' +
+        '<span>' + (pass
+          ? trial + ' 条对话的判断与人工标注完全一致，可以按这份口径对外解释'
+          : '还没到 100%，下方「判错的几条」已逐条列出期望与实判') + '</span>' +
+      '</div>' +
+      '<p class="ev-lead">这一页拿 <b>' + trial + ' 条有标准答案的模拟对话</b>，逐句检查引擎有没有判对三件事：' +
+        '<b>顾客想干什么</b>（意图）、<b>这事有多急</b>（风险等级）、<b>情绪有多差</b>（情绪档）。' +
+        '被测的是<b>本地规则引擎</b>，同一份用例也能用 <code>npm run eval</code> 跑，两边数字必然一致 —— ' +
+        '所以它既是质量指标，也是回归基线：<b>改完规则回来看，数字没掉就说明没退化</b>。</p>' +
       '</div>';
 
-    h += '<div class="ev-note">评测对象为<b>本地规则引擎</b>（确定性、零依赖、离线可跑），' +
-      '因此它既是质量指标，也是回归基线。用例共 <b>' + rep.count + '</b> 条，逐句标注「情绪档 / 风险等级 / Top1 意图」，' +
-      '风险标准 v' + esc(RPv) + '。命令行执行 <code>npm run eval</code> 得到同一份结果。</div>';
+    /* 四项指标：每个数字下面直接写「几条里对了几条」，不再让人自己换算 */
+    h += '<div class="ev-metrics">' +
+      evalMetric('意图识别', rep.rates.intent + '%',
+        trial + ' 条里 ' + rep.counts.intent[0] + ' 条认对「想干什么」', '') +
+      evalMetric('风险分级', rep.rates.risk + '%',
+        trial + ' 条里 ' + rep.counts.risk[0] + ' 条与人工标注同档', '') +
+      evalMetric('高危不漏', rep.highRecall + '%',
+        rep.highExp
+          ? (rep.highExp + ' 条该判高危，漏了 ' + (rep.highExp - rep.highTp) + ' 条')
+          : '本批用例没有高危样本',
+        rep.highExp && rep.highRecall >= 100 ? 'ok' : rep.highExp ? 'warn' : '') +
+      evalMetric('情绪判断', rep.rates.emotion + '%',
+        trial + ' 条里 ' + rep.counts.emotion[0] + ' 条情绪档一致', '') +
+      '</div>';
 
-    /* 风险混淆矩阵 */
-    h += '<div class="ev-block"><div class="ev-bhead">风险混淆矩阵<span class="sp">行 = 人工标注 · 列 = 引擎判定</span></div>' +
-      '<table class="ev-matrix"><thead><tr><th></th>' +
-      levels.map(function (l) { return '<th>' + esc(l.label) + '</th>'; }).join('') +
-      '</tr></thead><tbody>';
-    levels.forEach(function (row) {
-      h += '<tr><th>' + esc(row.label) + '</th>';
-      levels.forEach(function (col) {
-        var n = (rep.confusion[row.key] || {})[col.key] || 0;
-        h += '<td class="' + (row.key === col.key && n ? 'diag' : n ? 'off' : 'zero') + '">' + n + '</td>';
-      });
-      h += '</tr>';
-    });
-    h += '</tbody></table></div>';
-
-    /* 错例清单 */
-    h += '<div class="ev-block"><div class="ev-bhead">错例清单<span class="sp">' +
-      (rep.misses.length ? rep.misses.length + ' 条判错 · 已进入改进清单' : '全部通过') + '</span></div>';
-    if (!rep.misses.length) {
-      h += '<div class="empty">全部用例通过</div>';
-    } else {
-      h += '<ul class="ev-misses">';
+    /* 判错清单只在真有错时出现 —— 全绿的时候它只是噪音 */
+    if (rep.misses.length) {
+      h += '<div class="ev-block"><div class="ev-bhead"><b>判错的几条</b><span class="sp">' +
+        rep.misses.length + ' 条 · 已进入改进清单</span></div><ul class="ev-misses">';
       rep.misses.forEach(function (r) {
         var diff = [];
         if (r.hit.intent === false) diff.push('意图 期望「' + r.expect.intent + '」实际「' + r.got.intent + '」');
@@ -1792,16 +2047,56 @@
           '<span class="em-diff">' + esc(diff.join('　|　')) + '</span></div>' +
           '<div class="em-text">«' + esc(r.text) + '»</div></li>';
       });
-      h += '</ul>';
+      h += '</ul></div>';
     }
-    h += '</div>';
 
-    /* 用例明细 */
-    h += '<div class="ev-block"><div class="ev-bhead">用例明细<span class="sp">点开可核对每一句的期望与判定</span></div>' +
+    /* 风险 3×3 对照表：属于「要核对时才看」的明细，收进折叠区，默认不展开 */
+    var diagN = 0, allN = 0, upN = 0, downN = 0;
+    levels.forEach(function (row) {
+      levels.forEach(function (col) {
+        var n = (cf[row.key] || {})[col.key] || 0;
+        allN += n;
+        if (row.key === col.key) diagN += n;
+      });
+    });
+    /* 判低一档才是真漏（高危 → 关注 / 安全）；判高一档只是多一次复核 */
+    downN = ((cf.high || {}).medium || 0) + ((cf.high || {}).low || 0);
+    upN = ((cf.medium || {}).high || 0) + ((cf.low || {}).high || 0);
+
+    h += '<details class="ev-fold"><summary><b>风险判定明细</b> · 每一条被定成了几级' +
+      '<span class="hint">判高 ' + upN + ' 条 · 判低 ' + downN + ' 条</span></summary>' +
+      '<div class="ev-fold-body"><div class="ev-matrix-row">' +
+      '<table class="ev-matrix"><thead><tr><th></th>' +
+      levels.map(function (l) { return '<th>' + esc(l.label) + '</th>'; }).join('') +
+      '</tr></thead><tbody>';
+    levels.forEach(function (row) {
+      h += '<tr><th>' + esc(row.label) + '</th>';
+      levels.forEach(function (col) {
+        var n = (cf[row.key] || {})[col.key] || 0;
+        h += '<td class="' + (row.key === col.key && n ? 'diag' : n ? 'off' : 'zero') + '">' + n + '</td>';
+      });
+      h += '</tr>';
+    });
+    h += '</tbody></table>' +
+      '<div class="ev-matrix-side">' +
+        '<div class="ev-ms"><span>落在对角线上（判对）</span><b class="num">' + diagN +
+          '</b><span class="ev-ms-sub">/ ' + allN + ' 条</span></div>' +
+        '<div class="ev-ms"><span>判低一档（高危 → 关注 / 安全）</span><b class="num ' +
+          (downN ? 'is-danger' : '') + '">' + downN + '</b><span class="ev-ms-sub">起</span></div>' +
+        '<p class="ev-ms-note">表格读法：行是人工标注，列是引擎判定。判高一档只是多一次复核，' +
+        '判低一档会漏掉一次必须接管的对话 —— 所以后者单列，任何非零值都要在错例清单里逐条解释。</p>' +
+      '</div></div></div></details>';
+
+    /* 逐条用例：需要核对「这一句为什么这样判」时才打开 */
+    h += '<details class="ev-fold"><summary><b>逐条用例</b> · ' + trial + ' 条对话的判定结果' +
+      '<span class="hint">点开核对每一句</span></summary><div class="ev-fold-body">' +
       '<table class="risk-table ev-table"><thead><tr>' +
       '<th>剧本</th><th>#</th><th>文本</th><th>意图</th><th>风险</th><th>情绪</th></tr></thead><tbody>';
     rep.rows.forEach(function (r) {
-      var mark = function (ok) { return ok === null ? '<span class="ev-na">–</span>' : (ok ? '<span class="ev-ok">✓</span>' : '<span class="ev-bad">✗</span>'); };
+      var mark = function (ok) {
+        return ok === null ? '<span class="ev-na">–</span>'
+          : (ok ? '<span class="ev-ok">✓</span>' : '<span class="ev-bad">✗</span>');
+      };
       h += '<tr>' +
         '<td>' + esc(r.scenario) + '</td><td class="num">' + r.i + '</td>' +
         '<td style="color:var(--tx-2)">' + esc(r.text) + '</td>' +
@@ -1810,10 +2105,10 @@
         '<td>' + mark(r.hit.emotion) + esc(r.got.emotion) + ' <span class="num" style="color:var(--tx-3)">' + r.got.emotionScore + '</span></td>' +
         '</tr>';
     });
-    h += '</tbody></table></div>';
+    h += '</tbody></table></div></details>';
 
     $('evalBody').innerHTML = h;
-    $('evalMeta').textContent = rep.suite + ' · 版本 ' + rep.version + ' · ' + rep.count + ' 条用例';
+    $('evalMeta').textContent = rep.suite + ' · 用例集 v' + rep.version + ' · ' + trial + ' 条 · 判据 v' + RPv;
   }
 
   function renderEval(force) {
@@ -1899,6 +2194,13 @@
     return h;
   }
 
+  /** 一位客户的关怀条目按等级汇总：索引列与筛选标签都用这一份数 */
+  function careCounts(cv) {
+    var n = { high: 0, medium: 0, low: 0 };
+    (cv.items || []).forEach(function (it) { n[it.level] = (n[it.level] || 0) + 1; });
+    return n;
+  }
+
   function renderCare(force) {
     var box = $('careBody');
     if (!box) return;
@@ -1908,7 +2210,6 @@
     if (!rep) { box.innerHTML = '<div class="empty">未能读取 CRM 数据源</div>'; return; }
 
     $('careNow').textContent = '基准日 ' + rep.now;
-    $('careVer').textContent = '口径版本 v' + rep.version;
     $('careCover').textContent = rep.stats.covered + ' / ' + rep.stats.customers + ' 位客户有待办关怀';
 
     /* 指标条：先给结论，再看明细 */
@@ -1918,33 +2219,95 @@
       metric('提示级', String(rep.stats.low), '条', '随单附注即可', '') +
       metric('覆盖客户', rep.stats.covered + ' / ' + rep.stats.customers, '', '按 CRM 全量扫描', 'ok');
 
-    var h = '';
+    /* 客户清单：先按等级筛人，再渲染「当前这一位」的条目。
+       一百位客户时索引列只是变长，正文永远只有一屏 —— 不会再拉不到底 */
+    var rows = [];
     rep.customers.forEach(function (cv) {
       var idx = resolveContactIndex({ customerId: cv.key });
       if (idx === -1) return;
-      h += '<div class="care-card' + (cv.stats.high ? ' has-high' : '') + '">' +
-        '<div class="cc-head">' +
-          '<span class="cc-name">' + esc(cv.name) + '</span>' +
-          '<span class="cc-meta">' + esc(cv.member + ' · ' + cv.skin) + '</span>' +
-          '<span class="spacer"></span>' +
-          (cv.stats.high ? '<span class="cc-pill danger">高危 ' + cv.stats.high + '</span>' : '') +
-          (cv.stats.medium ? '<span class="cc-pill warn">关注 ' + cv.stats.medium + '</span>' : '') +
-          (cv.stats.low ? '<span class="cc-pill">提示 ' + cv.stats.low + '</span>' : '') +
-          '<button class="mini" type="button" data-care-go="' + idx + '">去接待</button>' +
-        '</div>' +
-        (cv.items.length
-          ? cv.items.map(function (it) { return careItemHTML(it, idx, false); }).join('')
-          : '<div class="cc-empty">暂无到期的关怀项</div>') +
-        (cv.watch.length
-          ? '<div class="cc-watch"><em>复购观察</em>' + cv.watch.map(function (w) {
-              return '<span>' + esc(w.product) + ' · 已用 <b class="num">' + w.pct + '%</b></span>';
-            }).join('') + '<span class="cc-watch-note">未达 ' +
-            Math.round((CARE.DUE_RATIO || 0.7) * 100) + '% 提醒线，仅登记不打扰</span></div>'
-          : '') +
-        '</div>';
+      rows.push({ cv: cv, idx: idx, n: careCounts(cv) });
     });
 
-    box.innerHTML = h || '<div class="empty">没有任何客户命中关怀条件</div>';
+    var f = state.careFilter || 'all';
+    var pick = rows.filter(function (r) { return f === 'all' || r.n[f] > 0; });
+
+    /* 标签上的数字是「几位客户」：筛的是人，不是条目 */
+    function tagNum(lv) {
+      return rows.filter(function (r) { return r.n[lv] > 0; }).length;
+    }
+    var tags = '<button type="button" data-care-f="all" class="' + (f === 'all' ? 'on' : '') + '">' +
+      '全部<i>' + rows.length + '</i></button>';
+    [['high', '高危'], ['medium', '关注'], ['low', '提示']].forEach(function (p) {
+      tags += '<button type="button" data-care-f="' + p[0] + '" class="' + (f === p[0] ? 'on' : '') + '">' +
+        p[1] + '<i>' + tagNum(p[0]) + '</i></button>';
+    });
+
+    if (!pick.length) {
+      box.innerHTML = '<div class="care-empty">当前筛选下没有客户命中关怀条件<br><br>' +
+        '<button class="btn ghost small" type="button" data-care-f="all">看全部客户</button></div>';
+      return;
+    }
+
+    /* 选中的客户必须仍在当前筛选里，否则自动落到第一位（有高危的优先） */
+    var sel = null;
+    for (var i = 0; i < pick.length; i++) if (pick[i].cv.key === state.careSel) { sel = pick[i]; break; }
+    if (!sel) {
+      for (var j = 0; j < pick.length; j++) if (pick[j].n.high) { sel = pick[j]; break; }
+      if (!sel) sel = pick[0];
+      state.careSel = sel.cv.key;
+    }
+
+    var ix = '';
+    pick.forEach(function (r) {
+      ix += '<button type="button" class="care-card' + (r.cv.key === state.careSel ? ' on' : '') +
+        '" data-care-sel="' + esc(r.cv.key) + '">' +
+        '<span class="cc-name">' + esc(r.cv.name) + '</span>' +
+        '<span class="cc-meta">' + esc(r.cv.member) + (r.cv.skin ? ' · ' + esc(r.cv.skin) : '') + '</span>' +
+        '<span class="cc-pills">' +
+          (r.n.high ? '<i class="cc-pill danger">高危 ' + r.n.high + '</i>' : '') +
+          (r.n.medium ? '<i class="cc-pill warn">关注 ' + r.n.medium + '</i>' : '') +
+          (r.n.low ? '<i class="cc-pill">提示 ' + r.n.low + '</i>' : '') +
+        '</span></button>';
+    });
+
+    var items = sel.cv.items.filter(function (it) { return f === 'all' || it.level === f; });
+    /* 条目里不再重复「去接待」：卡头已经有一个，条目只留「生成话术 / 预览话术」 */
+    var body = items.length
+      ? items.map(function (it) { return careItemHTML(it, sel.idx, true); }).join('')
+      : '<div class="care-empty">这位客户在当前筛选下没有条目</div>';
+
+    var watch = sel.cv.watch.length
+      ? '<div class="cc-watch"><em>复购观察</em>' + sel.cv.watch.map(function (w) {
+          return '<span>' + esc(w.product) + ' · 已用 <b class="num">' + w.pct + '%</b></span>';
+        }).join('') + '<span class="cc-watch-note">未达 ' +
+        Math.round((CARE.DUE_RATIO || 0.7) * 100) + '% 提醒线，仅登记不打扰</span></div>'
+      : '';
+
+    box.innerHTML =
+      '<div class="care-layout">' +
+        '<div class="care-index">' +
+          '<div class="care-filters" role="tablist" aria-label="按关怀等级筛选客户">' + tags + '</div>' +
+          '<div class="care-list">' + ix + '</div>' +
+        '</div>' +
+        '<div class="care-detail">' +
+          '<div class="care-detail-head">' +
+            '<span class="cc-name">' + esc(sel.cv.name) + '</span>' +
+            '<span class="cc-meta">' + esc(sel.cv.member + (sel.cv.skin ? ' · ' + sel.cv.skin : '')) + '</span>' +
+            (sel.n.high ? '<span class="cc-pill danger">高危 ' + sel.n.high + '</span>' : '') +
+            (sel.n.medium ? '<span class="cc-pill warn">关注 ' + sel.n.medium + '</span>' : '') +
+            (sel.n.low ? '<span class="cc-pill">提示 ' + sel.n.low + '</span>' : '') +
+            '<span class="spacer"></span>' +
+            '<button class="mini" type="button" data-care-go="' + sel.idx + '">去接待</button>' +
+          '</div>' +
+          '<div class="care-items">' + body + watch + '</div>' +
+          '<details class="care-notes">' +
+            '<summary>推算口径 <span class="num" id="careVer">—</span> · 每条建议都可按此复算</summary>' +
+            '<div class="cn-wrap" id="careNotes"></div>' +
+          '</details>' +
+        '</div>' +
+      '</div>';
+
+    if ($('careVer')) $('careVer').textContent = 'v' + rep.version;
     $('careNotes').innerHTML = (rep.notes || []).map(function (n) {
       return '<div class="cn-row">' + ICON.doc + '<span>' + esc(n) + '</span></div>';
     }).join('');
@@ -2031,11 +2394,16 @@
         '<div class="ch-vol">累计 <b class="num">' + c.volume + '</b> 条 · 今日 <b class="num">' + c.today +
           '</b> 条 · 接入于 ' + esc(c.linkedAt) + '</div>';
     } else {
+      /* 原来是「4 项前置条件 · 4 项凭证字段 · 凭证在 open.taobao.com 申请」一整句，
+         四列布局下每张卡只有 250px，域名必然在中间断成两行。拆成三行短句 */
       foot =
-        '<div class="ch-req">接入要求 <b>' + c.prerequisites + '</b> 项前置条件 · <b>' + c.fieldCount +
-          '</b> 项凭证字段' + (c.portal ? ' · 凭证在 <em>' + esc(c.portal.replace(/^https?:\/\//, '')) + '</em> 申请' : '') + '</div>' +
+        '<div class="ch-req"><b>' + c.prerequisites + '</b> 项前置 · <b>' + c.fieldCount + '</b> 项凭证字段</div>' +
+        (c.portal
+          ? '<div class="ch-portal" title="' + esc(c.portal) + '">凭证申请入口 ' +
+            esc(c.portal.replace(/^https?:\/\//, '')) + '</div>'
+          : '') +
         '<div class="ch-foot">' +
-          '<span class="ch-vol ch-vol-off">未接入 · 听不到这里的消费者</span>' +
+          '<span class="ch-vol ch-vol-off">未接入</span>' +
           '<button class="mini use" data-connect="' + c.id + '">开始接入 →</button>' +
         '</div>';
     }
@@ -2230,12 +2598,14 @@
     overlayStack.push(entry);
   }
 
-  function releaseOverlay(root) {
+  function releaseOverlay(root, keepFocus) {
     for (var i = overlayStack.length - 1; i >= 0; i--) {
       if (overlayStack[i].root !== root) continue;
       var entry = overlayStack.splice(i, 1)[0];
       entry.dispose();
-      if (entry.last && typeof entry.last.focus === 'function') {
+      /* keepFocus：触发按钮马上要随视图一起隐藏（切页面关弹窗），
+         还焦点给它等于把焦点丢进 display:none 里 */
+      if (!keepFocus && entry.last && typeof entry.last.focus === 'function') {
         try { entry.last.focus(); } catch (e) { /* ignore */ }
       }
       return;
@@ -2973,8 +3343,29 @@
     safe('live', renderLive);
   }
 
+  /* 模块作用域：非会话视图把顶栏的「哪位顾客」换成「哪一屏、看什么」。
+     顶栏是六个视图共用的，切到风险看板还挂着某位顾客的名字，读起来就不成立。 */
+  var VIEW_META = {
+    care: { t: '主动关怀', s: '复购周期 · 权益挽留 · 成分冲突' },
+    channels: { t: '渠道接入', s: '八个渠道的连通状态与凭证生命周期' },
+    dashboard: { t: '风险预警看板', s: '工单闭环 · 首响时效 · 分级标准' },
+    kb: { t: '话术知识库', s: '可复用话术与合规边界' },
+    eval: { t: '效果评测', s: '引擎判定与人工标注的对账' }
+  };
+
   function switchView(v) {
     state.view = v;
+    /* 弹窗是工作台的覆盖层，切走时必须一起收掉（不还焦点：触发按钮马上就要被隐藏） */
+    if (v !== 'workbench' && state.bandOpen) setBandOpen(false, { keepFocus: true });
+    /* 外壳列数由 data-view 决定（CSS）：只有工作台带会话列。
+       body 上也记一份 —— 窄屏抽屉的遮罩挂在 .app 之外，跨层级只能靠它。
+       抽屉本身不在这里关：它记着「刚才在看谁」，切回工作台接着看是合理的。 */
+    $('app').setAttribute('data-view', v);
+    document.body.setAttribute('data-view', v);
+    if (VIEW_META[v]) {
+      $('wbTitle').textContent = VIEW_META[v].t;
+      $('wbSub').textContent = VIEW_META[v].s;
+    }
     $('viewWorkbench').hidden = v !== 'workbench';
     $('viewDashboard').hidden = v !== 'dashboard';
     $('viewKb').hidden = v !== 'kb';
@@ -2985,15 +3376,22 @@
     for (var i = 0; i < btns.length; i++) {
       btns[i].setAttribute('aria-current', String(btns[i].getAttribute('data-view') === v));
     }
-    $('sprite').hidden = v !== 'workbench';
+    /* 助手只属于工作台；「网站设置 → 话术小助手」关掉后任何视图都不出现 */
+    $('sprite').hidden = v !== 'workbench' || state.prefs.sprite === false;
     renderAll();
   }
 
-  function applyTheme(t) {
-    document.documentElement.setAttribute('data-theme', t);
-    localStorage.setItem('beauty-cs-theme', t);
-    $('themeIcon').innerHTML = t === 'dark' ? ICON.sun : ICON.moon;
-    $('themeLabel').textContent = t === 'dark' ? '浅色' : '深色';
+  function applyTheme(mode) {
+    var m = mode === 'dark' || mode === 'light' || mode === 'auto' ? mode : 'light';
+    var real = resolvedTheme(m);
+    document.documentElement.setAttribute('data-theme', real);
+    state.prefs.theme = m;
+    prefsSave();
+    /* 只记真正生效的那一套：审计与截图工具读这个键，不该读到 'auto' 这种中间态 */
+    try { localStorage.setItem('beauty-cs-theme', real); } catch (e) { /* 隐私模式下写不进去 */ }
+    $('themeIcon').innerHTML = real === 'dark' ? ICON.sun : ICON.moon;
+    $('themeLabel').textContent = real === 'dark' ? '浅色' : '深色';
+    syncThemeSeg();
   }
 
   function updateStatus() {
@@ -3041,7 +3439,9 @@
       (lc.lastError ? ' · 最近：' + lc.lastError : '');
   }
 
-  function openDrawer() {
+  /* ---------- 模型与推理设置：只回答「怎么想」 ---------- */
+
+  function openEngine() {
     var cfg = window.LLMClient.readConfig();
     $('cfgBase').value = cfg.baseUrl || '';
     $('cfgKey').value = cfg.apiKey || '';
@@ -3054,13 +3454,283 @@
     syncModeRow(cfg.mode);
     renderLiveInfo();
     renderHarness();
+    $('engineRoot').hidden = false;
+    trapOverlay($('engineRoot'));
+  }
+
+  function closeEngine() {
+    releaseOverlay($('engineRoot'));
+    $('engineRoot').hidden = true;
+  }
+
+  /* ---------- 网站设置：只回答「这间店怎么用」 ----------
+     与模型配置分开之后，两边都不必再解释「我为什么也在这里」。 */
+
+  function prefsSave() {
+    try { localStorage.setItem('beauty-cs-prefs', JSON.stringify(state.prefs)); } catch (e) { /* ignore */ }
+  }
+
+  function prefsLoad() {
+    try {
+      var raw = localStorage.getItem('beauty-cs-prefs');
+      var o = raw ? JSON.parse(raw) : null;
+      if (!o || typeof o !== 'object') return;
+      ['theme', 'startView', 'sprite', 'autoBubble', 'slaTick', 'riskToast'].forEach(function (k) {
+        if (o[k] != null) state.prefs[k] = o[k];
+      });
+    } catch (e) { /* 坏数据就当没存过 */ }
+  }
+
+  /** 跟随系统时真正生效的那一套：写成独立函数，审计与截图都能问出「现在到底是哪套」 */
+  function resolvedTheme(mode) {
+    if (mode === 'auto') {
+      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    }
+    return mode === 'dark' ? 'dark' : 'light';
+  }
+
+  function syncThemeSeg() {
+    var box = $('prefTheme');
+    if (!box) return;
+    var btns = box.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('on', btns[i].getAttribute('data-theme-opt') === state.prefs.theme);
+    }
+  }
+
+  function syncPrefsForm() {
+    syncThemeSeg();
+    if (!$('prefStartView')) return;
+    $('prefStartView').value = state.prefs.startView || 'workbench';
+    $('prefSprite').checked = state.prefs.sprite !== false;
+    $('prefAutoBubble').checked = state.prefs.autoBubble !== false;
+    $('prefSlaTick').checked = state.prefs.slaTick !== false;
+    $('prefRiskToast').checked = state.prefs.riskToast !== false;
+    $('prefAccount').textContent = ACCT.me
+      ? ACCT.me.name + ' · ' + ACCT.me.role + ' ' + ACCT.me.level
+      : '未登录（本地演示）';
+    var llm = window.LLMClient ? window.LLMClient.readConfig() : null;
+    $('prefAbout').innerHTML = '解语 Jieyu · 美妆客服共情副驾　界面 2026.10　判据 v' + esc(RP.VERSION) +
+      '<br>引擎：' + (llm && llm.apiKey ? '大模型可用，失败自动降级本地' : '本地规则引擎（未配置 Key）') +
+      '　话术库 ' + kbEntries().length + ' 条' +
+      '<br>分析管线 harness：facts → generate → vision → ground → compliance → emotion → context';
+  }
+
+  function openPrefs() {
+    syncPrefsForm();
     $('drawerRoot').hidden = false;
     trapOverlay($('drawerRoot'));
   }
 
-  function closeDrawer() {
+  function closePrefs() {
     releaseOverlay($('drawerRoot'));
     $('drawerRoot').hidden = true;
+  }
+
+  /** 偏好落到界面：助手显隐、走秒、起始页都在这里收口，不散落在各处 */
+  function prefsApply() {
+    var sp = $('sprite');
+    if (sp) sp.hidden = state.view !== 'workbench' || state.prefs.sprite === false;
+    if (state.prefs.sprite === false && state.bubbleOpen) {
+      state.bubbleOpen = false;
+      safe('sprite', renderSprite);
+    }
+    syncPrefsForm();
+  }
+
+  /* ---------- 账号与坐席 ----------
+     账号、在线状态存服务端；本机只留一枚令牌。
+     没有令牌时界面进入「本地演示·未登录」态：能看能演示，但不假装已登录。 */
+
+  var DEMO_AGENT = { id: 'CS013', name: '佟佳鑫', role: '客服', level: 'L3', status: 'online' };
+  var ACCT = { me: null, source: 'demo', agents: [] };
+
+  function authToken() {
+    try { return localStorage.getItem('beauty-cs-token') || ''; } catch (e) { return ''; }
+  }
+
+  function setAuthToken(t) {
+    try {
+      if (t) localStorage.setItem('beauty-cs-token', t);
+      else localStorage.removeItem('beauty-cs-token');
+    } catch (e) { /* ignore */ }
+  }
+
+  function apiJson(url, opts) {
+    opts = opts || {};
+    var headers = {};
+    if (opts.body) headers['Content-Type'] = 'application/json';
+    var tk = authToken();
+    if (tk) headers.Authorization = 'Bearer ' + tk;
+    opts.headers = headers;
+    return fetch(url, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok) throw new Error((j && j.message) || ('HTTP ' + r.status));
+        return j;
+      });
+    });
+  }
+
+  function statusText(s) {
+    return s === 'busy' ? '忙碌' : s === 'away' ? '离开' : '在线接待';
+  }
+
+  function acctStat(k, v) {
+    return '<div class="acct-stat"><i>' + esc(k) + '</i><b>' + esc(v) + '</b></div>';
+  }
+
+  function renderMeCard() {
+    var av = $('meAvatar');
+    if (!av) return;
+    var a = ACCT.me;
+    if (!a) {
+      av.textContent = '?';
+      $('meName').textContent = '未登录';
+      $('meRole').textContent = '本地演示';
+      $('meState').innerHTML = '<i class="dot warn"></i>点开登录';
+      $('meCard').title = '尚未登录 · 点开用工号登录或切换坐席';
+      return;
+    }
+    var online = a.status === 'online';
+    av.textContent = a.name.slice(0, 1);
+    $('meName').textContent = a.name;
+    $('meRole').textContent = a.role + ' · ' + a.level + (ACCT.source === 'server' ? '' : ' · 演示');
+    $('meState').innerHTML = '<i class="dot ' + (online ? 'live' : 'warn') + '"></i>' +
+      (ACCT.source === 'server' ? statusText(a.status) : '未登录 · 本地演示');
+    $('meCard').title = a.name + ' · ' + a.role + a.level + ' · 点开查看状态与切换账号';
+  }
+
+  function renderAccountDrawer() {
+    var hero = $('acctHero');
+    if (!hero) return;
+    var a = ACCT.me;
+
+    if (a) {
+      var badgeCls = ACCT.source === 'server' ? (a.status === 'online' ? 'online' : 'busy') : '';
+      hero.innerHTML =
+        '<span class="acct-ava">' + esc(a.name.slice(0, 1)) + '</span>' +
+        '<span class="acct-id"><b>' + esc(a.name) + '</b>' +
+        '<span>' + esc(a.role + ' · ' + a.level + ' · 工号 ' + a.id) + '</span></span>' +
+        '<span class="acct-badge ' + badgeCls + '">' +
+        (ACCT.source === 'server' ? statusText(a.status) : '本地演示 · 未登录') + '</span>';
+    } else {
+      hero.innerHTML =
+        '<span class="acct-ava">?</span>' +
+        '<span class="acct-id"><b>未登录</b><span>用下方工号登录，登录状态存服务端</span></span>' +
+        '<span class="acct-badge">未登录</span>';
+    }
+
+    var segs = $('acctPresence').querySelectorAll('button');
+    for (var i = 0; i < segs.length; i++) {
+      var on = !!a && segs[i].getAttribute('data-presence') === (a.status || 'online');
+      segs[i].classList.toggle('on', on);
+      segs[i].disabled = ACCT.source !== 'server';
+    }
+
+    var cs = CF ? CF.stats() : null;
+    $('acctStats').innerHTML =
+      acctStat('进行中会话', contacts.length + ' 位') +
+      acctStat('已采纳话术', state.metrics.adopted + ' 条') +
+      acctStat('待处理风险', pendingRiskCount() + ' 起') +
+      acctStat('首响达标率', cs && cs.respondRate != null ? cs.respondRate + '%' : '—');
+
+    $('acctList').innerHTML = ACCT.agents.length
+      ? ACCT.agents.map(function (g) {
+          return '<button type="button" class="acct-row' + (a && a.id === g.id ? ' on' : '') +
+            '" data-agent="' + esc(g.id) + '">' +
+            '<span class="ar-ava">' + esc(g.name.slice(0, 1)) + '</span>' +
+            '<span class="ar-t"><b>' + esc(g.name) + '</b>' +
+            '<span>' + esc(g.role + ' · ' + g.level + ' · ' + g.id) + '</span></span>' +
+            '<span class="ar-s">' + esc(statusText(g.status)) + '</span></button>';
+        }).join('')
+      : '<div class="form-note">服务端未提供坐席名单 —— 请用 <code>npm start</code> 启动后再打开。</div>';
+
+    $('acctNote').textContent = ACCT.agents.length
+      ? '演示口令统一为 1234；工号见上方坐席名单。登录状态与在线状态存服务端，换设备用同一工号可接上。'
+      : '服务端不可用，本地演示态不支持登录。启动服务后会自动出现坐席名单。';
+  }
+
+  function openAccount() {
+    renderAccountDrawer();
+    $('accountRoot').hidden = false;
+    trapOverlay($('accountRoot'));
+    loadAgents().then(refreshSession);
+  }
+
+  function closeAccount() {
+    releaseOverlay($('accountRoot'));
+    $('accountRoot').hidden = true;
+  }
+
+  function loadAgents() {
+    return apiJson('/api/agents').then(function (j) {
+      ACCT.agents = (j && j.agents) || [];
+      renderAccountDrawer();
+    }).catch(function () {
+      ACCT.agents = [];
+      renderAccountDrawer();
+    });
+  }
+
+  /** 用本机令牌问一次「我是谁」：成功即服务端会话，失败退到未登录 */
+  function refreshSession() {
+    return apiJson('/api/auth/session').then(function (j) {
+      ACCT.me = j.agent;
+      ACCT.source = 'server';
+      renderMeCard();
+      renderAccountDrawer();
+      syncPrefsForm();
+    }).catch(function () {
+      if (ACCT.source !== 'server') { ACCT.me = null; ACCT.source = 'demo'; }
+      renderMeCard();
+      renderAccountDrawer();
+      syncPrefsForm();
+    });
+  }
+
+  function doLogin() {
+    var id = String($('acctId').value || '').trim().toUpperCase();
+    var pin = String($('acctPin').value || '');
+    if (!id || !pin) { toast('请填工号与口令', 'warn'); return; }
+    apiJson('/api/auth/login', { method: 'POST', body: JSON.stringify({ agentId: id, pin: pin }) })
+      .then(function (j) {
+        setAuthToken(j.token);
+        ACCT.me = j.agent;
+        ACCT.source = 'server';
+        $('acctId').value = j.agent.id;
+        $('acctPin').value = '';
+        renderMeCard();
+        renderAccountDrawer();
+        syncPrefsForm();
+        loadAgents();
+        toast('已登录：' + j.agent.name + ' · ' + statusText(j.agent.status), 'ok');
+      })
+      .catch(function (e) { toast('登录失败：' + e.message, 'danger'); });
+  }
+
+  function doLogout() {
+    apiJson('/api/auth/logout', { method: 'POST' }).catch(function () { /* 令牌照样清 */ }).then(function () {
+      setAuthToken('');
+      ACCT.me = null;
+      ACCT.source = 'demo';
+      renderMeCard();
+      renderAccountDrawer();
+      syncPrefsForm();
+      toast('已退出登录', 'ok');
+    });
+  }
+
+  function setPresence(s) {
+    if (ACCT.source !== 'server' || !ACCT.me) { toast('先登录才能改在线状态', 'warn'); return; }
+    apiJson('/api/presence', { method: 'POST', body: JSON.stringify({ status: s }) })
+      .then(function (j) {
+        ACCT.me = j.agent;
+        renderMeCard();
+        renderAccountDrawer();
+        loadAgents();
+        toast('状态已切到「' + statusText(s) + '」', 'ok');
+      })
+      .catch(function (e) { toast('状态切换失败：' + e.message, 'danger'); });
   }
 
   /* ==================== 会话复盘 · 交接摘要 ==================== */
@@ -3764,15 +4434,95 @@
       else startPlay();
     });
     $('btnReset').addEventListener('click', function () { loadScenario(state.si, false); });
+    /* 引擎设置只有一处入口：右上角这枚状态药丸 */
     $('modelStatus').addEventListener('click', function () {
       state.degraded = '';
       updateStatus();
-      openDrawer();
+      openEngine();
     });
-    $('btnSettings').addEventListener('click', openDrawer);
+    $('btnCloseDrawer').addEventListener('click', closeEngine);
+    $('scrim').addEventListener('click', closeEngine);
+
+    /* 网站设置：侧栏底部那个齿轮。它不再打开模型配置 —— 那是两个问题 */
+    $('btnSettings').addEventListener('click', openPrefs);
+    $('btnClosePrefs').addEventListener('click', closePrefs);
+    $('prefScrim').addEventListener('click', closePrefs);
+
     $('btnTheme').addEventListener('click', function () {
       var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
       applyTheme(next);
+    });
+
+    $('prefTheme').addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-theme-opt]') : null;
+      if (!b) return;
+      applyTheme(b.getAttribute('data-theme-opt'));
+    });
+    $('prefStartView').addEventListener('change', function () {
+      state.prefs.startView = this.value;
+      prefsSave();
+      toast('下次打开会先落到「' + this.options[this.selectedIndex].text + '」', 'ok');
+    });
+    $('prefSprite').addEventListener('change', function () {
+      state.prefs.sprite = this.checked;
+      prefsSave();
+      prefsApply();
+      toast(this.checked ? '话术小助手已显示' : '话术小助手已隐藏', 'ok');
+    });
+    $('prefAutoBubble').addEventListener('change', function () {
+      state.prefs.autoBubble = this.checked;
+      prefsSave();
+    });
+    $('prefSlaTick').addEventListener('change', function () {
+      state.prefs.slaTick = this.checked;
+      prefsSave();
+      toast(this.checked ? '工单时限会逐秒更新' : '已停止逐秒刷新 —— 重新进入看板时仍会算准', 'ok');
+    });
+    $('prefRiskToast').addEventListener('change', function () {
+      state.prefs.riskToast = this.checked;
+      prefsSave();
+    });
+    $('btnWipeLocal').addEventListener('click', function () {
+      /* 键名写成字面量而不是遍历变量：这样 ST05 能静态校验前缀，
+         不会出现「清了半天其实键名拼错、位置还在」这种静默失败。
+         注意桌宠位置用的是 beauty-cs-sprite（与读写一致），别再写成 -sprite-pos。
+         新增持久化键时，这里必须同步加一行。 */
+      try {
+        localStorage.removeItem('beauty-cs-prefs');
+        localStorage.removeItem('beauty-cs-kb');
+        localStorage.removeItem('beauty-cs-token');
+        localStorage.removeItem('beauty-cs-sprite');
+      } catch (e) { /* 隐私模式下清不掉，忽略 */ }
+      window.LLMClient.writeConfig({ apiKey: '' });
+      state.degraded = '';
+      updateStatus();
+      syncPrefsForm();
+      toast('本机偏好、话术缓存与 Key 已清空（服务端数据未动）', 'ok');
+    });
+    $('btnOpenAccount').addEventListener('click', function () {
+      closePrefs();
+      openAccount();
+    });
+
+    /* 账号与坐席：身份卡就是入口 */
+    $('meCard').addEventListener('click', openAccount);
+    $('btnCloseAccount').addEventListener('click', closeAccount);
+    $('accountScrim').addEventListener('click', closeAccount);
+    $('btnLogin').addEventListener('click', doLogin);
+    $('acctPin').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+    $('btnLogout').addEventListener('click', doLogout);
+    $('acctPresence').addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-presence]') : null;
+      if (!b || b.disabled) return;
+      setPresence(b.getAttribute('data-presence'));
+    });
+    $('acctList').addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-agent]') : null;
+      if (!b) return;
+      $('acctId').value = b.getAttribute('data-agent');
+      $('acctPin').value = '';
+      $('acctPin').focus();
+      toast('工号已填入 —— 输入口令即可切换（演示口令 1234）', 'info');
     });
     $('btnToggleSprite').addEventListener('click', function () { toggleBubble(); });
     $('btnComposerMode').addEventListener('click', function () {
@@ -3786,6 +4536,28 @@
     $('spriteBody').addEventListener('click', function (e) {
       /* 关怀话术：由雷达给出的主动触达文案，同样走合规闸 */
       if (onCareClick(e)) return;
+      /* 把 Agent 这条建议收进话术库：命中合规禁区的不能入库，
+         必须先用「一键净化」改写成能说的话 —— 库里不留违规话术 */
+      var kbSave = e.target.closest ? e.target.closest('[data-kb-save]') : null;
+      if (kbSave) {
+        var Sk = cur();
+        var rk = Sk.analyzed && Sk.analyzed.replies[Number(kbSave.getAttribute('data-kb-save'))];
+        if (!rk) return;
+        if (rk.guard && rk.guard.level === 'block') {
+          toast('命中合规禁区的话术不能入库，请先用「一键净化」改写', 'danger');
+          return;
+        }
+        var it0 = Sk.analyzed && Sk.analyzed.intents && Sk.analyzed.intents[0];
+        openKbEditor({
+          cat: it0 ? it0.name : 'default',
+          text: rk.text,
+          kb: rk.kb,
+          rationale: rk.rationale,
+          confidence: rk.confidence,
+          from: '来自 Agent 建议 · ' + contactAt(state.si).name,
+        });
+        return;
+      }
       var ctxBtn = e.target.closest ? e.target.closest('[data-ctx]') : null;
       if (ctxBtn) {
         state.ctxOpen = !state.ctxOpen;
@@ -3845,6 +4617,19 @@
       state.kbq = this.value;
       renderKb();
     });
+
+    /* 话术入库：手工新增与「收编建议」共用同一张表单 */
+    $('btnKbNew').addEventListener('click', function () { openKbEditor(); });
+    $('kbEditor').addEventListener('click', function (e) {
+      /* 点遮罩空白处关闭，和全站其它浮层一致 */
+      if (e.target === $('kbEditor')) { closeKbEditor(); return; }
+      var b = e.target.closest ? e.target.closest('[data-kbe]') : null;
+      if (!b) return;
+      if (b.getAttribute('data-kbe') === 'save') saveKb();
+      else closeKbEditor();
+    });
+    $('kbeText').addEventListener('input', function () { if ($('kbeErr').hidden === false) kbErr(''); });
+
     $('btnEvalRerun').addEventListener('click', function () { renderEval(true); });
 
     /* 图片通道：上传文件 / 合成示例图，两条路走同一个本机视觉分析 */
@@ -3870,6 +4655,9 @@
       }
     });
     $('kbList').addEventListener('click', function (e) {
+      /* 删除自建话术：只有人写的能删，引擎基线是只读的 */
+      var del = e.target.closest ? e.target.closest('[data-kb-del]') : null;
+      if (del) { delKb(del.getAttribute('data-kb-del')); return; }
       var b = e.target.closest ? e.target.closest('[data-kb]') : null;
       if (!b) return;
       switchView('workbench');
@@ -3926,10 +4714,30 @@
       var act = t.getAttribute('data-band');
       if (act === 'toggle') setBandOpen(!state.bandOpen);
       else if (act === 'close') setBandOpen(false);
+      /* 「打开关怀雷达」是弹窗里唯一的跨视图入口：先关掉弹窗再切，否则弹窗会盖住目标页 */
+      else if (act === 'care') { setBandOpen(false); switchView('care'); }
     });
+    /* 点遮罩关闭：弹窗是覆盖层，点空白处退出是最基本的预期 */
+    $('bandScrim').addEventListener('click', function () { setBandOpen(false); });
 
-    /* 主动关怀雷达全览 */
-    $('careBody').addEventListener('click', onCareClick);
+    /* 主动关怀雷达：先按等级筛人，再选人看事；条目上的三个动作仍由 onCareClick 统一处理 */
+    $('careBody').addEventListener('click', function (e) {
+      var f = e.target.closest ? e.target.closest('[data-care-f]') : null;
+      if (f) {
+        state.careFilter = f.getAttribute('data-care-f');
+        /* 换筛选时不必留住旧选择：选中的客户可能已经不在名单里 */
+        state.careSel = '';
+        renderCare();
+        return;
+      }
+      var sel = e.target.closest ? e.target.closest('[data-care-sel]') : null;
+      if (sel) {
+        state.careSel = sel.getAttribute('data-care-sel');
+        renderCare();
+        return;
+      }
+      onCareClick(e);
+    });
     $('btnCareRefresh').addEventListener('click', function () {
       renderCare(true);
       toast('已按当前数据重新扫描关怀信号', 'ok');
@@ -4063,8 +4871,6 @@
       else toast(r.reason, 'warn');
     });
 
-    $('btnCloseDrawer').addEventListener('click', closeDrawer);
-    $('scrim').addEventListener('click', closeDrawer);
     $('btnAuditExport').addEventListener('click', function () {
       var P = window.Privacy;
       if (!P) { toast('隐私模块未加载（assets/privacy.js）', 'warn'); return; }
@@ -4083,10 +4889,14 @@
     document.addEventListener('keydown', function (e) {
       if (e.key !== 'Escape') return;
       /* 接入向导是最外层的模态（自带遮罩），Esc 优先关它 —— 之前它压根不在这个链里，
-         打开向导后按 Esc 没反应，键盘用户只能去点右上角那个小叉 */
+         打开向导后按 Esc 没反应，键盘用户只能去点右上角那个小叉。
+         同一层里按「最后打开的先关」排：话术表单 > 账号 > 复盘 > 引擎 > 站点设置 */
       if (!$('chWiz').hidden) closeWizard();
+      else if (!$('kbEditor').hidden) closeKbEditor();
+      else if (!$('accountRoot').hidden) closeAccount();
       else if (!$('recapRoot').hidden) closeRecap();
-      else if (!$('drawerRoot').hidden) closeDrawer();
+      else if (!$('engineRoot').hidden) closeEngine();
+      else if (!$('drawerRoot').hidden) closePrefs();
       else if (contactsDrawerOpen()) setContactsDrawer(false);
       else if (peekIdx >= 0) closeUnreadPeek();
       else if (state.bandOpen) setBandOpen(false);
@@ -4190,9 +5000,12 @@
 
     $('btnReset').innerHTML = ICON.reset;
     renderPlayBtn();
-    /* 深链 ?theme=dark|light 优先于本地偏好 —— 让浅色主题也能被自动化审计到 */
+    /* 本机偏好先读进来：主题、起始页、助手与提醒都由它决定 */
+    prefsLoad();
+    /* 深链 ?theme=dark|light 优先于本机偏好 —— 让两套主题都能被自动化审计到。
+       本机存的是「模式」（浅色 / 深色 / 跟随系统），深链只覆盖本次会话 */
     var mTheme = String(location.search || '').match(/[?&]theme=(dark|light)/);
-    applyTheme(mTheme ? mTheme[1] : (localStorage.getItem('beauty-cs-theme') || 'dark'));
+    applyTheme(mTheme ? mTheme[1] : state.prefs.theme);
     updateStatus();
     setComposerMode('agent');
     spriteLoadPos();
@@ -4204,7 +5017,7 @@
     var q = String(location.search || '');
     var mIdx = q.match(/[?&]s=(\d+)/);
     var idx = mIdx ? clamp(Number(mIdx[1]), 0, contacts.length - 1) : 0;
-    if (/[?&]band=1/.test(q)) state.bandOpen = true;
+    var openBand = /[?&]band=1/.test(q);
     /* 关怀推算的基准日：不传则跟随系统时间；传了就是可复现的演示口径 */
     var mToday = q.match(/[?&]today=(\d{4}-\d{2}-\d{2})/);
     if (mToday) state.careToday = mToday[1];
@@ -4217,12 +5030,24 @@
     else if (/[?&]view=eval/.test(q)) switchView('eval');
     else if (/[?&]view=care/.test(q)) switchView('care');
     else if (/[?&]view=channels/.test(q)) switchView('channels');
-    else switchView('workbench');
+    /* 没有 ?view= 时落在「网站设置 → 打开时先看哪一屏」选的那一页 */
+    else switchView(state.prefs.startView || 'workbench');
 
     contacts[idx].unread = 0;
     loadScenario(idx, /[?&]play=1/.test(q));
-    if (/[?&]settings=1/.test(q)) openDrawer();
+    if (/[?&]settings=1/.test(q)) openPrefs();
+    if (/[?&]engine=1/.test(q)) openEngine();
+    if (/[?&]account=1/.test(q)) openAccount();
+    if (openBand) setBandOpen(true);
     if (/[?&]sprite=1/.test(q) && !state.bandOpen) { state.bubbleOpen = true; renderSprite(); }
+
+    /* 偏好的界面侧效果（助手显隐）与账号态一起落地：
+       账号先按「未登录」渲染，服务端有令牌再换成真身 —— 不会先显示一个假身份 */
+    prefsApply();
+    renderMeCard();
+    refreshSession();
+    loadAgents();
+    kbLoad().then(function () { if (state.view === 'kb') renderKb(); });
 
     connectLive();
 

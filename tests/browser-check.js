@@ -123,14 +123,26 @@ const CHECKS = [
       const q = (s) => document.querySelector(s);
       const txt = (s) => (q(s) || {}).textContent || '';
       const cards = [...document.querySelectorAll('#careBody .care-card')];
+      const lay = document.querySelector('.care-layout');
+      const items = document.querySelector('.care-items');
+      const vc = document.getElementById('viewCare');
       return {
         metrics: [...document.querySelectorAll('#careMetrics .metric')].map(m => m.textContent.trim().replace(/\\s+/g, ' ')),
         cards: cards.length,
-        finance: cards.map(c => (c.querySelector('.cc-name') || {}).textContent + ':' + c.querySelectorAll('.care-item').length),
+        /* 改版后索引卡自带等级计数（高危 3 / 关注 2），明细只渲染选中客户，
+           所以不能再靠「数卡片里的条目」来统计每位客户的条数。 */
+        cardPills: cards.map(c => (c.querySelector('.cc-name') || {}).textContent + ' ' +
+          [...c.querySelectorAll('.cc-pill')].map(p => p.textContent.trim()).join('/')),
+        filters: [...document.querySelectorAll('#careBody [data-care-f]')].map(b => b.textContent.trim().replace(/\\s+/g, ' ')),
+        selected: ((document.querySelector('#careBody .care-card.on') || {}).textContent || '').replace(/\\s+/g, ' ').trim(),
+        items: document.querySelectorAll('#careBody .care-item').length,
         highItems: document.querySelectorAll('#careBody .care-item.lv-high').length,
         evidence: document.querySelectorAll('#careBody .ci-evidence span').length,
-        watch: document.querySelectorAll('#careBody .cc-watch').length,
         notes: document.querySelectorAll('#careNotes .cn-row').length,
+        layoutCols: lay ? getComputedStyle(lay).gridTemplateColumns : null,
+        /* 关键不变量：整页不滚动，长列表只落在明细区内部 */
+        viewOver: vc ? vc.scrollHeight - vc.clientHeight : null,
+        detailScroll: items ? { sh: items.scrollHeight, ch: items.clientHeight } : null,
         now: txt('#careNow'), cover: txt('#careCover'), ver: txt('#careVer'),
         badge: txt('#navCareBadge'),
       };
@@ -1197,6 +1209,133 @@ const CHECKS = [
       pe('pointerup', x, 0);
 
       if (bad.length) throw new Error('帧率断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 风险看板：分布卡去掉进度横条、分级标准提到同一行之后，整页不许再滚。
+       横条把一张卡撑到近两倍高，挤得下面要滚动 —— 这是纯布局问题，
+       只有真浏览器的 scrollHeight / clientHeight 量得出来。 */
+    name: 'dashboard-layout',
+    url: '/?view=dashboard&nolive=1',
+    wait: 2500,
+    screenshot: true,
+    probe: `(() => {
+      const q = (s) => document.querySelector(s);
+      const out = {};
+      out.distTracks = document.querySelectorAll('.dist-track').length;
+      out.srows = document.querySelectorAll('.srow').length;
+      out.stdRows = document.querySelectorAll('.std-row').length;
+      const row = q('.dash-row');
+      out.cols = row
+        ? getComputedStyle(row).gridTemplateColumns.split(' ').map(v => Math.round(parseFloat(v) || 0))
+        : null;
+      out.docOver = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(out.distTracks === 0, '分布卡不该再有进度横条，实为 ' + out.distTracks);
+      want(out.srows > 0, '分布应渲染成「名称 + 次数」行');
+      want(out.stdRows === 3, '分级标准应压成三档并与分布同行，实为 ' + out.stdRows);
+      want(!!out.cols && out.cols.length === 4, '看板第一行应为四列，实为 ' + ((out.cols || []).length));
+      want(out.docOver <= 0, '看板整页不应滚动，溢出 ' + out.docOver + 'px');
+      if (bad.length) throw new Error('看板布局断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 账号：登录状态存服务端，换设备用同一工号能接上。
+       端到端要钉的是「点了登录，底部身份卡真的变成那个人」——
+       单测测不到 localStorage 与界面渲染之间的那道接缝。 */
+    name: 'account-login',
+    url: '/?view=workbench&nolive=1',
+    wait: 2400,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const txt = (s) => ((q(s) || {}).textContent || '').replace(/\\s+/g, ' ').trim();
+      const out = {};
+      await sleep(1300);
+      out.before = txt('#meName');
+      q('#meCard').focus();
+      q('#meCard').click();
+      await sleep(420);
+      out.opened = !document.getElementById('accountRoot').hidden;
+      out.rows = document.querySelectorAll('#acctList .acct-row').length;
+      q('#acctId').value = 'CS013';
+      q('#acctPin').value = '1234';
+      q('#btnLogin').click();
+      await sleep(1200);
+      out.after = txt('#meName');
+      out.badge = (q('#acctHero .acct-badge') || {}).textContent || '';
+      out.token = !!localStorage.getItem('beauty-cs-token');
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(out.opened === true, '点身份卡应打开账号面板');
+      want(out.rows === 3, '坐席名单应有 3 人，实为 ' + out.rows);
+      want(out.after === '佟佳鑫', '登录后身份卡应显示坐席姓名，实为「' + out.after + '」');
+      want(out.token === true, '登录应把令牌写进本机');
+      /* 登出恢复现场，别把登录态留给下一个检查项 */
+      const lo = q('#btnLogout');
+      if (lo) { lo.click(); await sleep(800); }
+      out.afterLogout = txt('#meName');
+      if (bad.length) throw new Error('账号登录断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 话术库：Agent 的建议与手工填写都能进库。
+       钉四件事 —— 弹窗打得开、空正文不许落库、自建条目带标记、删除真的生效。 */
+    name: 'kb-manual',
+    url: '/?view=kb&nolive=1',
+    wait: 2600,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const rows = () => document.querySelectorAll('.kb-row').length;
+      const txt = (s) => ((q(s) || {}).textContent || '').replace(/\\s+/g, ' ').trim();
+      const out = {};
+      await sleep(1500);
+      out.rows0 = rows();
+      q('#btnKbNew').click();
+      await sleep(320);
+      out.editorOpen = !document.getElementById('kbEditor').hidden;
+      out.focusIn = document.activeElement ? document.activeElement.id : '';
+      q('#kbeText').value = '';
+      q('[data-kbe="save"]').click();
+      await sleep(260);
+      out.err = txt('#kbeErr');
+      out.rowsAfterEmpty = rows();
+      out.stillOpen = !document.getElementById('kbEditor').hidden;
+      q('#kbeText').value = '探针话术 CDP 手工入库验证';
+      q('#kbeText').dispatchEvent(new Event('input', { bubbles: true }));
+      q('[data-kbe="save"]').click();
+      await sleep(900);
+      out.closed = document.getElementById('kbEditor').hidden;
+      out.rowsAfterAdd = rows();
+      out.custom = document.querySelectorAll('.kb-row.is-custom').length;
+      const hit = [...document.querySelectorAll('.kb-row')].filter(r => r.textContent.indexOf('探针话术 CDP') !== -1)[0];
+      out.hasProbe = !!hit;
+      const del = hit ? hit.querySelector('[data-kb-del]') : null;
+      out.hasDelBtn = !!del;
+      if (del) { del.click(); await sleep(900); }
+      out.rowsAfterDel = rows();
+      out.probeGone = ![...document.querySelectorAll('.kb-row')].some(r => r.textContent.indexOf('探针话术 CDP') !== -1);
+      out.focusAfterClose = document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : '';
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(out.editorOpen === true, '点「新增话术」应打开录入弹窗');
+      want(out.err !== '', '空正文应给出可读报错');
+      want(out.rowsAfterEmpty === out.rows0, '空正文不许落库');
+      want(out.stillOpen === true, '校验不通过时弹窗不该关');
+      want(out.rowsAfterAdd === out.rows0 + 1, '保存后应多出一条，实为 ' + out.rowsAfterAdd);
+      want(out.custom >= 1, '自建条目应带「自建」标记');
+      want(out.hasDelBtn === true, '自建条目应可删除');
+      want(out.probeGone === true, '删除后该条应真的消失');
+      want(out.focusAfterClose === 'btnKbNew',
+        '关闭后焦点应还给「新增话术」，实为 ' + out.focusAfterClose);
+      if (bad.length) throw new Error('话术库断言失败：' + bad.join(' | '));
       return out;
     })()`,
   },

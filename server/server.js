@@ -17,6 +17,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const CRM = require('../assets/crm.js');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -271,6 +272,181 @@ function handleOrderDetail(res, orderNo) {
   });
 }
 
+/* ------------------------------ 持久化：坐席账号 / 自建话术 ------------------------------
+   零依赖：一个 JSON 文件 + 原子替换写入。
+   它要解决的是「账号与自建话术不该只躺在某台电脑的 localStorage 里」——
+   换台机器、换个浏览器，同一个工号还能接上自己的状态。
+   生产环境把这一层换成真正的数据库即可，接口形状不变。 */
+
+const DATA_DIR = path.join(__dirname, 'data');
+const DB_FILE = path.join(DATA_DIR, 'db.json');
+const DEMO_PIN = '1234';                    // 演示口令：写在文档里，就不假装它是安全的
+const SESSION_TTL = 12 * 60 * 60 * 1000;    // 12 小时
+
+const SEED_AGENTS = [
+  { id: 'CS013', name: '佟佳鑫', role: '客服', level: 'L3', status: 'online' },
+  { id: 'CS021', name: '李思远', role: '客服', level: 'L2', status: 'away' },
+  { id: 'CS008', name: '王敏', role: '客服主管', level: 'L4', status: 'busy' },
+];
+
+let DB = null;
+const sessions = new Map();      // token -> { agentId, at }
+
+function hashPin(pin, salt) {
+  return crypto.createHash('sha256').update(String(salt) + ':' + String(pin)).digest('hex');
+}
+
+function loadDb() {
+  if (DB) return DB;
+  let seed = null;
+  try { seed = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch (e) { seed = null; }
+  if (!seed || typeof seed !== 'object') seed = {};
+  if (!Array.isArray(seed.agents) || !seed.agents.length) {
+    seed.agents = SEED_AGENTS.map((a) => {
+      const salt = crypto.randomBytes(8).toString('hex');
+      return {
+        id: a.id, name: a.name, role: a.role, level: a.level, status: a.status,
+        salt, pinHash: hashPin(DEMO_PIN, salt),
+      };
+    });
+  }
+  if (!Array.isArray(seed.kb)) seed.kb = [];
+  if (!seed.nextKb) seed.nextKb = 1;
+  DB = seed;
+  saveDb();
+  return DB;
+}
+
+function saveDb() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = DB_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(DB, null, 2), 'utf8');
+    fs.renameSync(tmp, DB_FILE);   // 原子替换：写到一半断电也不会留下半个 JSON
+  } catch (e) {
+    console.warn('  [store] 写入失败：' + e.message);
+  }
+}
+
+function publicAgent(a) {
+  return { id: a.id, name: a.name, role: a.role, level: a.level, status: a.status };
+}
+
+function bearerToken(req) {
+  const m = /^Bearer\s+([a-f0-9]{24,64})$/i.exec(String(req.headers.authorization || '').trim());
+  return m ? m[1] : '';
+}
+
+function agentOf(req) {
+  const tk = bearerToken(req);
+  if (!tk) return null;
+  const s = sessions.get(tk);
+  if (!s) return null;
+  if (Date.now() - s.at > SESSION_TTL) { sessions.delete(tk); return null; }
+  return loadDb().agents.find((x) => x.id === s.agentId) || null;
+}
+
+function handleLogin(req, res) {
+  readJson(req).then((p) => {
+    const db = loadDb();
+    const id = String(p.agentId || p.id || '').trim().toUpperCase();
+    const pin = String(p.pin || '');
+    const a = db.agents.find((x) => x.id === id);
+    if (!a || hashPin(pin, a.salt) !== a.pinHash) {
+      sendJson(res, 401, { ok: false, message: '工号或口令不正确' });
+      return;
+    }
+    a.status = p.status === 'busy' || p.status === 'away' ? p.status : 'online';
+    saveDb();
+    const token = crypto.randomBytes(24).toString('hex');
+    sessions.set(token, { agentId: a.id, at: Date.now() });
+    console.log('  [auth] ' + a.id + ' ' + a.name + ' 登录 · 在线状态 ' + a.status);
+    sendJson(res, 200, { ok: true, token, agent: publicAgent(a) });
+  }).catch(() => sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' }));
+}
+
+function handleLogout(req, res) {
+  const tk = bearerToken(req);
+  if (tk) sessions.delete(tk);
+  sendJson(res, 200, { ok: true });
+}
+
+function handleSession(req, res) {
+  const a = agentOf(req);
+  if (!a) { sendJson(res, 401, { ok: false, message: '未登录或登录已过期' }); return; }
+  sendJson(res, 200, { ok: true, agent: publicAgent(a) });
+}
+
+function handleAgents(res) {
+  sendJson(res, 200, { ok: true, agents: loadDb().agents.map(publicAgent) });
+}
+
+function handlePresence(req, res) {
+  const a = agentOf(req);
+  if (!a) { sendJson(res, 401, { ok: false, message: '未登录' }); return; }
+  readJson(req).then((p) => {
+    const s = String(p.status || '');
+    if (['online', 'busy', 'away'].indexOf(s) === -1) {
+      sendJson(res, 400, { ok: false, message: '状态只能是 online / busy / away' });
+      return;
+    }
+    a.status = s;
+    saveDb();
+    sendJson(res, 200, { ok: true, agent: publicAgent(a) });
+  }).catch(() => sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' }));
+}
+
+/* 自建话术：引擎自带那份在 assets/engine.js 里只读，这里只存人写的 */
+const KB_MAX_TEXT = 800;
+const KB_MAX_CAT = 40;
+const KB_MAX_ITEMS = 500;
+
+function kbPublic(it) {
+  return {
+    id: it.id, cat: it.cat, text: it.text, kb: it.kb, rationale: it.rationale,
+    confidence: it.confidence, origin: it.origin, at: it.at, custom: true,
+  };
+}
+
+function handleKbList(res) {
+  sendJson(res, 200, { ok: true, items: loadDb().kb.map(kbPublic) });
+}
+
+function handleKbCreate(req, res) {
+  readJson(req).then((p) => {
+    const db = loadDb();
+    const text = String(p.text || '').trim();
+    const cat = String(p.cat || '').trim();
+    if (!text) { sendJson(res, 400, { ok: false, message: '话术正文不能为空' }); return; }
+    if (text.length > KB_MAX_TEXT) { sendJson(res, 400, { ok: false, message: '正文不能超过 ' + KB_MAX_TEXT + ' 字' }); return; }
+    if (!cat || cat.length > KB_MAX_CAT) { sendJson(res, 400, { ok: false, message: '分类不能为空且不超过 ' + KB_MAX_CAT + ' 字' }); return; }
+    const item = {
+      id: 'kb-' + Date.now().toString(36) + '-' + (db.nextKb++),
+      cat,
+      text,
+      kb: String(p.kb || '人工录入 · 未标注条款').slice(0, 200),
+      rationale: String(p.rationale || '人工录入 · 未标注适用场景').slice(0, 200),
+      confidence: Math.max(0, Math.min(1, Number(p.confidence) || 0)),
+      origin: String(p.origin || '手工录入').slice(0, 80),
+      at: new Date().toISOString(),
+    };
+    db.kb.unshift(item);
+    if (db.kb.length > KB_MAX_ITEMS) db.kb.length = KB_MAX_ITEMS;   // 文件型存储不该无限长
+    saveDb();
+    console.log('  [kb] 新增 ' + item.cat + '：' + item.text.slice(0, 24) + (item.text.length > 24 ? '…' : ''));
+    sendJson(res, 200, { ok: true, item: kbPublic(item) });
+  }).catch(() => sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' }));
+}
+
+function handleKbDelete(res, id) {
+  const db = loadDb();
+  const before = db.kb.length;
+  db.kb = db.kb.filter((x) => x.id !== id);
+  if (db.kb.length === before) { sendJson(res, 404, { ok: false, message: '未找到该条话术' }); return; }
+  saveDb();
+  sendJson(res, 200, { ok: true });
+}
+
 /* ------------------------------ LLM 代理 ------------------------------ */
 
 async function handleChat(req, res) {
@@ -361,7 +537,7 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, Object.assign({
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       'Access-Control-Max-Age': '600',
     }, corsHeaders(req)));
@@ -399,6 +575,37 @@ const server = http.createServer((req, res) => {
       ok: true, seq: msgSeq,
       items: msgBuffer.filter((m) => m.seq > since),
     });
+    return;
+  }
+
+  /* ---- 坐席账号：登录态与在线状态存服务端，换设备同一工号能接上 ---- */
+  if (p === '/api/agents') { handleAgents(res); return; }
+  if (p === '/api/auth/login') {
+    if (req.method !== 'POST') { sendJson(res, 405, { ok: false, message: '仅支持 POST' }); return; }
+    handleLogin(req, res);
+    return;
+  }
+  if (p === '/api/auth/session') { handleSession(req, res); return; }
+  if (p === '/api/auth/logout') {
+    if (req.method !== 'POST') { sendJson(res, 405, { ok: false, message: '仅支持 POST' }); return; }
+    handleLogout(req, res);
+    return;
+  }
+  if (p === '/api/presence') {
+    if (req.method !== 'POST') { sendJson(res, 405, { ok: false, message: '仅支持 POST' }); return; }
+    handlePresence(req, res);
+    return;
+  }
+
+  /* ---- 自建话术库 ---- */
+  if (p === '/api/kb') {
+    if (req.method === 'POST') handleKbCreate(req, res);
+    else handleKbList(res);
+    return;
+  }
+  if (p.startsWith('/api/kb/')) {
+    if (req.method !== 'DELETE') { sendJson(res, 405, { ok: false, message: '仅支持 DELETE' }); return; }
+    handleKbDelete(res, decodeURIComponent(p.replace('/api/kb/', '')));
     return;
   }
 
@@ -446,6 +653,9 @@ server.listen(PORT, () => {
   console.log('  实时推送   : GET  http://localhost:' + PORT + '/api/events');
   console.log('  订单查询   : GET  http://localhost:' + PORT + '/api/orders/allergy');
   console.log('  单笔订单   : GET  http://localhost:' + PORT + '/api/order/JD2026092611884');
+  console.log('  坐席登录   : POST http://localhost:' + PORT + '/api/auth/login  （工号 CS013 / 口令 1234）');
+  console.log('  自建话术   : GET / POST http://localhost:' + PORT + '/api/kb');
+  console.log('  数据文件   : ' + DB_FILE);
   console.log('  停止服务   : Ctrl + C');
   console.log('');
 });
