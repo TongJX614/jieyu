@@ -74,9 +74,10 @@
     caseNotes: {},                 // 各工单的「处置结论」草稿（重渲染不丢）
     composerMode: 'agent',
     pendingImage: null,            // 待发送的图片附件（含视觉观察）
-    careOpen: {},                  // 关怀雷达里展开话术预览的条目（重渲染不丢）
+    careFold: {},                  // 关怀条目展开态（键 idx|id）：默认只展开第一条，其余当目录
     careSel: '',                   // 关怀雷达左侧索引里选中的客户
     careFilter: 'all',             // 关怀等级筛选：all / high / medium / low
+    careQuery: '',                 // 关怀客户搜索词（姓名 / 会员 / 肤质 / 事由）
     careToday: null,               // 关怀推算的基准日（默认随系统时间，可用 ?today= 固定，便于演示复现）
     /* 网站设置（本机偏好，与模型配置分开）：外观、起始页、助手与提醒开关 */
     prefs: {
@@ -86,6 +87,9 @@
       autoBubble: true,
       slaTick: true,
       riskToast: true,
+      rail: 'on',                  // on | off —— 侧栏显示与否
+      density: 'std',              // compact | std | loose —— 界面密度
+      sendKey: 'enter',            // enter | ctrl —— 回车直接发，还是 Ctrl+回车发
     },
     /* 数据带默认收起为紧凑条 —— 右栏以对话为主，全景数据按需展开 */
     bandOpen: false,
@@ -996,7 +1000,7 @@
       if (cv.items.length > 2) h += '<span class="bd-care-more">另 ' + (cv.items.length - 2) + ' 条</span>';
     }
     h += '<span class="spacer"></span>' +
-      '<button class="btn ghost small" type="button" data-band="care">打开关怀雷达</button>';
+      '<button class="mini" type="button" data-band="care">打开关怀雷达</button>';
     return h + '</div>';
   }
 
@@ -1496,11 +1500,17 @@
      横条长度只能表达相对大小，而这一列要回答的是「几起」——
      绝对数量本身就是答案，横条只是把整列宽度吃掉、把页面顶长。
      tone 只点出等级语义（高危红 / 关注黄 / 安全绿），落在文字上，不再上色块。 */
-  function srow(name, val, tone) {
+  /* 分布行：名称 + 占比 + 次数（+ 可选的第二行补充）。
+     占比是「这一档占了多少」—— 只有次数时，1 起在 1 起和 1 起在 40 起里长得一样。
+     第二行只放能对着上表复核的事实，不为了填高度凑字数 */
+  function srow(name, val, tone, pct, sub) {
     var zero = Number(val) === 0;
     return '<div class="srow' + (tone ? ' is-' + tone : '') + (zero ? ' is-zero' : '') + '">' +
       '<span class="srow-name" title="' + esc(name) + '">' + esc(name) + '</span>' +
-      '<span class="srow-n">' + val + '</span></div>';
+      (pct == null ? '' : '<span class="srow-p num">' + Math.round(pct) + '%</span>') +
+      '<span class="srow-n">' + val + '</span>' +
+      (sub ? '<span class="srow-sub">' + esc(sub) + '</span>' : '') +
+      '</div>';
   }
 
   /* ---------- 闭环：状态徽标 / 时限 / 处置详情 ---------- */
@@ -1654,11 +1664,12 @@
     var all = combinedRisks();
     syncCases();                                  // 幂等建单：历史沉淀 + 实时检出统一入册
     var cs = CF ? CF.stats() : null;
-    var high = 0, mid = 0, low = 0, sigCount = {};
+    var high = 0, mid = 0, low = 0, sigCount = {}, sigTotal = 0;
     for (var i = 0; i < all.length; i++) {
       if (all[i].level === 'high') high++;
       else if (all[i].level === 'medium') mid++;
       else low++;
+      sigTotal += (all[i].signals || []).length;
       for (var j = 0; j < (all[i].signals || []).length; j++) {
         var s = all[i].signals[j];
         sigCount[s] = (sigCount[s] || 0) + 1;
@@ -1669,6 +1680,7 @@
     var avg = scores.length
       ? Math.round(scores.reduce(function (x, y) { return x + y; }, 0) / scores.length)
       : null;
+    var maxScore = scores.length ? Math.max.apply(null, scores) : null;
 
     var rep = BUS.report();
     var respRate = cs && cs.respondRate != null ? cs.respondRate + '%' : '—';
@@ -1690,27 +1702,48 @@
 
     $('riskTableWrap').innerHTML = renderRiskTable(all);
 
-    /* 风险等级分布：三档的真实数量。等级文字本身带语义色，不需要再用横条强调 */
+    /* 百分比的分母：等级与信号用「事件总数」，闭环用「工单总数」——
+       两组数的分母不同，混用会得出「加起来不到 100%」的假象 */
+    var tot = all.length || 1;
+
+    /* 风险等级分布：三档的真实数量。等级文字本身带语义色，不需要再用横条强调。
+       第二行给「在办 / 已闭环」：同是 1 起高危，办完了和还压着不是一回事 */
+    var lvCase = {};
+    if (CF) {
+      CF.list().forEach(function (c) {
+        var b = lvCase[c.level] || (lvCase[c.level] = [0, 0]);
+        if (CF.isOpen(c.state)) b[0]++; else b[1]++;
+      });
+    }
+    var lvSub = function (k) {
+      var b = lvCase[k];
+      return b ? ('在办 ' + b[0] + ' · 已闭环 ' + b[1]) : '本批没有这一档';
+    };
     $('riskDistLevel').innerHTML =
-      srow(RP.labelOf('high'), high, 'danger') +
-      srow(RP.labelOf('medium'), mid, 'warn') +
-      srow(RP.labelOf('low'), low, 'ok');
+      srow(RP.labelOf('high'), high, 'danger', high / tot * 100, lvSub('high')) +
+      srow(RP.labelOf('medium'), mid, 'warn', mid / tot * 100, lvSub('medium')) +
+      srow(RP.labelOf('low'), low, 'ok', low / tot * 100, lvSub('low'));
 
     var keys = Object.keys(sigCount).sort(function (a, b) { return sigCount[b] - sigCount[a]; }).slice(0, 6);
     if (!keys.length) {
       $('riskDistSignal').innerHTML = '<div class="empty">暂无信号数据</div>';
     } else {
       var sh = '';
-      for (var m = 0; m < keys.length; m++) sh += srow(keys[m], sigCount[keys[m]]);
+      for (var m = 0; m < keys.length; m++) {
+        sh += srow(keys[m], sigCount[keys[m]], '', sigCount[keys[m]] / tot * 100);
+      }
       $('riskDistSignal').innerHTML = sh;
     }
 
     /* 闭环状态：每个状态的真实数量。闭环率 / 超时数移到卡头当读数 ——
        首响达标率与平均首响在上方指标条里已经有了，这里不再重复一遍 */
     if (cs) {
+      var ctot = 0;
+      CF.STATES.forEach(function (st) { ctot += cs.states[st.key] || 0; });
+      ctot = ctot || 1;
       var ch = '';
       CF.STATES.forEach(function (st) {
-        ch += srow(st.label, cs.states[st.key] || 0, st.tone);
+        ch += srow(st.label, cs.states[st.key] || 0, st.tone, (cs.states[st.key] || 0) / ctot * 100);
       });
       $('caseDist').innerHTML = ch;
       var clo = $('caseClosure');
@@ -1730,10 +1763,14 @@
       var range = lv.key === 'high' ? '≥ ' + RP.THRESHOLDS.high
         : lv.key === 'medium' ? RP.THRESHOLDS.medium + ' – ' + (RP.THRESHOLDS.high - 1)
           : '< ' + RP.THRESHOLDS.medium;
+      /* 处置动作取第一句（完整原文仍在 title 里）：四分之一列放不下整段，
+         但「接管并留档」这一句正是这一档最需要记住的动作 */
+      var short = String(lv.action || '').split('·')[0].trim();
       std += '<div class="std-row" title="' + esc(lv.desc + '。处置：' + lv.action) + '">' +
         '<span class="lvl ' + lv.key + '">' + esc(lv.label) + '</span>' +
         '<span class="std-range num">' + esc(range) + ' 分</span>' +
         '<span class="std-sla">SLA ' + esc(lv.sla) + '</span>' +
+        (short ? '<span class="std-sub">' + esc(short) + '</span>' : '') +
         '</div>';
     });
     $('riskStandard').innerHTML = std;
@@ -1741,6 +1778,21 @@
       $('riskStdVer').textContent = 'v' + RP.VERSION;
       $('riskStdVer').title = '阈值与处置动作由 policy.js 统一给出，与 AI 判定同源';
     }
+
+    /* 卡片底部各钉一句可核对的事实：四张卡被拉齐到同一高度后，
+       只有三档的「风险等级」底下会空一截 —— 与其把行距拉成两倍，
+       不如让底边落在一句能对着看板念出来的话上 */
+    var foot = function (id, text) {
+      var el = $(id);
+      if (el) el.textContent = text;
+    };
+    foot('caseFoot', cs
+      ? '平均首响 ' + (cs.avgRespondMs == null ? '—' : CF.fmtDur(cs.avgRespondMs)) + ' · 超时 ' + cs.overdue + ' 起'
+      : '按首响时限考核');
+    foot('levelFoot', '最高情绪分 ' + (maxScore == null ? '—' : maxScore) + ' / 100');
+    foot('signalFoot', keys.length + ' 类信号 · 平均每起 ' +
+      (all.length ? (sigTotal / all.length).toFixed(1) : '—') + ' 个');
+    foot('stdFoot', '阈值同时决定风险等级与工单时限');
   }
 
   /* ==================== 话术知识库 ==================== */
@@ -1980,6 +2032,14 @@
      因此页面上的数字与命令行输出必然一致 —— 不存在「演示一套、脚本一套」。 */
   var evalCases = null;
   var evalReport = null;
+  /* 剧本 id → 中文名。用例集里 id 是 presale / allergy 这类键，
+     直接摆到界面上是英文；名字在 cases[i].name 里（「售前咨询 · 敏感肌抗老」） */
+  var evalSceneNames = {};
+
+  function sceneLabel(key) {
+    var full = evalSceneNames[key] || '';
+    return full ? full.split(' · ')[0] : key;
+  }
 
   function loadEvalCases() {
     if (evalCases) return Promise.resolve(evalCases);
@@ -1988,10 +2048,14 @@
       .then(function (j) { evalCases = j; return j; });
   }
 
-  function evalMetric(k, v, sub, cls) {
+  /* 指标卡：数字 + 一句人话 + 一条等宽的比例条。
+     条形不是装饰 —— 100% 与 86% 在数字上差 14，在长度上一眼就看得出 */
+  function evalMetric(k, v, sub, cls, ratio) {
+    var pct = typeof ratio === 'number' ? Math.max(0, Math.min(100, ratio)) : null;
     return '<div class="ev-card ' + (cls || '') + '">' +
       '<div class="ev-k">' + esc(k) + '</div>' +
       '<div class="ev-v">' + esc(v) + '</div>' +
+      (pct == null ? '' : '<i class="ev-bar" aria-hidden="true"><b style="width:' + pct + '%"></b></i>') +
       '<div class="ev-sub">' + esc(sub) + '</div></div>';
   }
 
@@ -2003,36 +2067,87 @@
     var pass = rep.misses.length === 0;
     var h = '';
 
-    /* 先给结论：这一页到底在说什么，一句话讲完。
-       原来的版本上来就是「Top1 准确率 / 混淆矩阵 / 回归基线」，
-       看得懂的人不用解释，看不懂的人也不知道该看哪一行。 */
+    /* 这一页到底在干什么 —— 用「批卷子」讲，不用「评测指标」讲。
+       上一版开头是一段 90 字的解释，读得懂的人不用看、看不懂的人还是不知道在看什么；
+       这一版把「出题 → AI 答 → 对答案」三步摆在最上面，结论直接写在标题里。 */
     h += '<div class="ev-hero">' +
+      '<h3 class="ev-q">这页在回答：这台 AI <b>判得准不准</b></h3>' +
       '<div class="ev-verdict' + (pass ? '' : ' warn') + '">' +
-        '<b>' + (pass ? '全部通过' : rep.misses.length + ' 条判错，需要复核') + '</b>' +
-        '<span>' + (pass
-          ? trial + ' 条对话的判断与人工标注完全一致，可以按这份口径对外解释'
-          : '还没到 100%，下方「判错的几条」已逐条列出期望与实判') + '</span>' +
+        '<b>' + (pass ? '三科都满分' : rep.misses.length + ' 条对不上，需要复核') + '</b>' +
+        '<span>' + trial + ' 条题里判对 <b class="num">' + rep.counts.intent[0] + '</b> 条（意图）· ' +
+        '<b class="num">' + rep.counts.risk[0] + '</b> 条（风险）· ' +
+        '<b class="num">' + rep.counts.emotion[0] + '</b> 条（情绪）</span>' +
       '</div>' +
-      '<p class="ev-lead">这一页拿 <b>' + trial + ' 条有标准答案的模拟对话</b>，逐句检查引擎有没有判对三件事：' +
-        '<b>顾客想干什么</b>（意图）、<b>这事有多急</b>（风险等级）、<b>情绪有多差</b>（情绪档）。' +
-        '被测的是<b>本地规则引擎</b>，同一份用例也能用 <code>npm run eval</code> 跑，两边数字必然一致 —— ' +
-        '所以它既是质量指标，也是回归基线：<b>改完规则回来看，数字没掉就说明没退化</b>。</p>' +
+      '<div class="ev-steps">' +
+        '<span class="ev-step"><i>1</i><b>出题</b><em>' + trial + ' 条顾客原话，每条都有<b>人工标好的答案</b></em></span>' +
+        '<span class="ev-step"><i>2</i><b>AI 答</b><em>逐条判：想干什么 / 多急 / 情绪多差</em></span>' +
+        '<span class="ev-step"><i>3</i><b>对答案</b><em>和人工标的一格一格比，对不上的列出来</em></span>' +
+      '</div>' +
       '</div>';
 
     /* 四项指标：每个数字下面直接写「几条里对了几条」，不再让人自己换算 */
     h += '<div class="ev-metrics">' +
       evalMetric('意图识别', rep.rates.intent + '%',
-        trial + ' 条里 ' + rep.counts.intent[0] + ' 条认对「想干什么」', '') +
+        trial + ' 条里 ' + rep.counts.intent[0] + ' 条认对「想干什么」', '', rep.rates.intent) +
       evalMetric('风险分级', rep.rates.risk + '%',
-        trial + ' 条里 ' + rep.counts.risk[0] + ' 条与人工标注同档', '') +
+        trial + ' 条里 ' + rep.counts.risk[0] + ' 条与人工标注同档', '', rep.rates.risk) +
       evalMetric('高危不漏', rep.highRecall + '%',
         rep.highExp
           ? (rep.highExp + ' 条该判高危，漏了 ' + (rep.highExp - rep.highTp) + ' 条')
           : '本批用例没有高危样本',
-        rep.highExp && rep.highRecall >= 100 ? 'ok' : rep.highExp ? 'warn' : '') +
+        rep.highExp && rep.highRecall >= 100 ? 'ok' : rep.highExp ? 'warn' : '', rep.highExp ? rep.highRecall : null) +
       evalMetric('情绪判断', rep.rates.emotion + '%',
-        trial + ' 条里 ' + rep.counts.emotion[0] + ' 条情绪档一致', '') +
+        trial + ' 条里 ' + rep.counts.emotion[0] + ' 条情绪档一致', '', rep.rates.emotion) +
       '</div>';
+
+    /* 一条示范：「对答案」长什么样。光看百分比还是抽象的，
+       把某一条的原话、AI 的判定、人工的标注并排放一次，这页就具体了 */
+    var demo = null;
+    for (var d = 0; d < rep.rows.length; d++) {
+      var rr = rep.rows[d];
+      if (rr.hit.risk && rr.got.risk === 'high') { demo = rr; break; }
+    }
+    if (!demo) demo = rep.rows[0];
+    if (demo) {
+      h += '<div class="ev-sample">' +
+        '<div class="evs-head"><b>举个例子</b><span>' + esc(sceneLabel(demo.scenario)) + ' 第 ' + demo.i + ' 条是怎么批的</span></div>' +
+        '<p class="evs-say">顾客原话：«' + esc(demo.text) + '»</p>' +
+        '<div class="evs-cmp">' +
+          '<div class="evs-cell"><i>AI 判成</i>' +
+            '<b>' + esc(demo.got.intent) + '</b>' +
+            '<span>' + esc(RP.labelOf(demo.got.risk)) + ' <em class="num">' + demo.got.riskScore + '</em> · ' +
+              esc(demo.got.emotion) + ' <em class="num">' + demo.got.emotionScore + '</em></span></div>' +
+          '<div class="evs-eq" aria-hidden="true">＝</div>' +
+          '<div class="evs-cell"><i>人工标的</i>' +
+            '<b>' + esc(demo.expect.intent) + '</b>' +
+            '<span>' + esc(RP.labelOf(demo.expect.risk)) + ' · ' + esc(demo.expect.emotion) + '</span></div>' +
+          '<div class="evs-flag' + (demo.hit.risk !== false && demo.hit.intent !== false ? ' ok' : ' bad') + '">' +
+            (demo.hit.risk !== false && demo.hit.intent !== false ? '✓ 判对' : '✗ 判错') + '</div>' +
+        '</div>' +
+        '<div class="evs-foot">前面三项（意图 / 风险 / 情绪）就是这样逐条比出来的；' +
+          '下面「逐条用例」里每一条都有一行这样的对照。</div>' +
+      '</div>';
+    }
+
+    /* 为什么值得看：三句，对应「会不会退化 / 能不能复跑 / 判错会怎样」 */
+    h += '<div class="ev-why">' +
+      '<div><b>改完规则回来看</b><span>数字没掉，就说明这次改动没把原来判对的搞坏。</span></div>' +
+      '<div><b>数字可以复跑</b><span>同一份用例在浏览器里跑、在命令行 <code>npm run eval</code> 里跑，结果必然一致。</span></div>' +
+      '<div><b>判低一档最要命</b><span>该报警判成了不报警，这条对话就没人接手 —— 所以「高危不漏」单独一列。</span></div>' +
+      '</div>';
+
+    /* 覆盖范围：14 条这个数字说明不了什么，得看它来自几个场景 ——
+       一条用例只考「能不能认过敏」，另一条要同时考过敏 + 履约 + 权益 */
+    var byScene = {};
+    rep.rows.forEach(function (r) { byScene[r.scenario] = (byScene[r.scenario] || 0) + 1; });
+    var scenes = Object.keys(byScene);
+    h += '<div class="ev-cover">' +
+      '<div class="ev-cover-h"><b>这批用例覆盖了什么</b>' +
+        '<span class="hint">' + scenes.length + ' 个剧本 · ' + trial + ' 条对话' +
+        (rep.highExp ? ' · 其中 ' + rep.highExp + ' 条应判高危' : '') + '</span></div>' +
+      '<div class="ev-chips">' + scenes.map(function (s) {
+        return '<span class="ev-chip"><b>' + esc(sceneLabel(s)) + '</b><i class="num">' + byScene[s] + ' 条</i></span>';
+      }).join('') + '</div></div>';
 
     /* 判错清单只在真有错时出现 —— 全绿的时候它只是噪音 */
     if (rep.misses.length) {
@@ -2043,7 +2158,7 @@
         if (r.hit.intent === false) diff.push('意图 期望「' + r.expect.intent + '」实际「' + r.got.intent + '」');
         if (r.hit.risk === false) diff.push('风险 期望「' + r.expect.risk + '」实际「' + r.got.risk + '」（分 ' + r.got.riskScore + '）');
         if (r.hit.emotion === false) diff.push('情绪 期望「' + r.expect.emotion + '」实际「' + r.got.emotion + '」（分 ' + r.got.emotionScore + '）');
-        h += '<li><div class="em-head"><span class="em-src">' + esc(r.scenario) + ' #' + r.i + '</span>' +
+        h += '<li><div class="em-head"><span class="em-src">' + esc(sceneLabel(r.scenario)) + ' #' + r.i + '</span>' +
           '<span class="em-diff">' + esc(diff.join('　|　')) + '</span></div>' +
           '<div class="em-text">«' + esc(r.text) + '»</div></li>';
       });
@@ -2087,8 +2202,9 @@
         '判低一档会漏掉一次必须接管的对话 —— 所以后者单列，任何非零值都要在错例清单里逐条解释。</p>' +
       '</div></div></div></details>';
 
-    /* 逐条用例：需要核对「这一句为什么这样判」时才打开 */
-    h += '<details class="ev-fold"><summary><b>逐条用例</b> · ' + trial + ' 条对话的判定结果' +
+    /* 逐条用例：结论在上、证据在下，所以这里默认展开 ——
+       「评测」两个字要能当场验证，藏起来就只剩一句自说自话 */
+    h += '<details class="ev-fold" open><summary><b>逐条用例</b> · ' + trial + ' 条对话的判定结果' +
       '<span class="hint">点开核对每一句</span></summary><div class="ev-fold-body">' +
       '<table class="risk-table ev-table"><thead><tr>' +
       '<th>剧本</th><th>#</th><th>文本</th><th>意图</th><th>风险</th><th>情绪</th></tr></thead><tbody>';
@@ -2098,7 +2214,7 @@
           : (ok ? '<span class="ev-ok">✓</span>' : '<span class="ev-bad">✗</span>');
       };
       h += '<tr>' +
-        '<td>' + esc(r.scenario) + '</td><td class="num">' + r.i + '</td>' +
+        '<td>' + esc(sceneLabel(r.scenario)) + '</td><td class="num">' + r.i + '</td>' +
         '<td style="color:var(--tx-2)">' + esc(r.text) + '</td>' +
         '<td>' + mark(r.hit.intent) + esc(r.got.intent) + '</td>' +
         '<td>' + mark(r.hit.risk) + esc(RP.labelOf(r.got.risk)) + ' <span class="num" style="color:var(--tx-3)">' + r.got.riskScore + '</span></td>' +
@@ -2122,6 +2238,8 @@
     box.innerHTML = '<div class="empty">评测中…</div>';
     $('evalMeta').textContent = '加载用例中…';
     loadEvalCases().then(function (pack) {
+      evalSceneNames = {};
+      (pack.cases || []).forEach(function (cs) { if (cs && cs.id) evalSceneNames[cs.id] = cs.name || ''; });
       evalReport = KIT.runAll(pack.cases, LE);
       evalReport.suite = pack.name;
       evalReport.version = pack.version;
@@ -2161,10 +2279,14 @@
   }
 
   /** 关怀条目 → 详情块（雷达全览与顾客全景共用同一段渲染） */
-  function careItemHTML(it, idx, compact) {
-    var open = !!state.careOpen[idx + '|' + it.id];
-    var h = '<div class="care-item lv-' + it.level + (open ? ' open' : '') + '">' +
-      '<div class="ci-top">' +
+  /** 关怀条目 → 折叠块：收起时只剩一行标题（等级 / 类别 / 事由 / 时限），
+      点开才铺开正文。一次只看得进一两条长文，其余先当目录读。 */
+  function careItemHTML(it, idx, compact, defOpen) {
+    var key = idx + '|' + it.id;
+    var open = state.careFold[key] === undefined ? !!defOpen : !!state.careFold[key];
+    return '<div class="care-item lv-' + it.level + (open ? ' is-open' : '') + '">' +
+      '<button class="ci-head" type="button" data-care-fold="' + esc(key) + '" aria-expanded="' +
+        (open ? 'true' : 'false') + '">' +
         '<span class="ci-lv ' + it.level + '">' + careLevelLabel(it.level) + '</span>' +
         '<span class="ci-tag">' + esc(it.tag) + '</span>' +
         '<span class="ci-title" title="' + esc(it.title) + '">' + esc(it.title) + '</span>' +
@@ -2173,25 +2295,27 @@
           ? '<span class="ci-due num' + (it.dueIn <= 3 ? ' urgent' : '') + '">' +
             (it.dueIn < 0 ? '已超期 ' + (-it.dueIn) + ' 天' : it.dueIn === 0 ? '今天到期' : '还剩 ' + it.dueIn + ' 天') + '</span>'
           : '') +
+        '<svg class="ci-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" ' +
+          'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ' +
+          'aria-hidden="true"><path d="M9 5.5l7 6.5-7 6.5"/></svg>' +
+      '</button>' +
+      '<div class="ci-body"' + (open ? '' : ' hidden') + '>' +
+        '<div class="ci-detail">' + esc(it.detail) + '</div>' +
+        '<div class="ci-action"><em>建议动作</em><span>' + esc(it.action) + '</span></div>' +
+        (it.caution ? '<div class="ci-caution">' + ICON.alert + '<span>' + esc(it.caution) + '</span></div>' : '') +
+        '<div class="ci-draft"><em>可发送话术</em><p>' + esc(it.draft) + '</p>' +
+          (it.caveat ? '<div class="ci-caveat">' + esc(it.caveat) + '</div>' : '') + '</div>' +
+        '<div class="ci-evidence">' + (it.evidence || []).map(function (e) {
+          return '<span>' + esc(e) + '</span>';
+        }).join('') + '</div>' +
+        '<div class="ci-foot">' +
+          '<button class="mini use" type="button" data-care-draft="' + idx + '|' + esc(it.id) + '">生成话术</button>' +
+          (compact ? '' : '<button class="mini" type="button" data-care-go="' + idx + '">去接待</button>') +
+          '<span class="spacer"></span>' +
+          '<span class="ci-why">数据出处</span>' +
+        '</div>' +
       '</div>' +
-      '<div class="ci-detail">' + esc(it.detail) + '</div>' +
-      '<div class="ci-action"><em>建议动作</em><span>' + esc(it.action) + '</span></div>' +
-      (it.caution ? '<div class="ci-caution">' + ICON.alert + '<span>' + esc(it.caution) + '</span></div>' : '') +
-      '<div class="ci-foot">' +
-        '<button class="mini use" type="button" data-care-draft="' + idx + '|' + esc(it.id) + '">生成话术</button>' +
-        '<button class="mini" type="button" data-care-view="' + idx + '|' + esc(it.id) + '">' +
-          (open ? '收起话术' : '预览话术') + '</button>' +
-        (compact ? '' : '<button class="mini" type="button" data-care-go="' + idx + '">去接待</button>') +
-        '<span class="spacer"></span>' +
-        '<span class="ci-why">数据出处</span>' +
-      '</div>' +
-      '<div class="ci-evidence">' + (it.evidence || []).map(function (e) {
-        return '<span>' + esc(e) + '</span>';
-      }).join('') + '</div>' +
-      (open ? '<div class="ci-draft"><em>可发送话术</em><p>' + esc(it.draft) + '</p>' +
-        (it.caveat ? '<div class="ci-caveat">' + esc(it.caveat) + '</div>' : '') + '</div>' : '') +
       '</div>';
-    return h;
   }
 
   /** 一位客户的关怀条目按等级汇总：索引列与筛选标签都用这一份数 */
@@ -2199,6 +2323,17 @@
     var n = { high: 0, medium: 0, low: 0 };
     (cv.items || []).forEach(function (it) { n[it.level] = (n[it.level] || 0) + 1; });
     return n;
+  }
+
+  /** 关怀搜索：只写状态 + 同步清空按钮 + 重绘列表主体。
+   *  输入框在卡头里（不参与重绘），所以这里改它的值只发生在「清空」这种程序触发的场合 */
+  function setCareQuery(q) {
+    state.careQuery = String(q == null ? '' : q);
+    var box = $('careSearch');
+    if (box && box.value !== state.careQuery) box.value = state.careQuery;
+    var clear = $('btnCareSearchClear');
+    if (clear) clear.hidden = !state.careQuery.length;
+    renderCare();
   }
 
   function renderCare(force) {
@@ -2231,6 +2366,25 @@
     var f = state.careFilter || 'all';
     var pick = rows.filter(function (r) { return f === 'all' || r.n[f] > 0; });
 
+    /* 搜索：姓名、会员等级、肤质、以及每条事由的标题与动作都能命中。
+       搜到人之后正文跟着换 —— 这条规则和「按等级筛人」是同一个动作：筛索引列，不是筛条目。 */
+    var q = String(state.careQuery || '').trim().toLowerCase();
+    if (q) {
+      pick = pick.filter(function (r) {
+        var hay = [r.cv.name, r.cv.member, r.cv.skin]
+          .concat((r.cv.items || []).reduce(function (a, it) {
+            return a.concat([it.title, it.tag, it.action, it.detail]);
+          }, []))
+          .join(' ').toLowerCase();
+        return hay.indexOf(q) >= 0;
+      });
+    }
+    var hitEl = $('careHit');
+    if (hitEl) {
+      hitEl.hidden = !q;
+      hitEl.textContent = q ? ('命中 ' + pick.length + ' / ' + rows.length + ' 位') : '';
+    }
+
     /* 标签上的数字是「几位客户」：筛的是人，不是条目 */
     function tagNum(lv) {
       return rows.filter(function (r) { return r.n[lv] > 0; }).length;
@@ -2243,8 +2397,11 @@
     });
 
     if (!pick.length) {
-      box.innerHTML = '<div class="care-empty">当前筛选下没有客户命中关怀条件<br><br>' +
-        '<button class="btn ghost small" type="button" data-care-f="all">看全部客户</button></div>';
+      box.innerHTML = q
+        ? '<div class="care-empty">没有匹配「' + esc(state.careQuery) + '」的客户<br><br>' +
+          '<button class="mini" type="button" data-care-clear="1">清空搜索</button></div>'
+        : '<div class="care-empty">当前筛选下没有客户命中关怀条件<br><br>' +
+          '<button class="mini" type="button" data-care-f="all">看全部客户</button></div>';
       return;
     }
 
@@ -2271,9 +2428,10 @@
     });
 
     var items = sel.cv.items.filter(function (it) { return f === 'all' || it.level === f; });
-    /* 条目里不再重复「去接待」：卡头已经有一个，条目只留「生成话术 / 预览话术」 */
+    /* 条目里不再重复「去接待」：卡头已经有一个，条目只留「生成话术」。
+       默认只展开第一条（最急的那条），其余收成标题行 —— 一屏能扫完全部事由 */
     var body = items.length
-      ? items.map(function (it) { return careItemHTML(it, sel.idx, true); }).join('')
+      ? items.map(function (it, i) { return careItemHTML(it, sel.idx, true, i === 0); }).join('')
       : '<div class="care-empty">这位客户在当前筛选下没有条目</div>';
 
     var watch = sel.cv.watch.length
@@ -3350,7 +3508,7 @@
     channels: { t: '渠道接入', s: '八个渠道的连通状态与凭证生命周期' },
     dashboard: { t: '风险预警看板', s: '工单闭环 · 首响时效 · 分级标准' },
     kb: { t: '话术知识库', s: '可复用话术与合规边界' },
-    eval: { t: '效果评测', s: '引擎判定与人工标注的对账' }
+    eval: { t: '效果评测', s: '拿有标准答案的对话，给 AI 批一次卷子' }
   };
 
   function switchView(v) {
@@ -3389,8 +3547,8 @@
     prefsSave();
     /* 只记真正生效的那一套：审计与截图工具读这个键，不该读到 'auto' 这种中间态 */
     try { localStorage.setItem('beauty-cs-theme', real); } catch (e) { /* 隐私模式下写不进去 */ }
-    $('themeIcon').innerHTML = real === 'dark' ? ICON.sun : ICON.moon;
-    $('themeLabel').textContent = real === 'dark' ? '浅色' : '深色';
+    /* 明暗只在「网站设置 → 外观」里改：侧栏那个快捷开关已删掉，
+       同一个开关留两处只会让人怀疑两处是不是一回事 */
     syncThemeSeg();
   }
 
@@ -3470,12 +3628,25 @@
     try { localStorage.setItem('beauty-cs-prefs', JSON.stringify(state.prefs)); } catch (e) { /* ignore */ }
   }
 
+  /** 只导偏好：这是「我在这台机器上怎么用」的备份，不该带任何顾客数据 */
+  function prefsDownload(obj, name) {
+    try {
+      var blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      return name;
+    } catch (e) { return null; }
+  }
+
   function prefsLoad() {
     try {
       var raw = localStorage.getItem('beauty-cs-prefs');
       var o = raw ? JSON.parse(raw) : null;
       if (!o || typeof o !== 'object') return;
-      ['theme', 'startView', 'sprite', 'autoBubble', 'slaTick', 'riskToast'].forEach(function (k) {
+      ['theme', 'startView', 'sprite', 'autoBubble', 'slaTick', 'riskToast', 'rail', 'density', 'sendKey'].forEach(function (k) {
         if (o[k] != null) state.prefs[k] = o[k];
       });
     } catch (e) { /* 坏数据就当没存过 */ }
@@ -3498,6 +3669,17 @@
     }
   }
 
+  function syncSeg(id, attr, val) {
+    var box = $(id);
+    if (!box) return;
+    var btns = box.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i].getAttribute(attr) === val;
+      btns[i].classList.toggle('on', on);
+      btns[i].setAttribute('aria-pressed', String(on));
+    }
+  }
+
   function syncPrefsForm() {
     syncThemeSeg();
     if (!$('prefStartView')) return;
@@ -3506,6 +3688,9 @@
     $('prefAutoBubble').checked = state.prefs.autoBubble !== false;
     $('prefSlaTick').checked = state.prefs.slaTick !== false;
     $('prefRiskToast').checked = state.prefs.riskToast !== false;
+    syncSeg('prefDensity', 'data-density-opt', state.prefs.density || 'std');
+    syncSeg('prefRail', 'data-rail-opt', state.prefs.rail === 'off' ? 'off' : 'on');
+    syncSeg('prefSendKey', 'data-send-opt', state.prefs.sendKey === 'ctrl' ? 'ctrl' : 'enter');
     $('prefAccount').textContent = ACCT.me
       ? ACCT.me.name + ' · ' + ACCT.me.role + ' ' + ACCT.me.level
       : '未登录（本地演示）';
@@ -3535,7 +3720,54 @@
       state.bubbleOpen = false;
       safe('sprite', renderSprite);
     }
+    applyRail(state.prefs.rail, true);
+    applyDensity(state.prefs.density);
     syncPrefsForm();
+  }
+
+  /** 侧栏收起 / 展开：写在外壳属性上，偏好记本机。
+   *  「收起」是收成 64px 图标轨，不是消失 —— 图标还在、位置还在，视线不用重新找。
+   *  开关就是底部那颗按钮，收起后它仍然在原处（换成展开图标），焦点不必迁移。
+   *  silent 用于启动时套用偏好，不抢焦点 */
+  function applyRail(mode, silent) {
+    var v = mode === 'off' ? 'off' : 'on';
+    state.prefs.rail = v;
+    var app = $('app');
+    if (app) app.setAttribute('data-rail', v);
+    if (!silent) prefsSave();
+    var btn = $('btnRailHide');
+    if (btn) {
+      var on = v === 'on';
+      btn.setAttribute('aria-expanded', String(on));
+      btn.title = on ? '收起导航（只留图标）' : '展开导航（显示文字）';
+      /* 收成图标轨后 .rl 是 display:none —— 文字不再参与可访问名计算，
+         所以名字必须显式挂在 aria-label 上，否则读屏只报「按钮」 */
+      btn.setAttribute('aria-label', btn.title);
+      var lab = btn.querySelector('.rl');
+      if (lab) lab.textContent = on ? '收起导航' : '展开导航';
+    }
+    /* 导航项同理：图标轨里文字是 display:none，可访问名会掉 ——
+       收起时把 title 抄成 aria-label，展开时收回去（用 data 标记，避免误删设计好的标签） */
+    Array.prototype.forEach.call(document.querySelectorAll('.rail-nav .rail-btn'), function (b) {
+      if (v === 'off') {
+        if (!b.getAttribute('aria-label')) {
+          b.setAttribute('aria-label', b.title || '');
+          b.setAttribute('data-rail-label', '1');
+        }
+      } else if (b.getAttribute('data-rail-label')) {
+        b.removeAttribute('aria-label');
+        b.removeAttribute('data-rail-label');
+      }
+    });
+    syncPrefsForm();
+  }
+
+  /** 界面密度：只改行距与内边距，不改字号 —— 字号一动，所有对齐都得重算 */
+  function applyDensity(mode) {
+    var v = mode === 'compact' || mode === 'loose' ? mode : 'std';
+    state.prefs.density = v;
+    document.documentElement.setAttribute('data-density', v);
+    prefsSave();
   }
 
   /* ---------- 账号与坐席 ----------
@@ -3556,6 +3788,9 @@
     } catch (e) { /* ignore */ }
   }
 
+  /** 统一的接口调用：把「HTTP 错」与「连不上」分开。
+      门禁要靠这个区别决定是「口令不对」还是「服务端没开」——
+      两种情况的下一步动作完全相反，混成一句「登录失败」等于没说。 */
   function apiJson(url, opts) {
     opts = opts || {};
     var headers = {};
@@ -3565,9 +3800,17 @@
     opts.headers = headers;
     return fetch(url, opts).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (j) {
-        if (!r.ok) throw new Error((j && j.message) || ('HTTP ' + r.status));
+        if (!r.ok) {
+          var err = new Error((j && j.message) || ('HTTP ' + r.status));
+          err.status = r.status;
+          throw err;
+        }
         return j;
       });
+    }, function () {
+      var err = new Error('服务端不可达');
+      err.offline = true;
+      throw err;
     });
   }
 
@@ -3604,27 +3847,30 @@
     var hero = $('acctHero');
     if (!hero) return;
     var a = ACCT.me;
+    var signed = ACCT.source === 'server' && !!ACCT.me;
 
     if (a) {
-      var badgeCls = ACCT.source === 'server' ? (a.status === 'online' ? 'online' : 'busy') : '';
+      var badgeCls = signed ? (a.status === 'online' ? 'online' : 'busy') : '';
       hero.innerHTML =
         '<span class="acct-ava">' + esc(a.name.slice(0, 1)) + '</span>' +
         '<span class="acct-id"><b>' + esc(a.name) + '</b>' +
         '<span>' + esc(a.role + ' · ' + a.level + ' · 工号 ' + a.id) + '</span></span>' +
         '<span class="acct-badge ' + badgeCls + '">' +
-        (ACCT.source === 'server' ? statusText(a.status) : '本地演示 · 未登录') + '</span>';
+        (signed ? statusText(a.status) : '本机演示 · 未登录') + '</span>';
     } else {
       hero.innerHTML =
         '<span class="acct-ava">?</span>' +
-        '<span class="acct-id"><b>未登录</b><span>用下方工号登录，登录状态存服务端</span></span>' +
+        '<span class="acct-id"><b>未登录</b><span>用工号与口令进入，登录状态存服务端</span></span>' +
         '<span class="acct-badge">未登录</span>';
     }
 
+    /* 在线状态只有真会话能改：本机演示态改了也不会同步给别人，
+       按钮直接置灰，比让人点了没反应强 */
     var segs = $('acctPresence').querySelectorAll('button');
     for (var i = 0; i < segs.length; i++) {
       var on = !!a && segs[i].getAttribute('data-presence') === (a.status || 'online');
       segs[i].classList.toggle('on', on);
-      segs[i].disabled = ACCT.source !== 'server';
+      segs[i].disabled = !signed;
     }
 
     var cs = CF ? CF.stats() : null;
@@ -3636,18 +3882,18 @@
 
     $('acctList').innerHTML = ACCT.agents.length
       ? ACCT.agents.map(function (g) {
-          return '<button type="button" class="acct-row' + (a && a.id === g.id ? ' on' : '') +
-            '" data-agent="' + esc(g.id) + '">' +
+          var mine = signed && ACCT.me && ACCT.me.id === g.id;
+          return '<button type="button" class="acct-row' + (mine ? ' on' : '') +
+            '" data-agent="' + esc(g.id) + '"' + (mine ? ' aria-current="true"' : '') + '>' +
             '<span class="ar-ava">' + esc(g.name.slice(0, 1)) + '</span>' +
             '<span class="ar-t"><b>' + esc(g.name) + '</b>' +
             '<span>' + esc(g.role + ' · ' + g.level + ' · ' + g.id) + '</span></span>' +
-            '<span class="ar-s">' + esc(statusText(g.status)) + '</span></button>';
+            '<span class="ar-s">' + (mine ? '当前' : esc(statusText(g.status))) + '</span></button>';
         }).join('')
       : '<div class="form-note">服务端未提供坐席名单 —— 请用 <code>npm start</code> 启动后再打开。</div>';
 
-    $('acctNote').textContent = ACCT.agents.length
-      ? '演示口令统一为 1234；工号见上方坐席名单。登录状态与在线状态存服务端，换设备用同一工号可接上。'
-      : '服务端不可用，本地演示态不支持登录。启动服务后会自动出现坐席名单。';
+    if ($('btnGoLogin')) $('btnGoLogin').hidden = signed;
+    if ($('btnLogout')) $('btnLogout').hidden = !signed;
   }
 
   function openAccount() {
@@ -3688,24 +3934,253 @@
     });
   }
 
-  function doLogin() {
-    var id = String($('acctId').value || '').trim().toUpperCase();
-    var pin = String($('acctPin').value || '');
-    if (!id || !pin) { toast('请填工号与口令', 'warn'); return; }
+  /* ---------- 登录门禁 ----------
+     没登录就不给看内容：登录是独立一屏，不是抽屉。
+     ?gate=off 只留给自动化与「双击打开 index.html」的离线演示 —— 那时没有服务端，
+     门禁后面根本没有可校验的账号，硬拦只会让整个演示打不开。 */
+
+  var gateBooted = false;      // init 只能进一次
+  var gateAgentsLoaded = false;
+
+  function gateBypass() {
+    return /[?&]gate=off/.test(String(location.search || ''));
+  }
+
+  function gateErr(msg) {
+    var box = $('gateErr');
+    if (!box) return;
+    box.textContent = msg || '';
+    box.classList.toggle('on', !!msg);
+  }
+
+  function gateMode(mode) {
+    if ($('gateCheck')) $('gateCheck').hidden = mode !== 'check';
+    if ($('gateBody')) $('gateBody').hidden = mode === 'check';
+  }
+
+  function regErr(msg) {
+    var box = $('regErr');
+    if (!box) return;
+    box.textContent = msg || '';
+    box.classList.toggle('on', !!msg);
+  }
+
+  /** 登录 / 注册切换：同一张卡里换一组字段，不跳页也不弹层 */
+  function gateTab(which) {
+    var reg = which === 'reg';
+    if ($('gateLoginPane')) $('gateLoginPane').hidden = reg;
+    if ($('gateRegPane')) $('gateRegPane').hidden = !reg;
+    if ($('tabGateLogin')) {
+      $('tabGateLogin').setAttribute('aria-selected', String(!reg));
+      $('tabGateLogin').tabIndex = reg ? -1 : 0;
+    }
+    if ($('tabGateReg')) {
+      $('tabGateReg').setAttribute('aria-selected', String(reg));
+      $('tabGateReg').tabIndex = reg ? 0 : -1;
+    }
+    gateErr('');
+    regErr('');
+    var first = reg ? $('regId') : $('gateId');
+    if (first) first.focus();
+  }
+
+  /** 开门：摘掉门禁属性 → 第一次装配界面 */
+  function enterApp() {
+    document.body.removeAttribute('data-gate');
+    var g = $('gate');
+    if (g) g.hidden = true;
+    var app = $('app');
+    if (app) app.removeAttribute('inert');
+    /* 退出后再登录时界面已经装配过了：只刷新身份，不再重跑 init */
+    if (gateBooted) { renderMeCard(); renderAccountDrawer(); return; }
+    gateBooted = true;
+    init();
+  }
+
+  /** 关门：内容整体不可见，焦点交给工号框 */
+  function openGate(msg) {
+    var g = $('gate');
+    if (!g) return;
+    var app = $('app');
+    if (app) app.setAttribute('inert', '');
+    document.body.setAttribute('data-gate', '1');
+    g.hidden = false;
+    gateMode('form');
+    gateTab('login');          // 每次关门都回到「登录」：注册过的工号下次该走登录
+    gateErr(msg || '');
+    loadGateAgents();
+    window.setTimeout(function () {
+      try { $('gateId').focus(); } catch (e) { /* ignore */ }
+    }, 50);
+  }
+
+  /** 坐席名单：既是「这店里有谁」，也是「工号写什么」的提示 */
+  function loadGateAgents() {
+    if (gateAgentsLoaded) return;
+    var box = $('gateAgents');
+    if (!box) return;
+    apiJson('/api/agents').then(function (j) {
+      var list = (j && j.agents) || [];
+      gateAgentsLoaded = !!list.length;
+      if (!list.length) throw new Error('empty');
+      ACCT.agents = list;
+      box.innerHTML = list.map(function (g) {
+        return '<button type="button" class="gate-agent" data-gate-agent="' + esc(g.id) + '">' +
+          '<span class="ga-ava">' + esc(g.name.slice(0, 1)) + '</span>' +
+          '<span class="ga-t"><b>' + esc(g.name) + '</b>' +
+          '<span>' + esc(g.role + ' · ' + g.level) + '</span></span>' +
+          '<span class="ga-id num">' + esc(g.id) + '</span></button>';
+      }).join('');
+      if ($('gateAgentsHint')) $('gateAgentsHint').textContent = '口令统一 1234 · 点一位填入工号';
+    }).catch(function () {
+      /* 服务端不在：门禁后面没有账号可校验，只能退到本机演示 */
+      box.innerHTML = '<div class="gate-agents-empty">没连上服务端，读不到坐席名单。</div>';
+      if ($('btnGateLocal')) $('btnGateLocal').hidden = false;
+      gateErr('连不上服务端：请先运行 npm start 后用 http://localhost:5173 打开，或改用本机演示身份。');
+    });
+  }
+
+  function doGateLogin() {
+    var id = String(($('gateId') || {}).value || '').trim().toUpperCase();
+    var pin = String(($('gatePin') || {}).value || '');
+    if (!id) { gateErr('请填工号'); $('gateId').focus(); return; }
+    if (!pin) { gateErr('请填口令'); $('gatePin').focus(); return; }
+    var btn = $('btnGateLogin');
+    var label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '登录中…';
+    gateErr('');
     apiJson('/api/auth/login', { method: 'POST', body: JSON.stringify({ agentId: id, pin: pin }) })
       .then(function (j) {
         setAuthToken(j.token);
         ACCT.me = j.agent;
         ACCT.source = 'server';
-        $('acctId').value = j.agent.id;
-        $('acctPin').value = '';
-        renderMeCard();
-        renderAccountDrawer();
-        syncPrefsForm();
-        loadAgents();
-        toast('已登录：' + j.agent.name + ' · ' + statusText(j.agent.status), 'ok');
+        $('gatePin').value = '';
+        enterApp();
       })
-      .catch(function (e) { toast('登录失败：' + e.message, 'danger'); });
+      .catch(function (e) {
+        if (e && e.offline) {
+          gateErr('连不上服务端。检查 npm start 是否在跑，或改用本机演示身份。');
+          if ($('btnGateLocal')) $('btnGateLocal').hidden = false;
+        } else if (e && e.status === 401) {
+          gateErr('工号或口令不对。演示口令统一为 1234。');
+          $('gatePin').value = '';
+          $('gatePin').focus();
+        } else {
+          gateErr('登录失败：' + (e.message || '未知错误'));
+        }
+      })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = label;
+      });
+  }
+
+  /** 注册：建完工号直接是登录态（服务端返回令牌），不用再输一遍口令 */
+  function doGateRegister() {
+    var id = String(($('regId') || {}).value || '').trim().toUpperCase();
+    var name = String(($('regName') || {}).value || '').trim();
+    var role = String(($('regRole') || {}).value || '客服');
+    var pin = String(($('regPin') || {}).value || '');
+    var pin2 = String(($('regPin2') || {}).value || '');
+
+    /* 前端先挡一遍，只为少一次往返；真正的判据在服务端（register 里同一套规则） */
+    if (!/^[A-Z]{2,4}\d{2,4}$/.test(id)) {
+      regErr('工号要 2–4 位字母 + 2–4 位数字，例如 CS102'); $('regId').focus(); return;
+    }
+    if (name.length < 2 || name.length > 12) {
+      regErr('姓名请填 2–12 个字'); $('regName').focus(); return;
+    }
+    if (pin.length < 4) { regErr('口令至少 4 位'); $('regPin').focus(); return; }
+    if (pin !== pin2) { regErr('两次输入的口令不一样'); $('regPin2').focus(); return; }
+
+    var btn = $('btnGateReg');
+    var label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '创建中…';
+    regErr('');
+    apiJson('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ agentId: id, name: name, role: role, pin: pin }),
+    }).then(function (j) {
+      setAuthToken(j.token);
+      ACCT.me = j.agent;
+      ACCT.source = 'server';
+      $('regPin').value = '';
+      $('regPin2').value = '';
+      enterApp();
+      window.setTimeout(function () { toast('已创建工号 ' + j.agent.id + '，可以直接接待了', 'ok'); }, 500);
+    }).catch(function (e) {
+      if (e && e.offline) {
+        regErr('连不上服务端。注册要写入服务端账号库，请先运行 npm start。');
+        if ($('btnGateLocal')) $('btnGateLocal').hidden = false;
+      } else if (e && e.status === 409) {
+        regErr((e.message || '工号已被占用') + '；换成登录即可。');
+        $('regId').focus();
+      } else {
+        regErr('注册失败：' + ((e && (e.message || e.reason)) || '未知错误'));
+      }
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = label;
+    });
+  }
+
+  /** 本机演示：明确标注「未登录」，不假装是某个真实坐席 */
+  function doLocalEnter() {
+    ACCT.me = null;
+    ACCT.source = 'demo';
+    enterApp();
+    window.setTimeout(function () { toast('本机演示态：数据不落服务端，刷新即回默认', 'warn'); }, 600);
+  }
+
+  function bindGate() {
+    if ($('btnGateLogin')) $('btnGateLogin').addEventListener('click', doGateLogin);
+    if ($('btnGateReg')) $('btnGateReg').addEventListener('click', doGateRegister);
+    if ($('btnGateLocal')) $('btnGateLocal').addEventListener('click', doLocalEnter);
+    ['gateId', 'gatePin'].forEach(function (k) {
+      var el = $(k);
+      if (!el) return;
+      el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); doGateLogin(); }
+      });
+      el.addEventListener('input', function () { gateErr(''); });
+    });
+
+    /* 注册表单：回车一律提交，不让人用 Tab 找按钮；工号自动大写并去掉空格 */
+    ['regId', 'regName', 'regRole', 'regPin', 'regPin2'].forEach(function (k) {
+      var el = $(k);
+      if (!el) return;
+      el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); doGateRegister(); }
+      });
+      el.addEventListener('input', function () {
+        regErr('');
+        if (k === 'regId') el.value = String(el.value || '').toUpperCase().replace(/\s+/g, '');
+      });
+    });
+
+    /* 两个 tab：点切换 + 左右方向键切换（tablist 的标准键盘行为） */
+    [['tabGateLogin', 'login'], ['tabGateReg', 'reg']].forEach(function (pair) {
+      var el = $(pair[0]);
+      if (!el) return;
+      el.addEventListener('click', function () { gateTab(pair[1]); });
+      el.addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        gateTab(pair[1] === 'login' ? 'reg' : 'login');
+      });
+    });
+
+    if ($('gateAgents')) {
+      $('gateAgents').addEventListener('click', function (e) {
+        var b = e.target.closest('[data-gate-agent]');
+        if (!b) return;
+        $('gateId').value = b.getAttribute('data-gate-agent');
+        gateErr('');
+        $('gatePin').focus();
+      });
+    }
   }
 
   function doLogout() {
@@ -3716,8 +4191,31 @@
       renderMeCard();
       renderAccountDrawer();
       syncPrefsForm();
-      toast('已退出登录', 'ok');
+      closeAccount();
+      if (gateBypass()) toast('已退出登录', 'ok');
+      else openGate('已退出登录。');
     });
+  }
+
+  /** 切换坐席：口令不能代替 —— 退出当前账号，带着工号回到登录页 */
+  function switchAgent(id) {
+    if (ACCT.source === 'server' && ACCT.me && ACCT.me.id === id) {
+      toast('已经是这位坐席', 'ok');
+      return;
+    }
+    setAuthToken('');
+    ACCT.me = null;
+    ACCT.source = 'demo';
+    renderMeCard();
+    renderAccountDrawer();
+    if (gateBypass()) {
+      toast('本机演示态不支持切换坐席', 'warn');
+      return;
+    }
+    closeAccount();
+    openGate('');
+    if ($('gateId')) $('gateId').value = id;
+    if ($('gatePin')) $('gatePin').focus();
   }
 
   function setPresence(s) {
@@ -4305,24 +4803,30 @@
     renderComposerGuard();
   }
 
-  /* 关怀条目的三个动作（生成话术 / 预览话术 / 去接待）在雷达、顾客全景、话术助手三处复用 */
+  /* 关怀条目的动作（展开 / 生成话术 / 去接待）在雷达、顾客全景、话术助手三处复用 */
   function onCareClick(e) {
-    var b = e.target && e.target.closest ? e.target.closest('[data-care-draft],[data-care-view],[data-care-go]') : null;
+    var b = e.target && e.target.closest
+      ? e.target.closest('[data-care-fold],[data-care-draft],[data-care-go]') : null;
     if (!b) return false;
 
+    var fold = b.getAttribute('data-care-fold');
     var draft = b.getAttribute('data-care-draft');
-    var view = b.getAttribute('data-care-view');
     var go = b.getAttribute('data-care-go');
 
-    if (draft != null) {
+    if (fold != null) {
+      /* 点标题只翻这一条，不重绘整页 —— 重绘会打断正在读的那一段 */
+      var item = b.closest('.care-item');
+      var next = !(state.careFold[fold] === undefined
+        ? item.classList.contains('is-open')
+        : state.careFold[fold]);
+      state.careFold[fold] = next;
+      item.classList.toggle('is-open', next);
+      b.setAttribute('aria-expanded', next ? 'true' : 'false');
+      var body = item.querySelector('.ci-body');
+      if (body) body.hidden = !next;
+    } else if (draft != null) {
       var p = draft.split('|');
       careToComposer(Number(p[0]), p.slice(1).join('|'));
-    } else if (view != null) {
-      var q = view.split('|');
-      var key = Number(q[0]) + '|' + q.slice(1).join('|');
-      state.careOpen[key] = !state.careOpen[key];
-      if (state.view === 'care') renderCare();
-      else if (state.view === 'workbench') renderBand();
     } else if (go != null) {
       openContact(Number(go));
       switchView('workbench');
@@ -4448,15 +4952,36 @@
     $('btnClosePrefs').addEventListener('click', closePrefs);
     $('prefScrim').addEventListener('click', closePrefs);
 
-    $('btnTheme').addEventListener('click', function () {
-      var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-      applyTheme(next);
+    /* 导航收起 / 展开：同一颗按钮来回切（收起成图标轨 → 再点展开），键盘走同一个函数 */
+    $('btnRailHide').addEventListener('click', function () {
+      applyRail(state.prefs.rail === 'off' ? 'on' : 'off');
     });
 
     $('prefTheme').addEventListener('click', function (e) {
       var b = e.target.closest ? e.target.closest('[data-theme-opt]') : null;
       if (!b) return;
       applyTheme(b.getAttribute('data-theme-opt'));
+    });
+    $('prefDensity').addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-density-opt]') : null;
+      if (!b) return;
+      applyDensity(b.getAttribute('data-density-opt'));
+      syncPrefsForm();
+    });
+    /* 抽屉里的「左侧导航」与侧栏底部那个按钮是同一个状态，两边都改同一处 */
+    $('prefRail').addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-rail-opt]') : null;
+      if (!b) return;
+      applyRail(b.getAttribute('data-rail-opt'), true);   // 抽屉里改，不把焦点抢到顶栏
+      syncPrefsForm();
+    });
+    $('prefSendKey').addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-send-opt]') : null;
+      if (!b) return;
+      state.prefs.sendKey = b.getAttribute('data-send-opt') === 'ctrl' ? 'ctrl' : 'enter';
+      prefsSave();
+      syncPrefsForm();
+      toast(state.prefs.sendKey === 'ctrl' ? '已改为 Ctrl + 回车发送，单独回车换行' : '已改为回车直接发送', 'ok');
     });
     $('prefStartView').addEventListener('change', function () {
       state.prefs.startView = this.value;
@@ -4508,9 +5033,11 @@
     $('meCard').addEventListener('click', openAccount);
     $('btnCloseAccount').addEventListener('click', closeAccount);
     $('accountScrim').addEventListener('click', closeAccount);
-    $('btnLogin').addEventListener('click', doLogin);
-    $('acctPin').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
     $('btnLogout').addEventListener('click', doLogout);
+    $('btnGoLogin').addEventListener('click', function () {
+      closeAccount();
+      openGate('');
+    });
     $('acctPresence').addEventListener('click', function (e) {
       var b = e.target.closest ? e.target.closest('[data-presence]') : null;
       if (!b || b.disabled) return;
@@ -4519,10 +5046,7 @@
     $('acctList').addEventListener('click', function (e) {
       var b = e.target.closest ? e.target.closest('[data-agent]') : null;
       if (!b) return;
-      $('acctId').value = b.getAttribute('data-agent');
-      $('acctPin').value = '';
-      $('acctPin').focus();
-      toast('工号已填入 —— 输入口令即可切换（演示口令 1234）', 'info');
+      switchAgent(b.getAttribute('data-agent'));
     });
     $('btnToggleSprite').addEventListener('click', function () { toggleBubble(); });
     $('btnComposerMode').addEventListener('click', function () {
@@ -4677,7 +5201,14 @@
       renderComposerGuard();
     });
     $('composerInput').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.key !== 'Enter') return;
+      /* 默认回车即发；选了「Ctrl+回车发送」之后，单独回车就是换行 ——
+         长回复的坐席常常要分段落，回车即发会把半句话送出去 */
+      if (state.prefs.sendKey === 'ctrl') {
+        if (e.ctrlKey || e.metaKey) { e.preventDefault(); submitComposer(); }
+        return;
+      }
+      if (!e.shiftKey) {
         e.preventDefault();
         submitComposer();
       }
@@ -4722,6 +5253,8 @@
 
     /* 主动关怀雷达：先按等级筛人，再选人看事；条目上的三个动作仍由 onCareClick 统一处理 */
     $('careBody').addEventListener('click', function (e) {
+      var clr = e.target.closest ? e.target.closest('[data-care-clear]') : null;
+      if (clr) { setCareQuery(''); return; }
       var f = e.target.closest ? e.target.closest('[data-care-f]') : null;
       if (f) {
         state.careFilter = f.getAttribute('data-care-f');
@@ -4737,6 +5270,17 @@
         return;
       }
       onCareClick(e);
+    });
+
+    /* 搜索客户：输入即筛，输入框本身在卡头里、不参与重绘，所以焦点与光标都不会丢。
+       Esc 在输入框里等于清空（外面那层 Esc 链管的是浮层，不该被搜索抢走） */
+    $('careSearch').addEventListener('input', function () { setCareQuery(this.value); });
+    $('careSearch').addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && this.value) { e.stopPropagation(); setCareQuery(''); }
+    });
+    $('btnCareSearchClear').addEventListener('click', function () {
+      setCareQuery('');
+      try { $('careSearch').focus(); } catch (e) { /* ignore */ }
     });
     $('btnCareRefresh').addEventListener('click', function () {
       renderCare(true);
@@ -4871,7 +5415,10 @@
       else toast(r.reason, 'warn');
     });
 
-    $('btnAuditExport').addEventListener('click', function () {
+    /* 引擎面板与设置抽屉里各有一个「导出审计日志」按钮：id 不能重复（HTML 规范），
+       两处共用同一个处理函数即可 —— 曾经两处写同一个 id，$() 只取到第一个，
+       抽屉里那颗点了没反应。 */
+    function auditExport() {
       var P = window.Privacy;
       if (!P) { toast('隐私模块未加载（assets/privacy.js）', 'warn'); return; }
       var bundle = P.exportBundle({
@@ -4882,10 +5429,59 @@
       });
       var name = P.download(bundle);
       toast(name ? '审计日志已导出（已脱敏）：' + name : '当前环境不支持文件下载', 'ok');
+    }
+    ['btnAuditExport', 'btnAuditExportD'].forEach(function (id) {
+      var el = $(id);
+      if (el) el.addEventListener('click', auditExport);
+    });
+
+    /* 设置本身也能带走 / 重置：换机器演示时不必再点一遍六个开关 */
+    $('btnPrefExport').addEventListener('click', function () {
+      var stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      var name = prefsDownload({ app: '解语 Jieyu', kind: 'prefs', exportedAt: new Date().toISOString(), prefs: state.prefs },
+        'jieyu-prefs-' + stamp + '.json');
+      toast(name ? '设置已导出：' + name : '当前环境不支持文件下载', 'ok');
+    });
+
+    $('btnPrefReset').addEventListener('click', function () {
+      state.prefs = {
+        theme: 'light', startView: 'workbench', sprite: true, autoBubble: true,
+        slaTick: true, riskToast: true, rail: 'on', density: 'std', sendKey: 'enter',
+      };
+      prefsSave();
+      applyTheme('light');
+      applyDensity('std');
+      applyRail('on', true);
+      prefsApply();
+      toast('已恢复默认设置（账号与话术没动）', 'ok');
     });
     $('btnRecap').addEventListener('click', openRecap);
     $('btnCloseRecap').addEventListener('click', closeRecap);
     $('recapScrim').addEventListener('click', closeRecap);
+
+    /* 全局快捷键：设置抽屉里写的那张表必须是真的，否则不如不写。
+       只在「焦点不在输入框、也没有浮层打开」时才抢键 —— 打断别人打字是最烦的 */
+    document.addEventListener('keydown', function (e) {
+      var tag = (e.target && e.target.tagName) || '';
+      var typing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
+      var overlayOpen = !$('drawerRoot').hidden || !$('engineRoot').hidden || !$('accountRoot').hidden ||
+        !$('recapRoot').hidden || !$('chWiz').hidden || !$('kbEditor').hidden;
+
+      if (e.key === '/' && !typing && !overlayOpen && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        var box = state.view === 'care' ? $('careSearch')
+          : state.view === 'kb' ? $('kbSearch')
+            : state.view === 'workbench' ? $('contactSearch') : null;
+        if (box) { e.preventDefault(); box.focus(); box.select(); }
+        return;
+      }
+
+      if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-6]$/.test(e.key)) {
+        var order = ['workbench', 'care', 'channels', 'dashboard', 'kb', 'eval'];
+        var want = order[Number(e.key) - 1];
+        if (want) { e.preventDefault(); switchView(want); }
+      }
+    });
+
     document.addEventListener('keydown', function (e) {
       if (e.key !== 'Escape') return;
       /* 接入向导是最外层的模态（自带遮罩），Esc 优先关它 —— 之前它压根不在这个链里，
@@ -4971,7 +5567,10 @@
       toast('已恢复默认接口地址与模型', 'ok');
     });
 
-    $('btnResetSprite').addEventListener('click', spriteReset);
+    ['btnResetSprite', 'btnResetSpriteD'].forEach(function (id) {
+      var el = $(id);
+      if (el) el.addEventListener('click', spriteReset);
+    });
 
     $('btnTest').addEventListener('click', async function () {
       var btn = this;
@@ -5045,7 +5644,7 @@
        账号先按「未登录」渲染，服务端有令牌再换成真身 —— 不会先显示一个假身份 */
     prefsApply();
     renderMeCard();
-    refreshSession();
+    if (!ACCT.me) refreshSession();
     loadAgents();
     kbLoad().then(function () { if (state.view === 'kb') renderKb(); });
 
@@ -5060,9 +5659,40 @@
     }
   }
 
+  /* ---------- 启动：先过门禁，再装配界面 ----------
+     装配（init）只做一次，登录成功后才跑 —— 这样客人没登录时，
+     后台也不会先把会话、SSE、桌宠都跑起来，白留一堆痕迹。 */
+  function boot() {
+    prefsLoad();
+    /* 深链 ?theme=dark|light 优先于本机偏好 —— 让两套主题都能被自动化审计到。
+       本机存的是「模式」（浅色 / 深色 / 跟随系统），深链只覆盖本次会话 */
+    var mTheme = String(location.search || '').match(/[?&]theme=(dark|light)/);
+    applyTheme(mTheme ? mTheme[1] : state.prefs.theme);
+    bindGate();
+
+    if (gateBypass()) { enterApp(); return; }
+    if (!authToken()) { openGate(''); return; }
+
+    /* 有令牌不等于还有会话：过期 / 被服务端清掉都要回到登录页 */
+    gateMode('check');
+    apiJson('/api/auth/session').then(function (j) {
+      ACCT.me = j.agent;
+      ACCT.source = 'server';
+      enterApp();
+    }).catch(function (e) {
+      if (e && e.offline) {
+        openGate('连不上服务端：请先运行 npm start，或改用本机演示身份。');
+        if ($('btnGateLocal')) $('btnGateLocal').hidden = false;
+      } else {
+        setAuthToken('');
+        openGate('登录已失效，请重新登录。');
+      }
+    });
+  }
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', boot);
   } else {
-    init();
+    boot();
   }
 })();

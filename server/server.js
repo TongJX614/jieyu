@@ -371,6 +371,76 @@ function handleLogout(req, res) {
   sendJson(res, 200, { ok: true });
 }
 
+/* 注销本工号：只认令牌，只能删「自己」。
+   存在的理由是自动化测试要能把自己建的工号收走 —— 否则每跑一轮 end-to-end
+   就在账号库里留一个 QA 试号，「本店坐席」列表会越跑越脏。
+   越权面为零：没有目标 id 参数，删的永远是令牌对应的那个人。 */
+function handleUnregister(req, res) {
+  const a = agentOf(req);
+  if (!a) { sendJson(res, 401, { ok: false, message: '未登录或登录已过期' }); return; }
+  const db = loadDb();
+  const i = db.agents.findIndex((x) => x.id === a.id);
+  if (i < 0) { sendJson(res, 404, { ok: false, message: '账号不存在' }); return; }
+  db.agents.splice(i, 1);
+  saveDb();
+  /* 这个人的所有令牌一起作废：账号没了，会话不该还活着 */
+  sessions.forEach((s, tk) => { if (s.agentId === a.id) sessions.delete(tk); });
+  console.log('  [auth] ' + a.id + ' 已注销');
+  sendJson(res, 200, { ok: true, removed: a.id });
+}
+
+/* 自助注册：演示环境没有管理员发号，坐席自己建一个工号。
+   规则写死在这里，别让前端「看起来校验了」而服务端照单全收：
+   工号 2–4 位字母 + 2–4 位数字（CS102 / QA07），姓名 2–12 字，口令 4–32 位。
+   口令只存 sha256(salt:pin)，与种子坐席同一套；响应里永远不出现 salt / hash。 */
+const REG_ROLES = ['客服', '客服主管', '质检', '运营'];
+
+function handleRegister(req, res) {
+  readJson(req).then((p) => {
+    const db = loadDb();
+    const id = String(p.agentId || p.id || '').trim().toUpperCase();
+    const name = String(p.name || '').trim();
+    const role = String(p.role || '客服').trim();
+    const pin = String(p.pin || '');
+
+    if (!/^[A-Z]{2,4}\d{2,4}$/.test(id)) {
+      sendJson(res, 400, { ok: false, message: '工号格式：2–4 位字母 + 2–4 位数字，例如 CS102' });
+      return;
+    }
+    if (name.length < 2 || name.length > 12) {
+      sendJson(res, 400, { ok: false, message: '姓名请填 2–12 个字' });
+      return;
+    }
+    if (REG_ROLES.indexOf(role) === -1) {
+      sendJson(res, 400, { ok: false, message: '岗位只能是：' + REG_ROLES.join(' / ') });
+      return;
+    }
+    if (pin.length < 4 || pin.length > 32) {
+      sendJson(res, 400, { ok: false, message: '口令请设 4–32 位' });
+      return;
+    }
+    if (db.agents.some((x) => x.id === id)) {
+      sendJson(res, 409, { ok: false, message: '工号 ' + id + ' 已被占用，换一个或直接登录' });
+      return;
+    }
+
+    /* 新人是 L1：等级只影响工单派给谁，不该由注册人自己挑 */
+    const salt = crypto.randomBytes(8).toString('hex');
+    const a = {
+      id, name, role, level: 'L1', status: 'online',
+      salt, pinHash: hashPin(pin, salt),
+      createdAt: new Date().toISOString(),
+    };
+    db.agents.push(a);
+    saveDb();
+
+    const token = crypto.randomBytes(24).toString('hex');
+    sessions.set(token, { agentId: a.id, at: Date.now() });
+    console.log('  [auth] ' + a.id + ' ' + a.name + ' 注册并登录 · ' + a.role + ' · L1');
+    sendJson(res, 201, { ok: true, token, agent: publicAgent(a), created: true });
+  }).catch(() => sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' }));
+}
+
 function handleSession(req, res) {
   const a = agentOf(req);
   if (!a) { sendJson(res, 401, { ok: false, message: '未登录或登录已过期' }); return; }
@@ -585,10 +655,20 @@ const server = http.createServer((req, res) => {
     handleLogin(req, res);
     return;
   }
+  if (p === '/api/auth/register') {
+    if (req.method !== 'POST') { sendJson(res, 405, { ok: false, message: '仅支持 POST' }); return; }
+    handleRegister(req, res);
+    return;
+  }
   if (p === '/api/auth/session') { handleSession(req, res); return; }
   if (p === '/api/auth/logout') {
     if (req.method !== 'POST') { sendJson(res, 405, { ok: false, message: '仅支持 POST' }); return; }
     handleLogout(req, res);
+    return;
+  }
+  if (p === '/api/auth/unregister') {
+    if (req.method !== 'POST') { sendJson(res, 405, { ok: false, message: '仅支持 POST' }); return; }
+    handleUnregister(req, res);
     return;
   }
   if (p === '/api/presence') {
@@ -654,6 +734,7 @@ server.listen(PORT, () => {
   console.log('  订单查询   : GET  http://localhost:' + PORT + '/api/orders/allergy');
   console.log('  单笔订单   : GET  http://localhost:' + PORT + '/api/order/JD2026092611884');
   console.log('  坐席登录   : POST http://localhost:' + PORT + '/api/auth/login  （工号 CS013 / 口令 1234）');
+  console.log('  坐席注册   : POST http://localhost:' + PORT + '/api/auth/register  （工号 2–4 字母 + 2–4 数字）');
   console.log('  自建话术   : GET / POST http://localhost:' + PORT + '/api/kb');
   console.log('  数据文件   : ' + DB_FILE);
   console.log('  停止服务   : Ctrl + C');

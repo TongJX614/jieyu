@@ -283,7 +283,10 @@ check('ST12', '静态结构', '文档声明的测试数字与实际一致', () =
   const suiteBlock = /const SUITES = \[([\s\S]*?)\]/.exec(read('tests/run-all.js'));
   const suites = suiteBlock ? suiteBlock[1].split(',').map((s) => s.trim()).filter(Boolean).length : 0;
   const bcBlock = /const CHECKS = \[([\s\S]*?)\n\];/.exec(read('tests/browser-check.js'));
-  const bcCount = bcBlock ? (bcBlock[1].match(/name:\s*'/g) || []).length : 0;
+  /* 只数「用例条目」的 name：行首恰好四个空格。
+     探针里也会出现 name: 'xxx'（例如请求体里给新坐席起名），
+     不锚定行首就会把请求体也算成一条用例，数字虚高。 */
+  const bcCount = bcBlock ? (bcBlock[1].match(/^ {4}name:\s*'/gm) || []).length : 0;
 
   const bad = [];
   for (const d of ['README.md', '项目结构与功能说明.md']) {

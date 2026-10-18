@@ -487,7 +487,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         /* 浅色主题必须和深色一样被审计：默认主题只有深色，光看默认态
            会漏掉整个浅色配色 —— 这是最容易长期失守的地方。 */
         const sep = v.url.indexOf('?') === -1 ? '?' : '&';
-        await c.send('Page.navigate', { url: BASE + v.url + sep + 'theme=' + theme });
+        await c.send('Page.navigate', { url: BASE + v.url + sep + 'theme=' + theme + '&gate=off' });
         await sleep(2600);
         const before = (await c.send('Performance.getMetrics')).metrics;
         const probe = await evalJs(A11Y_PROBE);
@@ -560,7 +560,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     /* ============================ 2. 渲染 churn ============================ */
     if (want('churn')) {
-      await c.send('Page.navigate', { url: BASE + '/?s=1&play=1&nolive=1' });
+      await c.send('Page.navigate', { url: BASE + '/?s=1&play=1&nolive=1&gate=off' });
       await sleep(1500);
       report.churn = await evalJs(CHURN_PROBE);
       log('[churn] 演示期间重渲染批次 ' + report.churn.batches +
@@ -571,7 +571,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     /* ============================ 4. 交互成本（拖拽 / 泄漏） ============================ */
     if (want('interact')) {
-      await c.send('Page.navigate', { url: BASE + '/?s=1&nolive=1' });
+      await c.send('Page.navigate', { url: BASE + '/?s=1&nolive=1&gate=off' });
       await sleep(2500);
 
       const b1 = (await c.send('Performance.getMetrics')).metrics;
@@ -619,7 +619,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       /* reload 必须发生在取文本之前：reload 后样式表会拿到**新的 styleSheetId**，
          若先取文本再 reload，usage 里的新 id 对不上旧文本 → 覆盖率恒为 100% 未使用。 */
       headerLen.clear(); sheetsText.clear();
-      await c.send('Page.navigate', { url: BASE + '/?nolive=1' });
+      await c.send('Page.navigate', { url: BASE + '/?nolive=1&gate=off' });
       await sleep(2500);
       await c.send('Page.reload', { ignoreCache: true });
       await sleep(2500);

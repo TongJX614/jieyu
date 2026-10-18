@@ -105,13 +105,30 @@ const CHECKS = [
       await new Promise(r => setTimeout(r, 600));
       const cards = [...document.querySelectorAll('#evalBody .ev-card')];
       const miss = document.querySelectorAll('#evalBody .ev-misses li').length;
-      return {
+      const out = {
         metrics: cards.map(c => c.querySelector('.ev-k').textContent + '=' + c.querySelector('.ev-v').textContent),
         matrixCells: document.querySelectorAll('#evalBody .ev-matrix td').length,
         misses: miss,
         rows: document.querySelectorAll('#evalBody .ev-table tbody tr').length,
         meta: (document.getElementById('evalMeta') || {}).textContent || '',
+        /* 这页被说过「看不懂」：把「出题 → AI 答 → 对答案」三步和一条示范都钉住，
+           免得以后又被改回一屏百分比 */
+        question: ((document.querySelector('.ev-q') || {}).textContent || '').trim(),
+        steps: document.querySelectorAll('#evalBody .ev-step').length,
+        sample: !!document.querySelector('#evalBody .ev-sample'),
+        sampleFlag: ((document.querySelector('.evs-flag') || {}).textContent || '').trim(),
       };
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(out.metrics.length === 4, '评测应有四项指标，实为 ' + out.metrics.length);
+      want(out.matrixCells === 9, '风险 3×3 对照表应有 9 格，实为 ' + out.matrixCells);
+      want(out.rows > 0, '逐条用例应有明细行');
+      want(/判得准不准/.test(out.question), '首行应直接把这一页的问题讲出来，实为「' + out.question + '」');
+      want(out.steps === 3, '「出题 / AI 答 / 对答案」三步应齐全，实为 ' + out.steps);
+      want(out.sample === true, '应有一条示范用例（AI 判 vs 人工标）');
+      want(/判对|判错/.test(out.sampleFlag), '示范用例应给出判对 / 判错结论，实为「' + out.sampleFlag + '」');
+      if (bad.length) throw new Error('评测页断言失败：' + bad.join(' | '));
+      return out;
     })()`,
   },
   {
@@ -1243,43 +1260,40 @@ const CHECKS = [
     })()`,
   },
   {
-    /* 账号：登录状态存服务端，换设备用同一工号能接上。
-       端到端要钉的是「点了登录，底部身份卡真的变成那个人」——
-       单测测不到 localStorage 与界面渲染之间的那道接缝。 */
-    name: 'account-login',
+    /* 账号抽屉：身份卡点开回答「我是谁、什么状态、换谁值班」。
+       登录不在这里 —— 登录是独立一页，所以抽屉里只该有一条退出入口，
+       没登录时给「去登录」，不该再摆一套工号口令输入框。 */
+    name: 'account-drawer',
     url: '/?view=workbench&nolive=1',
     wait: 2400,
     screenshot: true,
     probe: `(async () => {
       const sleep = (ms) => new Promise(r => setTimeout(r, ms));
       const q = (s) => document.querySelector(s);
-      const txt = (s) => ((q(s) || {}).textContent || '').replace(/\\s+/g, ' ').trim();
       const out = {};
       await sleep(1300);
-      out.before = txt('#meName');
       q('#meCard').focus();
       q('#meCard').click();
       await sleep(420);
       out.opened = !document.getElementById('accountRoot').hidden;
       out.rows = document.querySelectorAll('#acctList .acct-row').length;
-      q('#acctId').value = 'CS013';
-      q('#acctPin').value = '1234';
-      q('#btnLogin').click();
-      await sleep(1200);
-      out.after = txt('#meName');
-      out.badge = (q('#acctHero .acct-badge') || {}).textContent || '';
-      out.token = !!localStorage.getItem('beauty-cs-token');
+      out.noLoginForm = !document.getElementById('acctId') && !document.getElementById('btnLogin');
+      out.presenceDisabled = [...document.querySelectorAll('#acctPresence button')].every(b => b.disabled);
+      out.goLogin = !q('#btnGoLogin').hidden;
+      out.logoutHidden = q('#btnLogout').hidden;
+      q('#btnCloseAccount').click();
+      await sleep(260);
+      out.focusBack = document.activeElement ? document.activeElement.id : '';
       const bad = [];
       const want = (c, l) => { if (!c) bad.push(l); };
       want(out.opened === true, '点身份卡应打开账号面板');
       want(out.rows === 3, '坐席名单应有 3 人，实为 ' + out.rows);
-      want(out.after === '佟佳鑫', '登录后身份卡应显示坐席姓名，实为「' + out.after + '」');
-      want(out.token === true, '登录应把令牌写进本机');
-      /* 登出恢复现场，别把登录态留给下一个检查项 */
-      const lo = q('#btnLogout');
-      if (lo) { lo.click(); await sleep(800); }
-      out.afterLogout = txt('#meName');
-      if (bad.length) throw new Error('账号登录断言失败：' + bad.join(' | '));
+      want(out.noLoginForm === true, '账号面板里不该再有登录表单（登录是独立一页）');
+      want(out.presenceDisabled === true, '未登录时在线状态应不可改');
+      want(out.goLogin === true, '未登录时账号面板应给「去登录」入口');
+      want(out.logoutHidden === true, '未登录时不该出现「退出登录」');
+      want(out.focusBack === 'meCard', '关闭后焦点应还给身份卡，实为 ' + out.focusBack);
+      if (bad.length) throw new Error('账号面板断言失败：' + bad.join(' | '));
       return out;
     })()`,
   },
@@ -1336,6 +1350,361 @@ const CHECKS = [
       want(out.focusAfterClose === 'btnKbNew',
         '关闭后焦点应还给「新增话术」，实为 ' + out.focusAfterClose);
       if (bad.length) throw new Error('话术库断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 关怀页搜索客户：一百位客户时索引列唯一的用法。
+       三件事必须成立 —— 输入即筛、命中数说实话、清空能回到全量；
+       另外输入框不在被重绘的那棵子树里，否则每敲一个字就丢焦点。 */
+    name: 'care-search',
+    url: '/?view=care&nolive=1&today=2026-10-14',
+    wait: 2600,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const out = {};
+      await sleep(1200);
+      const box = q('#careSearch');
+      const names = () => [...document.querySelectorAll('#careBody .care-card .cc-name')].map(n => n.textContent);
+      out.all = names();
+      out.total = out.all.length;
+
+      box.focus();
+      box.value = '苏';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(220);
+      out.hitNames = names();
+      out.hitText = (q('#careHit') || {}).textContent || '';
+      out.hitShown = !q('#careHit').hidden;
+      out.clearShown = !q('#btnCareSearchClear').hidden;
+      out.focusKept = document.activeElement === box;
+
+      /* 搜一个必然没有的词：空态要说清是「搜不到」，而不是「没有关怀条件」 */
+      box.value = 'zzz不存在';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(200);
+      out.emptyText = ((q('#careBody .care-empty') || {}).textContent || '').replace(/\\s+/g, ' ').trim();
+
+      q('#btnCareSearchClear').click();
+      await sleep(220);
+      out.backNames = names();
+      out.hitHiddenAfter = q('#careHit').hidden;
+
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(out.total >= 3, '关怀页应有至少 3 位客户，实为 ' + out.total);
+      want(out.hitNames.length === 1 && out.hitNames[0] === '苏晚晴',
+        '搜「苏」应只剩苏晚晴，实为 ' + JSON.stringify(out.hitNames));
+      want(/命中 1 \\/ \\d+ 位/.test(out.hitText), '命中数应写成「命中 1 / N 位」，实为 ' + out.hitText);
+      want(out.clearShown === true, '有搜索词时应出现清空按钮');
+      want(out.focusKept === true, '筛列表时焦点不能丢，实为 ' + (document.activeElement && document.activeElement.id));
+      want(/没有匹配/.test(out.emptyText), '搜不到时应说明是搜不到，实为 ' + out.emptyText);
+      want(out.backNames.length === out.total, '清空后应回到全量 ' + out.total + ' 位，实为 ' + out.backNames.length);
+      want(out.hitHiddenAfter === true, '清空后命中数应隐藏');
+      if (bad.length) throw new Error('关怀搜索断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 侧栏收起：演示与投屏要能把导航整块让出去，且必须留一条回路。
+       外壳铺满窗口也在这里一起钉住 —— 曾经 max-width:1920 + margin:auto
+       让宽窗口下整块应用浮在中间，侧栏不再是「最左」。 */
+    name: 'rail-toggle',
+    url: '/?view=channels&nolive=1',
+    wait: 2400,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const rect = (el) => { const b = el.getBoundingClientRect(); return Math.round(b.x) + ',' + Math.round(b.width); };
+      const out = {};
+      await sleep(1100);
+      const app = q('#app');
+      const rail = q('.rail');
+      out.fill = { appX: Math.round(app.getBoundingClientRect().x), appW: Math.round(app.getBoundingClientRect().width), win: window.innerWidth };
+      out.railBefore = rect(rail);
+
+      /* 用键盘路径进入：先聚焦再点。按钮不会消失，焦点就该原地不动 ——
+         这是「收一半」相对「全收」真正的收益（全收时必须手动搬家） */
+      q('#btnRailHide').focus();
+      q('#btnRailHide').click();
+      await sleep(280);
+      out.attrOff = app.getAttribute('data-rail');
+      out.railDisplay = getComputedStyle(rail).display;
+      out.railOffRect = rect(rail);
+      out.labelHidden = getComputedStyle(q('.rail-nav .rail-btn .rl')).display;
+      out.markShown = getComputedStyle(q('.rail-brand .brand-mark')).display;
+      out.icCollapse = getComputedStyle(q('#btnRailHide .ic-collapse')).display;
+      out.icExpand = getComputedStyle(q('#btnRailHide .ic-expand')).display;
+      out.ariaOff = q('#btnRailHide').getAttribute('aria-expanded');
+      out.titleOff = q('#btnRailHide').title;
+      /* 图标轨里文字是 display:none，可访问名必须显式挂上，否则读屏只报「按钮」 */
+      out.toggleLabel = q('#btnRailHide').getAttribute('aria-label') || '';
+      out.navLabel = q('.rail-nav .rail-btn[data-view="care"]').getAttribute('aria-label') || '';
+      out.focusAfterHide = document.activeElement && document.activeElement.id;
+      out.prefsOff = JSON.parse(localStorage.getItem('beauty-cs-prefs') || '{}').rail;
+
+      q('#btnRailHide').click();
+      await sleep(280);
+      out.attrOn = app.getAttribute('data-rail');
+      out.railAfter = rect(rail);
+      out.labelShown = getComputedStyle(q('.rail-nav .rail-btn .rl')).display;
+      out.ariaOn = q('#btnRailHide').getAttribute('aria-expanded');
+      out.navLabelOn = q('.rail-nav .rail-btn[data-view="care"]').getAttribute('aria-label');
+      out.focusAfterShow = document.activeElement && document.activeElement.id;
+
+      /* 设置抽屉里那个「左侧导航」必须改的是同一个状态 */
+      q('#btnSettings').click();
+      await sleep(260);
+      q('#prefRail [data-rail-opt="off"]').click();
+      await sleep(240);
+      out.attrFromPrefs = app.getAttribute('data-rail');
+      out.railFromPrefs = rect(rail);
+      q('#prefRail [data-rail-opt="on"]').click();
+      await sleep(200);
+      q('#btnClosePrefs').click();
+
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(out.fill.appX === 0, '外壳应贴窗口最左，实为 x=' + out.fill.appX);
+      want(out.fill.appW === out.fill.win, '外壳应铺满窗口（' + out.fill.win + '），实为 ' + out.fill.appW);
+      want(out.attrOff === 'off', '收起应写 data-rail=off，实为 ' + out.attrOff);
+      want(out.railDisplay !== 'none', '收起应只收一半：导航不能整块退场');
+      want(Math.round(parseFloat(out.railOffRect.split(',')[1])) === 64, '收起后导航应收到 64px，实为 ' + out.railOffRect);
+      want(out.labelHidden === 'none', '收起后文字标签应收起，实为 ' + out.labelHidden);
+      want(out.markShown !== 'none', '收起后应换成 JY 单体标志，实为 ' + out.markShown);
+      want(out.icCollapse === 'none' && out.icExpand !== 'none', '收起后图标应换成「展开」箭头');
+      want(out.ariaOff === 'false', '收起后 aria-expanded 应为 false，实为 ' + out.ariaOff);
+      want(out.titleOff.indexOf('展开') >= 0, '收起后 title 应改成「展开」，实为 ' + out.titleOff);
+      want(out.toggleLabel.indexOf('展开') >= 0, '收起后按钮要有可访问名（含「展开」），实为「' + out.toggleLabel + '」');
+      want(out.navLabel.length > 0, '图标轨里导航项要有可访问名，实为「' + out.navLabel + '」');
+      want(out.navLabelOn === null, '展开后导航项应回到「用文字当名字」，实为「' + out.navLabelOn + '」');
+      want(out.focusAfterHide === 'btnRailHide', '按钮没有消失，焦点应留在它身上，实为 ' + out.focusAfterHide);
+      want(out.prefsOff === 'off', '收起状态应写进偏好');
+      want(out.attrOn === 'on' && Math.round(parseFloat(out.railAfter.split(',')[1])) === 176, '展开后导航应回到 176px，实为 ' + out.railAfter);
+      want(out.labelShown !== 'none', '展开后文字标签应回来，实为 ' + out.labelShown);
+      want(out.ariaOn === 'true', '展开后 aria-expanded 应为 true，实为 ' + out.ariaOn);
+      want(out.attrFromPrefs === 'off', '设置里的开关应改同一处状态，实为 ' + out.attrFromPrefs);
+      want(Math.round(parseFloat(out.railFromPrefs.split(',')[1])) === 64, '设置里切「只留图标」也要真的收到 64px，实为 ' + out.railFromPrefs);
+      if (bad.length) throw new Error('侧栏断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 网站设置：分组要真的存在、开关要真的生效、恢复默认要真的还原。
+       设置抽屉里最容易出现「写了一个好看的开关但没人接」——
+       所以每一项都点一遍，读的是 documentElement 上的实际属性。 */
+    name: 'prefs-panel',
+    url: '/?view=workbench&nolive=1',
+    wait: 2400,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const out = {};
+      await sleep(1200);
+      q('#btnSettings').click();
+      await sleep(300);
+      out.groups = [...document.querySelectorAll('#drawerRoot .form-block > label')]
+        .map(l => l.textContent.trim()).filter(t => t && t.length < 12);
+      out.kbdRows = document.querySelectorAll('.kbd-row').length;
+
+      q('#prefDensity [data-density-opt="compact"]').click();
+      await sleep(150);
+      out.density = document.documentElement.getAttribute('data-density');
+      out.cellPad = getComputedStyle(q('.contact')).paddingTop;
+
+      q('#prefSendKey [data-send-opt="ctrl"]').click();
+      await sleep(120);
+      out.sendKey = JSON.parse(localStorage.getItem('beauty-cs-prefs') || '{}').sendKey;
+
+      q('#btnPrefReset').click();
+      await sleep(260);
+      const p = JSON.parse(localStorage.getItem('beauty-cs-prefs') || '{}');
+      out.afterReset = { density: p.density, rail: p.rail, sendKey: p.sendKey, theme: p.theme };
+      out.densityAfterReset = document.documentElement.getAttribute('data-density');
+      q('#btnClosePrefs').click();
+
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      ['外观', '界面密度', '左侧导航', '打开时先看哪一屏', '回复框的发送键', '数据与隐私', '快捷键'].forEach((t) => {
+        want(out.groups.indexOf(t) >= 0, '设置里应有「' + t + '」一组');
+      });
+      want(out.kbdRows >= 4, '快捷键表至少 4 行，实为 ' + out.kbdRows);
+      want(out.density === 'compact', '选紧凑后应写进 data-density，实为 ' + out.density);
+      want(parseFloat(out.cellPad) <= 9, '紧凑档应把会话行内边距压到 8px，实为 ' + out.cellPad);
+      want(out.sendKey === 'ctrl', '发送键选择应落盘，实为 ' + out.sendKey);
+      want(out.afterReset.density === 'std' && out.afterReset.rail === 'on' &&
+        out.afterReset.sendKey === 'enter' && out.afterReset.theme === 'light',
+        '恢复默认应还原四项，实为 ' + JSON.stringify(out.afterReset));
+      want(out.densityAfterReset === 'std', '恢复默认后界面密度应回到标准，实为 ' + out.densityAfterReset);
+      if (bad.length) throw new Error('设置面板断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 登录门禁：没登录就不该看见内容。
+       钉四件事 —— 进门时应用不可见、坐席名单来自服务端、错口令有话说、退出口令后重新关上。 */
+    name: 'login-gate',
+    url: '/',
+    gate: true,
+    wait: 2800,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const out = {};
+      await sleep(1200);
+      out.gated = document.body.getAttribute('data-gate') === '1';
+      out.appHidden = getComputedStyle(document.getElementById('app')).visibility === 'hidden';
+      out.gateShown = getComputedStyle(document.getElementById('gate')).display !== 'none';
+      out.agents = document.querySelectorAll('#gateAgents .gate-agent').length;
+
+      /* 点一位坐席应把工号填进去：登录页只该让人做两件事 */
+      const chip = q('#gateAgents .gate-agent');
+      out.chipFill = '';
+      if (chip) { chip.click(); await sleep(160); out.chipFill = q('#gateId').value; }
+
+      q('#gatePin').value = '0000';
+      q('#btnGateLogin').click();
+      await sleep(1000);
+      out.errWrongPin = (q('#gateErr').textContent || '').trim();
+      out.stillGated = document.body.getAttribute('data-gate') === '1';
+
+      q('#gateId').value = 'CS013';
+      q('#gatePin').value = '1234';
+      q('#btnGateLogin').click();
+      await sleep(1800);
+      out.gateAfter = document.body.getAttribute('data-gate');
+      out.meName = ((q('#meName') || {}).textContent || '').trim();
+      out.token = !!localStorage.getItem('beauty-cs-token');
+
+      /* 退出必须重新关上，并把令牌清干净 */
+      q('#btnLogout').click();
+      await sleep(1200);
+      out.gatedAgain = document.body.getAttribute('data-gate') === '1';
+      out.tokenAfter = !!localStorage.getItem('beauty-cs-token');
+      try { localStorage.removeItem('beauty-cs-token'); } catch (e) { /* ignore */ }
+
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(out.gated === true, '未登录时页面应处于门禁态');
+      want(out.appHidden === true, '未登录时应用内容必须不可见');
+      want(out.gateShown === true, '门禁页应可见');
+      want(out.agents === 3, '登录页应列出 3 位坐席，实为 ' + out.agents);
+      want(out.chipFill === 'CS013', '点坐席应把工号填进输入框，实为「' + out.chipFill + '」');
+      want(out.errWrongPin !== '', '口令错误应给出可读提示');
+      want(out.stillGated === true, '口令错误时必须仍停在门禁页');
+      want(out.gateAfter === null, '登录成功后应摘掉门禁');
+      want(out.meName === '佟佳鑫', '登录后身份卡应显示坐席姓名，实为「' + out.meName + '」');
+      want(out.token === true, '登录应把令牌写进本机');
+      want(out.gatedAgain === true, '退出登录后应重新回到门禁');
+      want(out.tokenAfter === false, '退出后本机令牌应清空');
+      if (bad.length) throw new Error('登录门禁断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 注册：登录页的第二条岔路。跑完必须把自己建的工号收走 ——
+       这条用例每跑一次就往账号库里塞一个人，「本店坐席」列表会越跑越脏，
+       所以结尾调 /api/auth/unregister（只能注销令牌对应的自己）。 */
+    name: 'register-gate',
+    url: '/',
+    gate: true,
+    wait: 2800,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const post = (path, body, tk) => fetch(path, {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, tk ? { Authorization: 'Bearer ' + tk } : {}),
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const out = {};
+
+      /* 上一次跑到一半崩了会留下这个试号：先登录再注销，保证起点干净 */
+      out.purge = 'absent';
+      const pre = await post('/api/auth/login', { agentId: 'QA900', pin: '1234' });
+      if (pre.status === 200) {
+        const pj = await pre.json();
+        const pr = await post('/api/auth/unregister', null, pj.token);
+        out.purge = 'purged:' + pr.status;
+      }
+
+      await sleep(1200);
+      out.gated = document.body.getAttribute('data-gate') === '1';
+
+      /* 切到注册：同一张卡里换字段，登录区必须整块隐藏 */
+      q('#tabGateReg').click();
+      await sleep(150);
+      out.regShown = !q('#gateRegPane').hidden;
+      out.loginHidden = q('#gateLoginPane').hidden === true;
+      out.tabRegSelected = q('#tabGateReg').getAttribute('aria-selected');
+      out.focusOnReg = document.activeElement && document.activeElement.id;
+
+      /* 客户端校验：工号格式 / 两次口令不一致 —— 不该发请求，也不该放行 */
+      q('#regId').value = 'AB';
+      q('#regName').value = '测试坐席';
+      q('#regPin').value = '1234';
+      q('#regPin2').value = '1234';
+      q('#btnGateReg').click();
+      await sleep(220);
+      out.errBadId = (q('#regErr').textContent || '').trim();
+      out.stillGatedBadId = document.body.getAttribute('data-gate') === '1';
+
+      q('#regId').value = 'QA900';
+      q('#regPin2').value = '9999';
+      q('#btnGateReg').click();
+      await sleep(220);
+      out.errMismatch = (q('#regErr').textContent || '').trim();
+
+      /* 正路：建号即登录，不用再输一遍口令 */
+      q('#regPin2').value = '1234';
+      q('#btnGateReg').click();
+      await sleep(2200);
+      out.gateAfter = document.body.getAttribute('data-gate');
+      out.meName = ((q('#meName') || {}).textContent || '').trim();
+      out.token = !!localStorage.getItem('beauty-cs-token');
+      const list = await (await fetch('/api/agents')).json();
+      const mine = (list.agents || []).filter((a) => a.id === 'QA900')[0];
+      out.created = mine ? mine.name + '/' + mine.role + '/' + mine.level : null;
+      out.noSecret = mine ? !('pinHash' in mine) && !('salt' in mine) : false;
+
+      /* 重复注册必须被服务端挡住（前端校验不能当判据） */
+      const dup = await post('/api/auth/register', { agentId: 'QA900', name: '另一个', role: '客服', pin: '1234' });
+      out.dupStatus = dup.status;
+
+      /* 收尾：注销自己 + 清本机令牌，账号库回到 3 个人 */
+      const tk = localStorage.getItem('beauty-cs-token');
+      const del = await post('/api/auth/unregister', null, tk);
+      out.cleanup = del.status;
+      const after = await (await fetch('/api/agents')).json();
+      out.agentsAfter = (after.agents || []).length;
+      out.sessionAfter = (await fetch('/api/auth/session', { headers: { Authorization: 'Bearer ' + tk } })).status;
+      try { localStorage.removeItem('beauty-cs-token'); } catch (e) { /* ignore */ }
+
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+      want(out.gated === true, '未登录时应停在门禁页');
+      want(out.regShown === true, '点「注册」应显示注册表单');
+      want(out.loginHidden === true, '切到注册后登录区要整块隐藏');
+      want(out.tabRegSelected === 'true', '注册 tab 的 aria-selected 应为 true');
+      want(out.focusOnReg === 'regId', '切到注册后焦点应落在工号框，实为 ' + out.focusOnReg);
+      want(out.errBadId.indexOf('工号') >= 0, '工号格式不对应给出可读提示，实为「' + out.errBadId + '」');
+      want(out.stillGatedBadId === true, '格式错误时不能放行');
+      want(out.errMismatch.indexOf('不一样') >= 0, '两次口令不一致应提示，实为「' + out.errMismatch + '」');
+      want(out.gateAfter === null, '注册成功应直接进门禁，实为 ' + out.gateAfter);
+      want(out.meName === '测试坐席', '进门后身份卡应显示新坐席，实为「' + out.meName + '」');
+      want(out.token === true, '注册成功应拿到令牌');
+      want(out.created === '测试坐席/客服/L1', '账号库应有新工号且从 L1 起，实为 ' + out.created);
+      want(out.noSecret === true, '坐席列表不能带出 salt / pinHash');
+      want(out.dupStatus === 409, '重复工号应返回 409，实为 ' + out.dupStatus);
+      want(out.cleanup === 200, '测试工号应能注销自己，实为 ' + out.cleanup);
+      want(out.agentsAfter === 3, '注销后账号库应回到 3 人，实为 ' + out.agentsAfter);
+      want(out.sessionAfter === 401, '注销后旧令牌应立即失效，实为 ' + out.sessionAfter);
+      if (bad.length) throw new Error('注册断言失败：' + bad.join(' | '));
       return out;
     })()`,
   },
@@ -1419,7 +1788,10 @@ function cdp(ws) {
     for (const chk of CHECKS) {
       if (ONLY && chk.name.indexOf(ONLY) === -1) continue;
       pageErrors = []; consoleErrors = [];
-      await c.send('Page.navigate', { url: BASE + chk.url });
+      /* 门禁默认关闭：除 login-gate 外，所有检查都从「已进入」的状态起跑，
+         否则每条断言都会撞在登录页上，测不到任何业务行为 */
+      const nav = chk.gate ? chk.url : chk.url + (chk.url.indexOf('?') === -1 ? '?' : '&') + 'gate=off';
+      await c.send('Page.navigate', { url: BASE + nav });
       await new Promise((r) => setTimeout(r, chk.wait || 2000));
       let probe = null, probeErr = null;
       try {
