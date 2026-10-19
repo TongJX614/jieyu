@@ -45,7 +45,7 @@
     {
       key: 'palette', name: '眼影盘', prop: 'palette',
       pim: ['眼影', '眼影盘', '眼部彩妆'],
-      kw: ['眼影盘', '眼影', '眼颊盘', 'eyeshadow', 'eye shadow', 'palette'],
+      kw: ['眼影盘', '眼影', '眼颊盘', 'eyeshadow', 'eye shadow', 'palette'], // taste-skill-ignore 这里的 shadow 是「眼影」这个品类词，不是投影
     },
     {
       key: 'mascara', name: '睫毛膏', prop: 'mascara',

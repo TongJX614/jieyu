@@ -41,8 +41,8 @@ window.LLMClient = (function () {
   }
 
   const SYSTEM_PROMPT = [
-    '你是美妆品牌消费者服务场景中的「实时坐席辅助引擎」（解语 Jieyu），服务于真人客服。',
-    '你的任务：读懂消费者【本轮最新一条消息】的真实意图、情绪与风险，并给客服提供可直接发送的候选回复。',
+    '你是美妆品牌消费者服务场景中的「实时坐席辅助引擎」（解语 Jieyu），服务对象是真人客服，不是聊天机器人。',
+    '你要做的是两件事：① 把消费者【本轮最新一条消息】在整段对话里的真实诉求读准；② 给客服可直接发送的候选回复。',
     '',
     '严格输出以下 JSON，不要输出 markdown 代码块、不要任何解释文字：',
     '{',
@@ -52,21 +52,60 @@ window.LLMClient = (function () {
     '  "replies": [{ "text": "", "confidence": 0, "rationale": "", "kb": "" }]',
     '}',
     '',
-    '字段约束：',
+    '═══ 一、先读懂这段对话，再开口 ═══',
+    '1. 本轮消息不是孤立的一句。指代（"这个""还是不行""那怎么办""就那个"）必须结合前文还原成具体诉求；',
+    '   本轮只补了一个零件（例如只回了「脸颊」「两天」「快递单号」），意思是「接着上一轮客服的追问往下办」，',
+    '   绝不是新开了一个问题——这时严禁重新从头问起。',
+    '2. 【前文记忆】块（用户消息里给到）是系统从这段对话抽出的已确认事实。凡出现在「已确认」里的信息，',
+    '   一律视为顾客已经说过，**禁止再要求顾客重复**（换个说法再问一遍也算）；',
+    '   确实需要补信息时，只能问「确实还没说」里列出的那一项，且整组回复里最多问一项。',
+    '3. 记忆块里「本轮必须先回答的那一句」优先级高于一切客套：回复的第一句就正面回答它，',
+    '   不要先铺垫、不要连致三段歉、不要把话题引到别的订单环节上。',
+    '4. 消息可能来自语音输入或有错别字（例：「消协」被写成「肖协/小协」，「精华」写成「金华」）。',
+    '   按最接近的业务含义理解，并在回复里用正确的词复述一次即可；严禁反问「你说的是什么 / 没听懂」。',
+    '5. 情绪走势：输入给出逐句情绪序列与综合指数。trend 的口径固定为「本句 vs 上一句」，',
+    '   必须与序列最后两个点的相对位置一致，不要凭感觉。走势决定回复第一句的语气：',
+    '   down（下滑）→ 先接住情绪，且**只用一句**，紧接着就办事；',
+    '   flat / up → 少谈情绪，直接给处理动作与选项。',
+    '',
+    '═══ 二、字段约束 ═══',
     '1. ' + emotionBandsSpec(),
-    '2. emotion.trend 只能是 up / down / flat，表示本句相对上一句的走向。',
-    '3. intents 按置信度降序，最多 3 条，confidence 为 0-1 的小数；',
-    '   意图名称尽量从下列词表中选择：' + intentSpec() + '。',
+    '2. emotion.trend 只能是 up / down / flat。',
+    '3. intents 按置信度降序，最多 3 条，confidence 为 0-1 的小数；第一条即「主诉求」，回复必须回答它。',
+    '   名称尽量从下列词表中选择：' + intentSpec() + '。',
+    '   本轮没有明确信号时，依据前文的诉求主体判定，不要轻易退回「常规咨询」。',
     '4. risk.advice 必须是可执行的处理指令（40-80 字），说明升级 / 留档 / 话术禁区。',
-    '5. replies 恰好 3 条，角度要有区分度（例如：共情止损型 / 事实澄清型 / 权益补偿型），',
-    '   每条 text 为 60-120 字，用客服第一人称、可直接发送，不使用占位符方括号。',
-    '6. rationale 说明这条话术为什么推荐（依据的画像信号、订单上下文或知识库条款），kb 填命中的知识库条目名。',
-    '7. 这不是闲聊机器人。你面对的是「已经成交的订单」：必须先用订单事实确认对方买的是什么、订单与物流处于什么状态，再组织语言。回复中不得出现订单事实里没有的金额、时效、批次或赔偿结论。',
-    '8. 合规红线：不做医疗或孕产建议，不承诺具体赔偿金额，不与消费者对抗。',
+    '5. replies 恰好 3 条，角度必须有区分度（建议：共情止损型 / 事实澄清型 / 权益补偿型），',
+    '   每条 text 为 60-120 字，客服第一人称、可直接发送、不使用占位符方括号，一条只解决一个诉求。',
+    '6. rationale 要写明：这条话术回答的是顾客哪一句话、引用了哪几项订单事实或前文已确认信息；kb 填知识库条目名。',
+    '',
+    '═══ 三、话术写法的硬规定 ═══',
+    '1. 这不是闲聊机器人。面对的是「已经成交的订单」：先用订单事实确认对方买的是什么、订单与物流处于什么状态，',
+    '   再组织语言。回复里不得出现订单事实中没有的金额、时效、批次或赔偿结论。',
+    '2. 订单号**整组只出现一次**，且只能出现在 replies[0] 的第一句里。replies[1]、replies[2] 用',
+    '   「这笔订单」「那瓶精华」「您这单」指代；同一条话术里也不许逐句重复订单号——顾客认得自己那单，',
+    '   重复只会显得在念字段。除订单号外，每条候选仍要引用可核对的强事实（商品名 / 批次号 / 订单状态 / 物流节点）。',
+    '3. 顾客在本轮或前文说过的具体事实，回复里要显式接住（例如「您说脸颊泛红这两天，我记下了」），',
+    '   让坐席一眼看出系统听懂了；但只引用顾客的原词，不要整段复读聊天记录。',
+    '   系统会逐条核对这一条：**既没有出现顾客说过的具体词、也没有引用任何订单强事实的话术，会被判为没贴题**，',
+    '   第一条直接换成接地话术、其余沉到候选末尾 —— 泛泛的「帮您核实一下」在这里没有出路，只有具体事实有。',
+    '   顾客已经把该说的都说全了（【前文记忆】的「确实还没说」为空）时，三条候选都不许再出现问句。',
+    '4. 合规红线：不做医疗或孕产建议，不承诺具体赔偿金额，不与消费者对抗；',
+    '   顾客提到曝光、消协、起诉时，不阻拦、不辩解，先给可核对的材料与处理路径。',
     '',
     window.RiskPolicy.promptSpec(),
     '',
     window.ReplyGuard.promptSpec(),
+    '',
+    '═══ 四、示范（只示范「贴题 + 单号只出现一次」的写法；内容与单号一律以输入里给到的为准，不要照抄）═══',
+    '前文：消费者「上周买的抗老精华，用了两天脸上开始刺痛发红」→ 客服「方便告诉我是脸上哪个部位吗？」',
+    '本轮：消费者「我现在整个脸颊都是红的，已经不敢出门了」。',
+    '【反例】错误写法：「您方便再说一下具体是哪部分让您不满意吗？」——部位与时长顾客已说过两轮，这就是没在听。',
+    '【正例】正确写法（replies[0]，首句带唯一一次订单号；下面这串单号与批次是**示意**，必须换成输入里给到的真值）：',
+    '  「您说脸颊整个泛红、已经两天不敢出门，我记下了。这笔 DEMO-2026-0001（紧致抗老精华，批次 DEMO-BATCH-01）' +
+    '我先按不良反应处理：请立刻停用这瓶精华，不要叠加其他功效型护肤品；我已为您登记不良反应记录，' +
+    '并预约一次线上皮肤检测。」',
+    '   replies[1] 用「这瓶精华」开头做事实澄清（给批次检测报告），replies[2] 走权益补偿，两条都不出现订单号。',
   ].join('\n');
 
   function readConfig() {
@@ -111,6 +150,36 @@ window.LLMClient = (function () {
     return u;
   }
 
+  /**
+   * 服务端能力快照（内存态，**不落 localStorage、不落盘**）。
+   * 里面只有一个布尔与两个字符串：这台服务有没有配密钥、走的是哪个上游、默认模型叫什么。
+   * 存在的理由：界面上那句「未配置 Key · 本地引擎」原来是照着页面有没有填 Key 说的，
+   * 服务端配了密钥时它照样这么说 —— 而模型通道其实通得好好的。
+   * 状态显示不许比真实链路更悲观，也不许更乐观。
+   */
+  let serverStatus = null;
+
+  async function fetchServerStatus() {
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') return null;
+    try {
+      /* 复用 /api/health：它已经自述 upstream / keySource，再开一道口只是多一处要鉴权的面。
+         这里只取三个字段，**不取**密钥内容（服务端也从不回传）。 */
+      const res = await fetch(location.origin + '/api/health', { method: 'GET' });
+      if (!res.ok) return null;
+      const j = await res.json();
+      serverStatus = {
+        serverKey: !!(j.serverKey || j.keySource === 'server'),
+        upstream: String(j.upstream || ''),
+        model: String(j.defaultModel || ''),
+        vlm: !!j.vlmConfigured,
+        at: Date.now(),
+      };
+      return serverStatus;
+    } catch (e) {
+      return null;
+    }
+  }
+
   /** 候选端点：本地代理 → 直连 → 直连备用写法（是否带 /v1） */
   function resolveEndpoints(cfg) {
     const list = [];
@@ -122,9 +191,12 @@ window.LLMClient = (function () {
     };
 
     /* 由本地服务托管时优先走同源代理：顺带解决跨域、并让密钥可只留在服务端。
-       判定条件放宽到「http(s) 且非 file://」，避免省略端口号时漏掉代理通道。 */
+       判定条件放宽到「http(s) 且非 file://」，避免省略端口号时漏掉代理通道。
+       但**一条已知的死路不该再走**：页面没填 Key、服务端也没配 Key 时，代理只会回
+       500「缺少密钥」。/api/status 把这个事实读回来之后直接跳过代理；
+       还没探到过（serverStatus 为 null）时保留代理，宁可先试一次。 */
     const served = location.protocol === 'http:' || location.protocol === 'https:';
-    if (served) {
+    if (served && (!serverStatus || serverStatus.serverKey || cfg.apiKey)) {
       push(location.origin + '/api/chat', 'proxy', '本地代理');
     }
 
@@ -165,7 +237,11 @@ window.LLMClient = (function () {
     }
 
     if (typeof input.prevScore === 'number') {
-      lines.push('- 上一轮情绪分：' + input.prevScore);
+      lines.push('- 上一轮情绪指数：' + input.prevScore);
+    }
+    if (Array.isArray(input.series) && input.series.length) {
+      /* 逐句曲线给出来，trend 才有可核对的依据 —— 否则模型只能凭本轮这一句猜走向 */
+      lines.push('- 此前逐句情绪分（本句之前）：' + input.series.join(' → '));
     }
     lines.push('');
     lines.push('【对话历史】' + (input.turn
@@ -179,10 +255,25 @@ window.LLMClient = (function () {
     lines.push('');
     lines.push('【本轮最新消息 — 需要你分析的就是这一条】');
     lines.push('消费者：' + (input.message || ''));
+
+    /* 前文记忆块：facts 阶段已经建好并随 input 传下来（全项目只有那一处构建）。
+       直调 LLMClient.analyze 的老代码没有经过管线，这里现场建一次兜底 ——
+       两条路用的是同一个模块、同一份判据，不存在第二套「记住了什么」。 */
+    const CM = window.ConversationMemory;
+    const mem = input.memory ||
+      (CM ? CM.build(h, input.message || '', { series: input.series || [] }) : null);
+    if (mem && CM) {
+      lines.push('');
+      lines.push(CM.spec(mem));
+    }
+
     lines.push('');
-    lines.push('分析要求：必须把上面这段对话作为一个整体来读，' +
-      '本轮消息里的指代（"这个""还是不行""那怎么办"）要结合前文还原真实诉求；' +
-      '若本轮消息本身没有明确信号，就依据前文的诉求主体给出判断，不要只盯着最后一句。');
+    lines.push('分析要求：把上面这段对话作为一个整体来读。' +
+      '本轮消息里的指代要还原成前文的具体诉求；本轮只是给上一轮的追问补答案时，' +
+      '接着那件诉求往下办。输出前先自查三件事：' +
+      '① replies[0] 的第一句是否正面回答了「本轮必须先回答的那一句」；' +
+      '② 三条候选里是否有任何一条重复询问了【已确认】里的信息（有 = 重写这一条）；' +
+      '③ 订单号是否只在 replies[0] 的首句出现了一次。');
 
     /* 视觉观察块：顾客上传的图片已脱敏、仅描述图像本身，结构化结论直接可见，
        让模型在话术里能引用「我看到的」（识图 / 皮肤状态 / 妆容推荐）。 */
@@ -230,7 +321,7 @@ window.LLMClient = (function () {
     return t;
   }
 
-  function normalize(raw, engineTag) {
+  function normalize(raw, engineTag, message) {
     const EP = window.EmotionPolicy;
     const RP = window.RiskPolicy;
     const out = {
@@ -261,6 +352,75 @@ window.LLMClient = (function () {
           confidence: Number(Math.max(0, Math.min(1, Number((it && it.confidence) || 0.6))).toFixed(2)),
         };
       });
+
+      /* 意图对账 —— 风险有 riskfloor，意图原来一条闸都没有：模型把「过敏投诉」读成
+         「产品咨询」时界面上一切正常，SLA、工单时限、看板分级全部按错的诉求走。
+         规则与风险同构：词典在同一句上命中的意图一定要在场；命中 danger 级
+         （过敏 / 监管 / 法律）而模型没报时，把它顶到第一位。
+         detect 本来就是本地通道的口径，这里只是把它的结论并进来，不另立第四套标准。 */
+      const dict = (IP.detect(message || '') || []);
+      const known = {};
+      (IP.INTENTS || []).forEach(function (x) { known[x.name] = 1; });
+      out.intents.forEach(function (x) { if (!known[x.name]) x.offList = true; });
+      const have = {};
+      out.intents.forEach(function (x) { have[x.name] = 1; });
+      const added = [];
+      let raised = null;
+      let promoted = null;
+      dict.forEach(function (d) {
+        if (have[d.name]) return;
+        /* 词典没命中任何具体意图时 detect 会回落到兜底项 —— 模型已经报了意图，
+           就不必再补一条「常规咨询」当噪音；模型一条都没报时才有意义。 */
+        if (d.name === IP.FALLBACK.name) return;
+        out.intents.push({ name: d.name, tone: d.tone, confidence: d.confidence, by: 'dict' });
+        added.push(d.name);
+        if (d.tone === 'danger' && !raised) raised = d.name;
+      });
+      if (raised) {
+        out.intents.sort(function (a, b) {
+          return (a.name === raised ? 0 : 1) - (b.name === raised ? 0 : 1);
+        });
+      } else if (out.intents.length && out.intents[0].name === IP.FALLBACK.name) {
+        /* 模型退回了兜底「常规咨询」，而词典在同一句里明明命中了具体意图
+           （快递没发货 / 要退款 / 问成分）。兜底项不是一种理解，是「没读出来」；
+           让具体信号排在它前面，界面与 SLA 才不会按「常规咨询」走。
+           只在模型自己选了兜底时接管：model 报出的具体意图仍优先，词典不夺权。 */
+        const concrete = out.intents.filter(function (x) { return x.by === 'dict'; })[0];
+        if (concrete) {
+          promoted = concrete.name;
+          out.intents.sort(function (a, b) {
+            return (a.name === promoted ? 0 : 1) - (b.name === promoted ? 0 : 1);
+          });
+        }
+      }
+      /* 上限 3 条放在对账之后。直接 slice 会把刚补进来的词典信号切掉 ——
+         而「词典在同一句上命中的意图一定要在场」正是这道闸的意义，
+         所以超出时挤掉的是**模型置信度最低的那条**（保前两条），不是词典那条。 */
+      if (out.intents.length > 3) {
+        const dictExtra = out.intents.filter(function (x) { return x.by === 'dict'; }).slice(0, 1);
+        if (dictExtra.length) {
+          out.intents = out.intents.filter(function (x) { return x.by !== 'dict'; })
+            .slice(0, 2).concat(dictExtra);
+          if (raised) {
+            out.intents.sort(function (a, b) {
+              return (a.name === raised ? 0 : 1) - (b.name === raised ? 0 : 1);
+            });
+          } else if (promoted) {
+            out.intents.sort(function (a, b) {
+              return (a.name === promoted ? 0 : 1) - (b.name === promoted ? 0 : 1);
+            });
+          }
+        } else {
+          out.intents = out.intents.slice(0, 3);
+        }
+      }
+      /* 记录前再核一遍「真的还在列表里」：补了但被挤掉的，不许在轨迹里说补过了 */
+      const inList = {};
+      out.intents.forEach(function (x) { inList[x.name] = 1; });
+      const keptAdded = added.filter(function (n) { return inList[n]; });
+      if (keptAdded.length || raised || promoted) {
+        out.intentFloor = { added: keptAdded, raised: raised, promoted: promoted };
+      }
     }
     if (raw.risk && typeof raw.risk === 'object') {
       const rs = Number(raw.risk.score);
@@ -404,9 +564,13 @@ window.LLMClient = (function () {
     const timer = setTimeout(function () { ctrl.abort(); }, wait);
     try {
       const headers = { 'Content-Type': 'application/json' };
-      if (endpoint.kind === 'direct' && cfg.apiKey) {
-        headers['Authorization'] = 'Bearer ' + cfg.apiKey;
-      }
+      /* 页面填了 Key 就带上，代理与直连同待。
+         原来这里只在 direct 端点挂 Authorization：服务端没配环境变量密钥时，
+         同源代理必然回 500「缺少密钥」，页面里填的 Key 要等退回直连那一跳才用上 ——
+         功能没坏（所以一直没人发现），但每条消息都先白跑一次代理，
+         而服务启动横幅写着「将透传页面设置中填写的 Key」，那句话与代码不符。
+         密钥只走请求头：不进 URL、不进日志、不进任何落盘文件。 */
+      if (cfg.apiKey) headers['Authorization'] = 'Bearer ' + cfg.apiKey;
       const res = await fetch(endpoint.url, {
         method: 'POST',
         headers: headers,
@@ -528,7 +692,7 @@ window.LLMClient = (function () {
     for (let i = 0; i < endpoints.length; i++) {
       try {
         const r = await postChat(endpoints[i], cfg, body, { maxTokens: 2048, deadlineAt: o.deadlineAt });
-        return normalize(JSON.parse(stripFence(r.content)), 'llm');
+        return normalize(JSON.parse(stripFence(r.content)), 'llm', input.message);
       } catch (e) {
         lastErr = e;
         /* JSON 解析失败也继续尝试下一个端点 */
@@ -612,6 +776,26 @@ window.LLMClient = (function () {
 
   const hasKey = function () { return !!readConfig().apiKey; };
 
+  /** 模型通道**是否可用**：页面填了 Key，或服务端配了 Key（/api/status 探到过）。
+     界面状态灯与「要不要发这次请求」都读这一个口，免得两处各判一次、说法还不一样。 */
+  const channelAvailable = function () {
+    const cfg = readConfig();
+    if (cfg.mode === 'local') return { ok: false, why: '已切换为仅本地引擎' };
+    if (cfg.apiKey) return { ok: true, via: '页面密钥' };
+    if (serverStatus && serverStatus.serverKey) return { ok: true, via: '服务端密钥' };
+    /* 没探到过服务端能力时不能一律说「待探测」：file:// 打开页面时
+       fetchServerStatus 直接返回 null（没有同源服务可问），
+       这句话会把「既没页面 Key、也没有代理」说成「大模型可用」。
+       只有确实托管在 http(s) 上时，null 才等于「还没问过」。 */
+    if (!serverStatus) {
+      const served = location.protocol === 'http:' || location.protocol === 'https:';
+      return served
+        ? { ok: true, via: '待探测' }
+        : { ok: false, why: '页面未通过本地服务打开，且未填 Key' };
+    }
+    return { ok: false, why: '页面未填 Key，服务端也未配置' };
+  };
+
   return {
     DEFAULT: DEFAULTS,
     MODEL_PRESETS: MODEL_PRESETS,
@@ -626,6 +810,9 @@ window.LLMClient = (function () {
     buildUserPrompt: buildUserPrompt,
     test: test,
     hasKey: hasKey,
+    channelAvailable: channelAvailable,
+    fetchServerStatus: fetchServerStatus,
+    getServerStatus: function () { return serverStatus; },
     /* 调用记账 / 时间预算：界面用它显示「这一轮花了多久、发了几次请求」。
        setDeadline 是全局硬闸，remainingFor(until) 才是「按轮预算」的正解 —— 见上面两种口径的注释 */
     setDeadline: setDeadline,

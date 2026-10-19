@@ -237,6 +237,13 @@ window.LocalEngine = (function () {
     var history = input.history || [];
     var message = input.message || '';
 
+    /* 前文记忆：本轮要用的「顾客已经说过什么」。
+       管线里 facts 阶段已经建过一次并放进 input.memory —— 这里必须复用那一份，
+       不能自己再建：两份抽取的时机不同（一个在消息到达时冻结、一个在此刻），
+       表现是提示词说「已知部位=脸颊」、话术却还在问部位。 */
+    var CM = window.ConversationMemory;
+    var mem = input.memory || (CM ? CM.build(history, message) : null);
+
     /* 收集全部顾客发言（历史 + 本轮），顺序即时间顺序 */
     var customerMsgs = [];
     for (var i = 0; i < history.length; i++) {
@@ -282,7 +289,7 @@ window.LocalEngine = (function () {
     var pack = input.pack;
     var replies = [];
     if (pack && pack.available && window.OrderContext) {
-      replies = window.OrderContext.localReplies(pack, top, 3);
+      replies = window.OrderContext.localReplies(pack, top, 3, mem);
     }
     if (!replies.length) {
       var tpl = REPLY_MAP[top] || REPLY_MAP.default;
@@ -298,6 +305,24 @@ window.LocalEngine = (function () {
         var p = GENERIC[g];
         if (replies.some(function (x) { return x.text === p.text; })) continue;
         replies.push({ text: p.text, confidence: p.confidence, rationale: p.rationale, kb: p.kb });
+      }
+      /* 通用接待模板里全是「再具体说说」「用了多久」这类澄清句 —— 顾客已经答过的
+         必须当场剔除，否则「先说您买的是什么」的订单层没配上（无订单档案客户）时，
+         界面给出的就是一套追问已知信息的开场白。 */
+      if (CM && CM.stripRedundantAsk) {
+        var dropped = [];
+        replies.forEach(function (r) {
+          var s = CM.stripRedundantAsk(r.text, mem);
+          if (!s.removed.length) return;
+          r.redundantAsk = s.removed;
+          if (s.hollow) { dropped.push(r); return; }   /* 整条只是在追问已知信息：候选不要了 */
+          r.text = s.text;
+        });
+        /* 一条都不剩就别丢：无订单档案的客户走到这里，丢掉全部候选等于界面上一个建议都没有。
+           这时保留原文并把「重复提问」标在候选上，坐席看得见、也改得动。 */
+        if (dropped.length && dropped.length < replies.length) {
+          replies = replies.filter(function (r) { return dropped.indexOf(r) === -1; });
+        }
       }
     }
 
@@ -320,6 +345,9 @@ window.LocalEngine = (function () {
       engine: 'local',
       intentSource: intentSource,                          // current = 本轮判定 / context = 依据前文判定
       orderGrounded: !!(pack && pack.available),           // 话术是否建立在订单事实之上
+      /* 记忆快照随结果带走：界面「运行轨迹」与评测页据此核对「这一轮到底记住了什么」，
+         而不是让「它记住了」变成一句无法验证的口头保证 */
+      memory: mem ? { known: mem.known, pending: mem.pending, promises: mem.promises } : null,
       emotion: {
         score: lastScore,                                  // 本句情绪分（曲线用这个）
         index: index,                                      // 指数衰减综合指数（当前状态）

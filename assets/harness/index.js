@@ -56,6 +56,7 @@
     var w = typeof window !== 'undefined' ? window : {};
     return {
       OrderContext: w.OrderContext,
+      ConversationMemory: w.ConversationMemory,
       ReplyGuard: w.ReplyGuard,
       EmotionPolicy: w.EmotionPolicy,
       RiskPolicy: w.RiskPolicy,

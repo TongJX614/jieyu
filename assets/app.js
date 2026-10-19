@@ -43,8 +43,11 @@
     moon: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.4A8.4 8.4 0 1 1 9.6 4a6.9 6.9 0 0 0 10.4 10.4z"/></svg>',
     sun: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.6v2.4M12 19v2.4M4.6 4.6l1.7 1.7M17.7 17.7l1.7 1.7M2.6 12H5M19 12h2.4M4.6 19.4l1.7-1.7M17.7 6.3l1.7-1.7"/></svg>',
     alert: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M12 4.4v8.6"/><circle cx="12" cy="17.6" r="1.25" fill="currentColor" stroke="none"/></svg>',
-    shield: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.2l7 2.8v5.6c0 4.4-2.9 7.6-7 9-4.1-1.4-7-4.6-7-9V6z"/></svg>',
-    check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.6l5 5L19.5 6.8"/></svg>',
+    shield: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.2l7 2.6v5.6c0 4.2-2.9 7.5-7 9.4-4.1-1.9-7-5.2-7-9.4V5.8z"/><path d="M8.8 12.2l2.2 2.2 4.2-4.2"/></svg>',
+    check: '<svg class="ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.6l5 5L19.5 6.8"/></svg>',
+    cross: '<svg class="ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6.4 6.4l11.2 11.2M17.6 6.4L6.4 17.6"/></svg>',
+    warn: '<svg class="ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4.2l8.4 14.6H3.6z"/><path d="M12 9.4v3.6"/><circle cx="12" cy="15.9" r="1.05" fill="currentColor" stroke="none"/></svg>',
+    image: '<svg class="ico" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.4" y="5.2" width="17.2" height="13.6" rx="2"/><circle cx="8.6" cy="10" r="1.6"/><path d="M4.6 17.2l4.6-4.4 3.4 3 3-2.6 3.4 3"/></svg>',
     chev: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.4l6 6 6-6"/></svg>',
     doc: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 3.4h7l4.5 4.5v12.7H6.5z"/><path d="M13.5 3.4v4.5h4.5"/></svg>',
     box: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 7.6v8.8L12 21 3.5 16.4V7.6L12 3z"/><path d="M3.5 7.6L12 12l8.5-4.4M12 12v9"/></svg>',
@@ -53,7 +56,6 @@
     clip: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 11.5l7.6-7.6a3.6 3.6 0 1 1 5.1 5.1L9 17.2a2.1 2.1 0 0 1-3-3l8-8"/><path d="M4.5 11.5l6.6 6.6"/></svg>',
     link: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3"/></svg>',
     key: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8.2" cy="14.8" r="3.6"/><path d="M10.9 12.1L20 3M16.4 6.4l2.3 2.3M13.6 9.2l2.3 2.3"/></svg>',
-    shield: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.2l7 2.6v5.6c0 4.2-2.9 7.5-7 9.4-4.1-1.9-7-5.2-7-9.4V5.8z"/><path d="M8.8 12.2l2.2 2.2 4.2-4.2"/></svg>',
   };
 
   /* ---------- 全局状态 ---------- */
@@ -65,6 +67,10 @@
     timer: null,
     liveRisks: [],                 // 实时检出的风险事件（叠加在 SEED_RISKS 之上）
     metrics: { shown: 0, adopted: 0 },
+    /* 话术效果回执的本地账：closed = 闭合了几条（准备上报），sent/failed = 上报结果。
+       三个数分开才有意义 —— 「闭合 5 条、送达 2 条」说的是服务端不可达，
+       而「闭合 0 条」说的是根本没有下一轮顾客消息，界面要说的话完全不同。 */
+    effect: { closed: 0, sent: 0, failed: 0, stats: null, error: '' },
     filter: 'all',
     q: '',
     kbq: '',
@@ -146,6 +152,15 @@
          当成「顾客还在等回复」而永久停住剧本。 */
       replySeq: 0,
       adoptedKeys: {}, riskKeys: {}, lastSource: '',
+      /* 「第几轮顾客消息」是本会话自己的计数，不能用 chat.length 代替：
+         坐席一发消息数组就长一格，同一个「本轮建议」的键当场漂移，
+         界面上的「已采用」退回成「采用」、采纳率也能被同一条建议重复计数。 */
+      custTurn: 0, analyzedTurn: 0,
+      /* 采纳率的分母要按轮去重：分析收尾时这一轮给出几条建议，只在该轮第一次结算时算一次 */
+      countedTurns: {},
+      /* 话术效果回执的两格状态：pendingEffect = 已填入还没发出，
+         openEffect = 已发出、正等下一轮顾客消息把它闭合。 */
+      pendingEffect: null, openEffect: null,
       orderPack: null,               // 本会话最近一次装配的订单事实包（供净化后重新校验）
       turnLog: [],                   // 复盘用逐轮记录：顾客轮带判定结论，客服轮带承诺原文
       riskLog: [],                   // 复盘用：本会话触发的风险事件（与 liveRisks 同源）
@@ -242,8 +257,13 @@
 
   /* ==================== 消息入口（唯一） ==================== */
 
-  /* 前文窗口：最多带 12 轮进模型 —— 保证「看得见前文」，又不让 prompt 无限膨胀 */
-  var CTX_TURNS = 12;
+  /* 前文窗口分两把尺子，这是这轮修的根因之一：
+     · 给模型的**逐条原文**窗口（CTX_TURNS）—— 受 token 与延迟约束，必须短；
+     · 给记忆层的**扫描**窗口（ConversationMemory.MAX_SCAN）—— 它只抽槽位与承诺，
+       不占原文篇幅，可以长得多。
+     原来两者共用 12 条，顾客在第 20 句说过「脸颊」，第 30 句时系统就「忘了」并重新问一遍
+     —— 表现为「明明给了上下文还是答非所问」，而界面上一切正常。 */
+  var CTX_TURNS = 20;
 
   /** 冻结前文快照。必须在消息落进 chat 之前调用。 */
   function snapshotContext(S) {
@@ -251,14 +271,34 @@
     for (var i = 0; i < S.chat.length; i++) {
       all.push({ role: S.chat[i].role, text: S.chat[i].text });
     }
-    var kept = all.length > CTX_TURNS ? all.slice(-CTX_TURNS) : all;
+    /* 记忆扫描窗：阈值只写在 memory.js 一处，这里取运行时值，不复制数字 */
+    var CM = window.ConversationMemory;
+    var scanCap = (CM && CM.MAX_SCAN) ? CM.MAX_SCAN : CTX_TURNS;
+    var scanned = all.length > scanCap ? all.slice(-scanCap) : all;
+
+    var kept = all;
+    var firstKept = false;
+    if (all.length > CTX_TURNS) {
+      /* 首条顾客诉求永久占一个位置：它是「这单到底来为什么」。窗口滑走之后，
+         模型只看得到最近二十来条，会把一个追补的答案当成全新问题重新起头。 */
+      var first = null;
+      for (var q = 0; q < all.length; q++) {
+        if (all[q].role === 'customer') { first = all[q]; break; }
+      }
+      var tail = all.slice(-CTX_TURNS);
+      if (first && tail.indexOf(first) === -1) { kept = [first].concat(tail); firstKept = true; }
+      else kept = tail;
+    }
     var customerTurns = 0;
     for (var k = 0; k < kept.length; k++) if (kept[k].role === 'customer') customerTurns++;
     return {
       history: kept,
-      turns: all.length + 1,                 // 含本轮：这一句是会话里的第几句
-      carried: kept.length,                  // 实际带进模型的前文条数
-      dropped: all.length - kept.length,     // 因窗口上限被裁掉的条数
+      memoryScan: scanned,                // 记忆层专用（只喂 digest 构建，不进提示词原文）
+      turns: all.length + 1,              // 含本轮：这一句是会话里的第几句
+      carried: kept.length,               // 实际带进模型的前文条数
+      dropped: all.length - kept.length,   // 因窗口上限被裁掉的条数
+      firstKept: firstKept,               // 首条诉求是否靠「永久保留」才没被裁掉
+      scanned: scanned.length,
       customerTurns: customerTurns,
     };
   }
@@ -412,6 +452,17 @@
         visionLevel: vImg ? vImg.level : null,
         visionRedness: vImg ? vImg.redness : null,
       });
+
+      /* 轮号要在这一轮里立刻定下来：后面 renderSprite / 采用按钮都用它认「这是哪一轮的建议」。
+         分母同样在这里计，不在渲染里计 —— 渲染会被反复调用，结算不会。 */
+      S.custTurn++;
+      S.analyzedTurn = S.custTurn;
+      if (!S.countedTurns[S.custTurn]) {
+        S.countedTurns[S.custTurn] = true;
+        state.metrics.shown += result.replies.length;
+      }
+      /* 上一条「照建议发出的话术」如果正是回给上一轮的，到这里才闭合得上 */
+      closeEffect(idx, S, result);
 
       degraded = run.degraded || '';
       /* state.degraded 说的是「**当前这个会话**这一轮降级了没有」，顶部状态条据此显示。
@@ -568,7 +619,7 @@
       '<span class="up-title">' + esc(c.name) + ' · 未读 <b class="num">' + (c.unread || 0) + '</b> 条</span>' +
       '<span class="spacer"></span>' +
       '<button class="up-open" data-open="' + c.idx + '">打开会话</button>' +
-      '<button class="up-x" data-peekclose="1" title="关闭">✕</button>' +
+      '<button class="up-x" data-peekclose="1" title="关闭">' + ICON.cross + '</button>' +
       '</div><div class="up-list">';
     if (!msgs.length) {
       html += '<div class="up-empty">该会话的未读计数来自初始演示状态，暂无原文缓存。<br>打开会话即可查看完整对话。</div>';
@@ -579,7 +630,7 @@
         '<span class="up-time num">' + esc(m.time) + '</span>' +
         (m.image ? (m.image.dataUrl || m.image.thumb
           ? '<img class="up-img" src="' + esc(m.image.dataUrl || m.image.thumb) + '" alt="图片">'
-          : '<span class="up-img cl-gone" title="原图已按保留策略从内存丢弃">🖼</span>') : '') +
+          : '<span class="up-img cl-gone" title="原图已按保留策略从内存丢弃">' + ICON.image + '</span>') : '') +
         '<span class="up-text">' + esc(m.text) + '</span>' +
         (m.source === 'sse' || m.source === 'webhook' ? '<span class="up-src">外部</span>' : '') +
         '</div>';
@@ -661,6 +712,17 @@
   function adoptionRate() {
     if (!state.metrics.shown) return null;
     return Math.round((state.metrics.adopted / state.metrics.shown) * 100);
+  }
+
+  /** 采纳只记第一次。同一轮的同一条建议，点两次「采用」、或采用之后又按发送，都只算一条 ——
+      分子能重复累加，采纳率就敢报 120%，而这格数字是给人对着业务念的。
+      键由 `replyKey()` 现算，它认的是 `cur()`，所以调用方传进来的 S 必须是当前会话。 */
+  function markAdopted(S, replyIndex) {
+    var key = replyKey() + '#' + replyIndex;
+    if (S.adoptedKeys[key]) return false;
+    S.adoptedKeys[key] = true;
+    state.metrics.adopted++;
+    return true;
   }
 
   function renderStats() {
@@ -1191,6 +1253,57 @@
   var SPRITE_DEFAULT = { right: 26, bottom: 152 };
   var spritePos = { right: SPRITE_DEFAULT.right, bottom: SPRITE_DEFAULT.bottom };
 
+  /* ==================== 帧图的延后下载 ====================
+     实测（tools/audit.js 的 net 段）：工作台首屏之后还有一波 6.9MB 的立绘，
+     由 7 张空手帧 + 当前道具 6 张拼成。原来的写法是 boot 后固定 1.2 秒一次性
+     `new Image()` 全发，两个代价没人付得起：
+       · 「网站设置 → 话术小助手」关掉后 `#sprite` 只是 hidden，CSS 那些
+         background-image 浏览器不会去取，可这 6.9MB 照样下载 —— 全付给一个
+         看不见的元素；
+       · 七个请求挤在同一个 tick，和首屏剩下的活（字体、图表、首次渲染）抢线程。
+     收口成一条队列，判据只写一遍：助手可见 · 首屏 load 已落定 · 一次只发一张。 */
+
+  var SPRITE_EMPTY_SHEETS = ['sprite-run-l', 'sprite-run-r', 'sprite-nod', 'sprite-wave',
+    'sprite-jump', 'sprite-spin', 'sprite-think'];
+  var HEAT_IDLE_TIMEOUT_MS = 1200;   /* 空闲太久也不该一直不下：给每张图一个兜底等待 */
+  var HEAT_FALLBACK_MS = 150;        /* 没有 requestIdleCallback 时的间隔 */
+
+  var heatQueue = [];
+  var heatSeen = {};
+  var heatPending = false;
+
+  /** 助手此刻是否真的会出现在屏幕上 —— 显隐与预热都用它，别再各处各写一遍条件 */
+  function spriteVisible() {
+    return state.view === 'workbench' && state.prefs.sprite !== false;
+  }
+
+  /** 入队一张帧图。参数写不带 .png 的图名（空手帧）或带上的都行 —— 去重键统一成前者。 */
+  function heatSheet(file) {
+    var name = String(file || '').replace(/\.png$/, '');
+    if (!name || heatSeen[name]) return;
+    heatSeen[name] = true;
+    heatQueue.push(name);
+    pumpHeat();
+  }
+
+  function pumpHeat() {
+    if (heatPending || !heatQueue.length) return;
+    if (!spriteVisible() || document.readyState !== 'complete') return;
+    var name = heatQueue.shift();
+    var img = new Image();
+    img.src = 'assets/img/' + name + '.png';
+    heatPending = true;
+    var next = function () {
+      heatPending = false;
+      pumpHeat();
+    };
+    if (window.requestIdleCallback) window.requestIdleCallback(next, { timeout: HEAT_IDLE_TIMEOUT_MS });
+    else setTimeout(next, HEAT_FALLBACK_MS);
+  }
+
+  /* 队列被「看不见」或「首屏未完」挡住时没人再叫它 —— 这两个扳机各补一次： */
+  window.addEventListener('load', pumpHeat);
+
   function spriteLoadPos() {
     try {
       var s = JSON.parse(localStorage.getItem('beauty-cs-sprite') || 'null');
@@ -1283,13 +1396,14 @@
     propTimer = setTimeout(function () { el.classList.remove('pulling'); }, 320);
   }
 
-  /** 预热某一款道具的三张图。首屏只请求待机那张，其余等真正要播时再下载，
-      而「真正要播」往往正好是手指已经在拖的那一刻 —— 那一下就卡出一段空窗。 */
+  /** 预热某一款道具的帧图。待机那张此刻就要显示，直接交给 CSS 取；
+   *  其余五张（抱物跑 / 拿出 / 点头 / 挥手 / 转圈）进队列延后 —— 不预热的话，
+   *  拿到新品类的那一刻正好在拖，跑动帧还在下载，画面上就是「东西拿着、腿不动」。 */
   function preheatProp(prop) {
-    ['hold', 'prun', 'pin', 'pnod', 'pwave', 'pspin'].forEach(function (kind) {
-      var img = new Image();
-      img.src = 'assets/img/' + PropFit.spriteOf(prop, kind);
-    });
+    var kinds = ['prun', 'pin', 'pnod', 'pwave', 'pspin'];
+    for (var i = 0; i < kinds.length; i++) {
+      heatSheet(PropFit.spriteOf(prop, kinds[i]));
+    }
   }
 
   function syncProp() {
@@ -1298,7 +1412,9 @@
 
   function replyKey() {
     var S = cur();
-    return contactAt(state.si).def.id + '#' + S.chat.length;
+    /* 用「第几轮顾客消息」而不是 chat.length：后者在坐席发出回复的那一刻就变了，
+       于是「已采用」标记、采纳率去重、以及事后核对「这条建议被谁用了」全部会对不上。 */
+    return contactAt(state.si).def.id + '#' + (S.analyzedTurn || 0);
   }
 
   /** 前文清单：小助手里展开时逐条回看，坐席能核对 AI 到底读了什么 */
@@ -1526,6 +1642,20 @@
           (gr.grounded
             ? '<span class="flag ok" title="' + esc(gr.reason) + '">依据订单 ' + gr.citedLabels.length + ' 项</span>'
             : '<span class="flag warn" title="' + esc(gr.reason) + '">未引用订单</span>') +
+          /* 整形闸切掉句子是**静默**的：坐席看到的已经不是模型原来那句。
+             不标出来，「这句话被改过」这件事就只有代码知道 —— 而这条闸的判据
+             是「顾客已经说过」，坐席必须能一眼核对到底删掉了哪一句。 */
+          (rp.redundantAsk && rp.redundantAsk.length
+            ? '<span class="flag teal" title="' + esc(rp.redundantAsk.map(function (x) { return x.label; }).join('、')) + '">已去掉重复追问 ' + rp.redundantAsk.length + ' 项</span>'
+            : '') +
+          /* 贴题闸：既没接住顾客原话、也没引用订单强事实的候选，判「答非所问」。
+             这一条必须挂在界面上，因为「模型这次答得偏」原来是只有人能看出来、
+             而机器一句话都不说的事 */
+          (rp.onTopic && !rp.onTopic.ok
+            ? '<span class="flag warn" title="' + esc('这条既没出现顾客说过的具体词，也没引用订单强事实' +
+                (rp.onTopic.saidAll ? '；而且顾客已经没有没说的信息了，却还在提问' : '')) + '">答非所问</span>'
+            : '') +
+          (rp.topicReplaced ? '<span class="flag teal">推荐位已换成贴题话术</span>' : '') +
           (rp.engine === 'local-order' ? '<span class="flag teal">订单接地生成</span>' : '') +
           (g.level === 'none'
             ? '<span class="flag ok">合规通过</span>'
@@ -1544,6 +1674,12 @@
           '<div class="why-line"><em>订单依据</em><span>' +
             esc(gr.grounded ? gr.citedLabels.join('、') : '本条未引用订单事实，仅供措辞参考') + '</span></div>' +
           '<div class="why-line"><em>推荐依据</em><span>' + esc(rp.rationale) + '</span></div>' +
+          (rp.redundantAsk && rp.redundantAsk.length
+            ? '<div class="why-line"><em>前文核对</em><span>' + esc('顾客已经说过这些，删掉了重复追问：' +
+                rp.redundantAsk.map(function (x) { return x.label; }).join('、') +
+                (rp.redundantAsk[0].raw ? '（原句「' + rp.redundantAsk[0].raw + '」）' : '')) +
+              '</span></div>'
+            : '') +
           '<div class="why-line"><em>知识库命中</em><span>' + esc(rp.kb) + '</span></div>' +
         '</div>' +
         '<div class="ra-actions">' +
@@ -1765,12 +1901,22 @@
     var openSub = cs
       ? ('待处理 ' + cs.states.open + ' · 已响应 ' + cs.responded + ' / 需跟踪 ' + cs.slaTracked)
       : '自动处置外剩余量';
+    /* 第六张卡说「发出去的话有没有用」：采纳率只回答「发没发」，
+       这一格回答的是发完之后风险等级降了没有。取不到数就写「—」，不猜。 */
+    var ef = state.effect.stats;
+    var efRate = ef && ef.improveRate !== null && typeof ef.improveRate === 'number'
+      ? ef.improveRate + '%' : '—';
+    var efCls = ef && ef.improveRate !== null && typeof ef.improveRate === 'number'
+      ? (ef.improveRate >= 50 ? 'is-ok' : 'is-warn') : '';
     $('dashMetrics').innerHTML =
       metric('累计风险事件', all.length, ' 起', '含历史沉淀与实时检出', '') +
       metric('待闭环工单', cs ? cs.pending : 0, ' 起', openSub, cs && cs.pending > 0 ? 'is-warn' : 'is-ok') +
       metric('首响达标率', respRate, '', cs ? ('超时未响应 ' + cs.overdue + ' 起 · 平均首响 ' + (cs.avgRespondMs == null ? '—' : CF.fmtDur(cs.avgRespondMs))) : '', respCls) +
       metric('高危事件', high, ' 起', '需专员接管并留档', high > 0 ? 'is-danger' : '') +
-      metric('消息接收 / 未分析', rep.stats.accepted + ' / ' + rep.pendingAck, '', '序号空洞 ' + rep.gaps + ' 条', rep.pendingAck > 0 ? 'is-warn' : '');
+      metric('消息接收 / 未分析', rep.stats.accepted + ' / ' + rep.pendingAck, '', '序号空洞 ' + rep.gaps + ' 条', rep.pendingAck > 0 ? 'is-warn' : '') +
+      metric('话术风险回落', efRate, '', ef
+        ? '闭合回执 ' + ef.n + ' 条 · 平均风险分 ' + (typeof ef.avgScoreDelta === 'number' ? efSigned(ef.avgScoreDelta, 1) : '—')
+        : '下一轮顾客回话才闭合一条', efCls);
 
     $('riskCount').textContent = all.length + ' 起';
     $('dashAvg').textContent = avg === null ? '—' : avg + ' / 100';
@@ -2068,6 +2214,10 @@
       (customN ? ' · 自建 ' + customN : '') +
       (kbSource === 'local' ? ' · 存在本机' : '');
 
+    /* 效果面板先渲染：下面「没有匹配话术」会提前 return，而「搜不到话术」和
+       「没有回执」是两件事，不能让前者把后者的那一格读数一起吞掉。 */
+    renderEffectPanel();
+
     if (!list.length) {
       $('kbList').innerHTML = '<div class="empty">没有匹配的话术<br>试试「过敏」「退款」「会员」等关键词，或点右上角「新增话术」手写一条</div>';
       return;
@@ -2086,7 +2236,10 @@
             '<span>·</span><span>' + esc(e.rationale) + '</span>' +
             '<span class="spacer"></span>' +
             '<span class="kb-conf">置信度 ' + Math.round((e.confidence || 0) * 100) + '%</span>' +
-            '<button class="mini use" data-kb="' + esc(e.text) + '">填入输入框</button>' +
+            /* id 单独走一个属性：`data-kb` 只带正文，回执要的是「哪一条」，
+               而正文里可能有引号，靠它反查 id 等于把归因建在字符串匹配上。
+               引擎基线没有 id（只读规则表），留空就是「按来源统计」。 */
+            '<button class="mini use" data-kb="' + esc(e.text) + '" data-kb-id="' + esc(e.id || '') + '">填入输入框</button>' +
             (e.custom
               ? '<button class="kb-del" type="button" data-kb-del="' + esc(e.id) + '" title="从库里删掉这条">删除</button>'
               : '') +
@@ -2193,7 +2346,7 @@
             '<b>' + esc(demo.expect.intent) + '</b>' +
             '<span>' + esc(RP.labelOf(demo.expect.risk)) + ' · ' + esc(demo.expect.emotion) + '</span></div>' +
           '<div class="evs-flag' + (demo.hit.risk !== false && demo.hit.intent !== false ? ' ok' : ' bad') + '">' +
-            (demo.hit.risk !== false && demo.hit.intent !== false ? '✓ 判对' : '✗ 判错') + '</div>' +
+            (demo.hit.risk !== false && demo.hit.intent !== false ? ICON.check + ' 判对' : ICON.cross + ' 判错') + '</div>' +
         '</div>' +
         '<div class="evs-foot">前面三项（意图 / 风险 / 情绪）就是这样逐条比出来的；' +
           '下面「逐条用例」里每一条都有一行这样的对照。</div>' +
@@ -2242,7 +2395,7 @@
           '<td class="num">' + c.declared + '</td>' +
           '<td>' + (!c.provableByDialogue
             ? '<span class="ev-na">–</span>'
-            : (c.proved ? '<span class="ev-ok">✓ ' + c.proved + '</span>' : '<span class="ev-bad">✗ 0</span>')) + '</td>' +
+            : (c.proved ? '<span class="ev-ok">' + ICON.check + ' ' + c.proved + '</span>' : '<span class="ev-bad">' + ICON.cross + ' 0</span>')) + '</td>' +
           '<td class="num">' + c.fired + '</td>' +
           '<td style="color:var(--tx-3)">' + esc(note) + (c.failed.length ? ' · 没抬起来：' + esc(c.failed.join(', ')) : '') + '</td></tr>';
       });
@@ -2314,7 +2467,7 @@
     rep.rows.forEach(function (r) {
       var mark = function (ok) {
         return ok === null ? '<span class="ev-na">–</span>'
-          : (ok ? '<span class="ev-ok">✓</span>' : '<span class="ev-bad">✗</span>');
+          : (ok ? '<span class="ev-ok">' + ICON.check + '</span>' : '<span class="ev-bad">' + ICON.cross + '</span>');
       };
       h += '<tr>' +
         '<td>' + esc(sceneLabel(r.scenario)) + '</td><td class="num">' + r.i + '</td>' +
@@ -2605,6 +2758,10 @@
     autosize();
     renderComposerGuard();
     $('composerInput').focus();
+    /* 主动触达同样是一条待回执：发出去之后顾客回话、风险比触达前降了，
+       才算「这条关怀有用」。触达前没有风险读数（从没分析过的会话）就不记 ——
+       没有 before 的 delta 是编的。 */
+    beginEffectTrace(cur(), 'care', '');
     toast('关怀话术已填入输入框，可直接发送或微调', 'ok');
   }
 
@@ -2916,7 +3073,7 @@
     /* 步骤轨 */
     $('wzTrack').innerHTML = WZ_STEPS.map(function (label, i) {
       var cls = i === WIZ.step ? 'is-now' : (i < WIZ.step ? 'is-done' : '');
-      return '<li class="' + cls + '"><span class="wz-n">' + (i < WIZ.step ? '✓' : (i + 1)) + '</span>' +
+      return '<li class="' + cls + '"><span class="wz-n">' + (i < WIZ.step ? ICON.check : (i + 1)) + '</span>' +
         '<span class="wz-t">' + esc(label) + '</span></li>';
     }).join('');
 
@@ -2978,7 +3135,7 @@
     h += '<ul class="wz-pre">' + su.prereq.map(function (p, i) {
       var on = !!WIZ.ack[i];
       return '<li class="' + (on ? 'on' : '') + '" data-ack="' + i + '">' +
-        '<span class="wz-ck">' + (on ? '✓' : '') + '</span><span>' + esc(p) + '</span></li>';
+        '<span class="wz-ck">' + (on ? ICON.check : '') + '</span><span>' + esc(p) + '</span></li>';
     }).join('') + '</ul>';
     h += '<div class="wz-where">' +
       '<div class="wz-row"><span>去哪申请</span>' +
@@ -3040,7 +3197,7 @@
     var h = '<div class="wz-lead">核对结果（' + WIZ.probe.steps.length + ' 项）</div>';
     h += '<ul class="wz-checks">' + WIZ.probe.steps.map(function (s) {
       return '<li class="' + (s.ok ? 'ok' : 'bad') + '">' +
-        '<span class="wz-ci">' + (s.ok ? '✓' : '✕') + '</span>' +
+        '<span class="wz-ci">' + (s.ok ? ICON.check : ICON.cross) + '</span>' +
         '<div><b>' + esc(s.label) + '</b><div class="wz-cd">' + esc(s.detail) + '</div></div>' +
         '</li>';
     }).join('') + '</ul>';
@@ -3105,7 +3262,7 @@
     }
     return '<div class="wz-lead">正在冷启动…</div>' +
       '<ul class="wz-checks">' + WIZ.log.map(function (l) {
-        return '<li class="' + (l.ok ? 'ok' : 'bad') + '"><span class="wz-ci">' + (l.ok ? '✓' : '✕') + '</span>' +
+        return '<li class="' + (l.ok ? 'ok' : 'bad') + '"><span class="wz-ci">' + (l.ok ? ICON.check : ICON.cross) + '</span>' +
           '<div><b>' + esc(l.label) + '</b>' + (l.detail ? '<div class="wz-cd">' + esc(l.detail) + '</div>' : '') + '</div></li>';
       }).join('') + '</ul>' +
       (WIZ.done ? '' : '<div class="wz-run"><span class="wz-spin"></span>处理中…</div>');
@@ -3124,7 +3281,7 @@
       '</b></div>' +
       '<div class="wz-row"><span>顺带产出</span><b>跨渠道身份合并新增 ' + (CH.stats().mergedUsers) + ' 人的可归并痕迹</b></div>' +
       '</div>';
-    h += '<div class="wz-note">⚠️ 接入不是终点：' + (su.ttl ? 'access_token 会在 ' +
+    h += '<div class="wz-note">' + ICON.warn + ' 接入不是终点：' + (su.ttl ? 'access_token 会在 ' +
       (su.ttl >= 86400000 ? Math.round(su.ttl / 86400000) + ' 天后' : Math.round(su.ttl / 3600000) + ' 小时后') +
       '过期，到期没续，这个渠道就从「通了」变成「断了」——界面上会标红。' : '长期有效，但签名密钥建议按季度轮换。') + '</div>';
     return h;
@@ -3358,17 +3515,202 @@
     return r.accepted;
   }
 
+  /* ==================== 话术效果回执 ====================
+     要回答的问题是「照这条话术发出去之后，这一位顾客的风险到底降了没有」——
+     界面上原来只有「采纳率」（发没发），没有「发了有没有用」。
+
+     三条口径先说死，它们决定了下面为什么长这样：
+
+     ① **只在闭合时上报。** 一条回执要有「发出时的等级」和「下一轮的等级」两个读数才成立，
+        所以发出时只在会话上留一格 `openEffect`，等下一轮顾客消息分析收尾才 POST。
+        顾客不再回话的会话永远不闭合 —— 这是实话，界面上写「未闭合的不计入」，
+        不拿半截记录去凑分母（凑出来的回落率没人能信）。
+     ② **只报结构化事实。** 等级、分数、情绪指数、第几轮、会话指纹；
+        顾客原文、坐席敲进去的那句话、话术正文一个字都不出浏览器。
+        服务端 `server/effect-stats.js` 另有字段白名单兜第二层。
+     ③ **升降在这里算。** 等级序（高危 < 关注 < 安全）在 `policy.js` 里，是全站唯一一把尺；
+        服务端要自己判就得再抄一份 —— 抄一份就意味着两处可以各改各的（`ST17`/`ST19` 防的就是这个）。
+        代价写在服务端注释里：谎报污染的只是统计，不参与任何安全判定。 */
+
+  var EFFECT_SOURCES = { suggestion: true, kb: true, care: true };
+
+  /** 记下「这一条来自哪套话术」以及发出时的读数。没有风险读数就不记 —— 发不出去，也不该发。 */
+  function beginEffectTrace(S, source, kbId) {
+    if (!EFFECT_SOURCES[source]) { S.pendingEffect = null; return; }
+    var a = S.analyzed;
+    if (!a || !a.risk) { S.pendingEffect = null; return; }
+    S.pendingEffect = {
+      source: source,
+      kbId: kbId || '',
+      turn: S.analyzedTurn || 0,
+      levelBefore: a.risk.level,
+      scoreBefore: a.risk.score,
+      emoBefore: (a.emotion && typeof a.emotion.index === 'number') ? a.emotion.index : null,
+    };
+  }
+
+  /** 发出时把待回执转正。轮号已经不是「刚答的那一轮」就不认：坐席可能隔了几轮才点发送。 */
+  function armEffect(S) {
+    var p = S.pendingEffect;
+    S.pendingEffect = null;
+    S.openEffect = (p && p.turn === (S.analyzedTurn || 0)) ? p : null;
+  }
+
+  /** 下一轮顾客消息结算时闭合。不连续（中间还夹了别的轮）就当没这回事，直接丢。 */
+  function closeEffect(idx, S, result) {
+    var o = S.openEffect;
+    S.openEffect = null;
+    if (!o || o.turn + 1 !== S.custTurn) return;
+    var rb = RP.rankOf(o.levelBefore);
+    var ra = RP.rankOf(result.risk.level);
+    var def = contactAt(idx).def;
+    var rec = {
+      source: o.source,
+      kbId: o.kbId,
+      turn: S.custTurn,
+      delta: ra > rb ? 'improved' : (ra < rb ? 'worse' : 'flat'),
+      levelBefore: o.levelBefore,
+      levelAfter: result.risk.level,
+      scoreBefore: o.scoreBefore,
+      scoreAfter: result.risk.score,
+      emoBefore: o.emoBefore,
+      emoAfter: (result.emotion && typeof result.emotion.index === 'number') ? result.emotion.index : null,
+      /* 会话身份用指纹，不用剧本 id 原文：这张表要能在服务端分组，
+         但不该让人从库里反查「这是哪一位顾客」 —— 和授权台账同一个口径。 */
+      sess: window.Privacy ? Privacy.fingerprint(def.id) : '',
+    };
+    state.effect.closed++;
+    apiJson('/api/effect', { method: 'POST', body: JSON.stringify(rec) }).then(function () {
+      state.effect.sent++;
+      refreshEffectStats();
+    }, function (e) {
+      state.effect.failed++;
+      if (typeof console !== 'undefined' && console.warn) console.warn('[effect] 回执未送达：', (e && e.message) || e);
+    });
+  }
+
+  /** 拉聚合。失败只把「读不到」这件事记下来，不弹 toast —— 这是一格读数，不是一次操作。 */
+  function refreshEffectStats() {
+    if (!authToken()) return;
+    apiJson('/api/effect').then(function (j) {
+      state.effect.stats = (j && j.stats) || null;
+      state.effect.error = '';
+      renderEffectViews();
+    }, function (e) {
+      /* 「读不到」必须显示出来。静默留着上一次的数字，看的人以为那是当前的。 */
+      state.effect.error = (e && e.message) || '读不到';
+      renderEffectViews();
+    });
+  }
+
+  function renderEffectViews() {
+    if (state.view === 'kb') renderKb();
+    if (state.view === 'dashboard') renderDashboard();
+  }
+
+  var EFFECT_SOURCE_NAMES = {
+    suggestion: '引擎建议话术',
+    kb: '话术库话术',
+    care: '主动关怀触达',
+    unknown: '来源不明',
+  };
+
+  /** 回执里只有 kbId（正文从不出浏览器），可读的名字在浏览器这一侧查回去。
+      这样服务端那张表永远不含话术文本，界面上却仍说得出「是哪一条」。 */
+  function effectKbLabel(id) {
+    var all = kbEntries();
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].id === id) {
+        var t = String(all[i].text || '').replace(/\s+/g, ' ');
+        return t ? (t.length > 26 ? t.slice(0, 26) + '…' : t) : id;
+      }
+    }
+    return id;
+  }
+
+  function efSigned(v, digits) {
+    if (typeof v !== 'number' || !isFinite(v)) return '—';
+    var n = digits ? v.toFixed(digits) : String(Math.round(v));
+    return (v > 0 ? '+' : v < 0 ? '−' : '') + String(n).replace('-', '−');
+  }
+
+  function efCard(k, v, sub, cls) {
+    return '<div class="ef-stat' + (cls ? ' is-' + cls : '') + '">' +
+      '<i>' + esc(k) + '</i><b>' + esc(v) + '</b>' +
+      '<span>' + esc(sub || '') + '</span></div>';
+  }
+
+  /** 面板只在话术库视图渲染；看板那张卡共用同一份 `state.effect.stats`，不第二次取数。 */
+  function renderEffectPanel() {
+    var body = $('effectBody'), foot = $('effectFoot');
+    if (!body || !foot) return;
+    var local = '本页已闭合 ' + state.effect.closed + ' 条 · 送达 ' + state.effect.sent +
+      ' · 未送达 ' + state.effect.failed;
+    if (!authToken()) {
+      body.innerHTML = '<div class="empty">未登录读不到回执<br>这一格统计存在服务端，不在浏览器缓存里</div>';
+      foot.textContent = local;
+      return;
+    }
+    if (state.effect.error) {
+      body.innerHTML = '<div class="empty">读不到服务端聚合<br>' + esc(state.effect.error) + '</div>';
+      foot.textContent = local;
+      return;
+    }
+    var st = state.effect.stats;
+    if (!st || !st.n) {
+      body.innerHTML = '<div class="empty">还没有一条闭合的回执<br>' +
+        '一条回执要「发出时的等级」和「下一轮顾客消息的等级」两个读数才成立 —— ' +
+        '顾客不再回话的会话永远不闭合，所以这一格空着是实话，不是坏了</div>';
+      foot.textContent = local + ' · 未闭合的不计入分母';
+      return;
+    }
+    var rate = st.improveRate === null ? '—' : st.improveRate + '%';
+    var html = '<div class="ef-stats">' +
+      efCard('闭合回执', st.n + ' 条', st.suspect ? '存疑 ' + st.suspect + ' 条已剔除均值' : '两端都有等级读数', '') +
+      efCard('风险回落', rate, st.scoredN + ' 条有分数对比', st.improveRate === null ? '' : (st.improveRate >= 50 ? 'ok' : 'warn')) +
+      efCard('风险分变化', efSigned(st.avgScoreDelta), '负数＝风险下降', st.avgScoreDelta < 0 ? 'ok' : '') +
+      efCard('情绪指数变化', efSigned(st.avgEmoDelta, 2), '正数＝情绪好转', st.avgEmoDelta > 0 ? 'ok' : '') +
+      '</div>';
+
+    var keys = Object.keys(st.bySource || {});
+    if (keys.length) {
+      html += '<div class="kb-group-head">按话术来源<span class="n">回落 / 持平 / 上升</span></div><div class="ef-rows">';
+      keys.sort(function (a, b) { return (st.bySource[b].n || 0) - (st.bySource[a].n || 0); });
+      keys.forEach(function (k) {
+        var b = st.bySource[k] || {};
+        var r = b.scoredN ? Math.round((b.improved / b.scoredN) * 100) : null;
+        html += srow(EFFECT_SOURCE_NAMES[k] || k, b.n + ' 条', r === null ? '' : (r >= 50 ? 'ok' : 'warn'),
+          r, '回落 ' + b.improved + ' · 持平 ' + b.flat + ' · 上升 ' + b.worse);
+      });
+      html += '</div>';
+    }
+
+    var top = st.top || [];
+    if (top.length) {
+      html += '<div class="kb-group-head">用得最多的自建话术<span class="n">前 ' + top.length + ' 条</span></div><div class="ef-rows">';
+      top.forEach(function (t) {
+        var r = t.avgScoreDelta;
+        html += srow(effectKbLabel(t.kbId), t.n + ' 次',
+          typeof r === 'number' ? (r < 0 ? 'ok' : r > 0 ? 'danger' : '') : '',
+          t.scoredN ? Math.round((t.improved / t.scoredN) * 100) : null,
+          '风险分 ' + efSigned(r, 1) + ' · 上升 ' + t.worse + ' 次');
+      });
+      html += '</div>';
+    }
+    body.innerHTML = html;
+    foot.textContent = '口径：只在下一轮顾客消息分析收尾时记账 · 未闭合不计入 · 只存等级/分数/轮号/会话指纹，话术正文与顾客原文都不出浏览器' +
+      (st.kept > st.limit ? ' · 库里保留最近 ' + st.limit + ' 条' : '') +
+      (st.droppedOld ? '（已淘汰 ' + st.droppedOld + ' 条旧的）' : '') + ' · ' + local;
+  }
+
   function sendAgent(text, replyIndex) {
     var t = (text || '').trim();
     if (!t) return;
     var S = cur();
-    if (replyIndex != null) {
-      var key = replyKey() + '#' + replyIndex;
-      if (!S.adoptedKeys[key]) {
-        S.adoptedKeys[key] = true;
-        state.metrics.adopted++;
-      }
-    }
+    if (replyIndex != null) markAdopted(S, replyIndex);
+    /* 「这条是照哪套话术发的」只有到发送这一步才成立 —— 填入输入框不等于发出去。
+       坐席手工敲的话没有来源，armEffect 会把待回执清掉，不会记成一条效果。 */
+    armEffect(S);
     S.chat.push({ role: 'agent', text: t, time: fmtTime(), via: '解语建议' });
     S.turnLog.push({ role: 'agent', text: t, time: fmtTime() });   // 复盘：承诺追踪要读原文
     S.replySeq++;                    // 供迟到的分析结果核对「这轮已经答过了」
@@ -3898,7 +4240,7 @@
           '<span class="ca-lv ' + o.level + '">' + esc(o.label) + '</span>' +
           (img.synthetic ? '<span class="ca-tag">合成示例图</span>' : '') +
           '<span class="spacer"></span>' +
-          '<button class="ca-x" type="button" data-detach="1" title="移除图片">✕</button>' +
+          '<button class="ca-x" type="button" data-detach="1" title="移除图片">' + ICON.cross + '</button>' +
         '</div>' +
         '<div class="ca-sum">' + esc(o.summary) + '</div>' +
         '<div class="ca-sec">' +
@@ -3966,6 +4308,9 @@
       for (var i = 0; i < S.analyzed.replies.length; i++) {
         var rr = S.analyzed.replies[i];
         if (rr.guard && rr.guard.level === 'block') continue;
+        /* 自动演示走的也是「采用这条建议」，归因和人手点采用是同一件事 ——
+           不记的话，跑完一轮演示界面上一个回执都没有，面板就成了摆设。 */
+        beginEffectTrace(S, 'suggestion', '');
         sendAgent(rr.text, i);
         state.timer = setTimeout(loop, DEMO_AFTER_REPLY_MS);
         return;
@@ -4055,7 +4400,11 @@
       btns[i].setAttribute('aria-current', String(btns[i].getAttribute('data-view') === v));
     }
     /* 助手只属于工作台；「网站设置 → 话术小助手」关掉后任何视图都不出现 */
-    $('sprite').hidden = v !== 'workbench' || state.prefs.sprite === false;
+    $('sprite').hidden = !spriteVisible();
+    pumpHeat();   // 切回工作台时把之前挡住的帧图队列接着放
+    /* 话术库这一屏才需要效果数字：别在其它视图每次切换都打一次 GET。
+       已经有读数了也不再拉 —— 闭合时 closeEffect 自己会刷新。 */
+    if (v === 'kb' && !state.effect.stats && !state.effect.error) refreshEffectStats();
     renderAll();
   }
 
@@ -4093,14 +4442,23 @@
       dot.className = 'dot warn';
       txt.textContent = '已降级本地引擎';
       chip.title = '大模型调用失败，已自动降级。失败原因：' + state.degraded + '\n点击打开设置';
-    } else if (cfg.apiKey) {
+    } else if (cfg.apiKey || (window.LLMClient.channelAvailable && window.LLMClient.channelAvailable().ok)) {
+      /* 状态灯必须比真实链路更诚实：页面填了 Key、或服务端配了 Key（/api/health 自述），
+         两条都算「大模型可用」。原来这一格只看页面有没有填 Key —— 服务端配了密钥时
+         它照样显示「未配置 Key · 本地引擎」，而模型通道其实通得好好的。 */
+      var via = cfg.apiKey ? '页面密钥' : '服务端密钥';
+      var st = window.LLMClient.getServerStatus ? window.LLMClient.getServerStatus() : null;
       dot.className = 'dot ok';
       txt.textContent = '大模型 · ' + cfg.model;
-      chip.title = '点击配置模型';
+      chip.title = '模型通道：' + via + ' · 模型名以页面填写为准' +
+        (st && st.upstream ? '\n上游：' + st.upstream : '') + '\n点击配置模型';
     } else {
+      var st0 = window.LLMClient.getServerStatus ? window.LLMClient.getServerStatus() : null;
       dot.className = 'dot warn';
       txt.textContent = '未配置 Key · 本地引擎';
-      chip.title = '尚未配置 API Key，当前走本地规则引擎。点击填写';
+      chip.title = '页面未填 API Key，本机服务也未配置密钥' +
+        (st0 && st0.upstream ? '（上游 ' + st0.upstream + '）' : '') +
+        '。当前走本地规则引擎。点击填写';
     }
   }
 
@@ -4258,7 +4616,8 @@
   /** 偏好落到界面：助手显隐、走秒、起始页都在这里收口，不散落在各处 */
   function prefsApply() {
     var sp = $('sprite');
-    if (sp) sp.hidden = state.view !== 'workbench' || state.prefs.sprite === false;
+    if (sp) sp.hidden = !spriteVisible();
+    pumpHeat();   // 刚把助手打开：把之前为了省 6.9MB 而扣下的帧图补上
     if (state.prefs.sprite === false && state.bubbleOpen) {
       state.bubbleOpen = false;
       safe('sprite', renderSprite);
@@ -5245,21 +5604,15 @@
     h.addEventListener('dblclick', function () { spriteReset(); });
     window.addEventListener('resize', spriteApply);
 
-    /* 其余帧图延后预热：首屏只需要待机这一张，但拖动时才去下载会卡一下。
-       手上那件也一样 —— 三张图（待机/抱物跑/拿出）约 600KB，别塞进首屏。
+    /* 其余帧图延后预热（队列与判据见 heatSheet / pumpHeat）：首屏只需要待机这一张，
+       但拖动时才去下载会卡一下。手上那件也一样 —— 空手七张 + 当前道具五张约 6.9MB，
+       别塞进首屏，更别付给一个被关掉的助手。
        转圈也在里面：平时用不到，但要是它自己转起来时才去下 600KB 的图，
        前两帧就是空白。 */
-    setTimeout(function () {
-      ['sprite-run-l', 'sprite-run-r', 'sprite-jump', 'sprite-nod', 'sprite-wave',
-        'sprite-spin', 'sprite-think']
-        .forEach(function (n) {
-          var img = new Image();
-          img.src = 'assets/img/' + n + '.png';
-        });
-      if (state.propInfo) preheatProp(state.propInfo.cat.prop);
-      /* 首屏留 5 秒给它安静地喘气：一进来就动会显得很急 */
-      scheduleIdleAct(5000 + Math.random() * 2500);
-    }, 1200);
+    SPRITE_EMPTY_SHEETS.forEach(heatSheet);
+    if (state.propInfo) preheatProp(state.propInfo.cat.prop);
+    /* 首屏留 5 秒给它安静地喘气：一进来就动会显得很急 */
+    scheduleIdleAct(5000 + Math.random() * 2500);
   }
 
   var actTimer = 0;
@@ -5709,8 +6062,9 @@
         renderComposerGuard();
         if (state.composerMode === 'customer') setComposerMode('agent');
         $('composerInput').focus();
-        S.adoptedKeys[replyKey() + '#' + i] = true;
-        state.metrics.adopted++;
+        markAdopted(S, i);
+        /* 内置建议话术没有 id（引擎那份是只读规则表），所以这条只按来源统计 */
+        beginEffectTrace(S, 'suggestion', '');
         state.bubbleOpen = false;
         renderAll();
         toast('已填入输入框，可直接发送或微调', 'ok');
@@ -5731,6 +6085,10 @@
 
     /* 话术入库：手工新增与「收编建议」共用同一张表单 */
     $('btnKbNew').addEventListener('click', function () { openKbEditor(); });
+    $('btnEffectRefresh').addEventListener('click', function () {
+      state.effect.error = '';
+      refreshEffectStats();
+    });
     $('kbEditor').addEventListener('click', function (e) {
       /* 点遮罩空白处关闭，和全站其它浮层一致 */
       if (e.target === $('kbEditor')) { closeKbEditor(); return; }
@@ -5792,6 +6150,7 @@
       autosize();
       renderComposerGuard();
       $('composerInput').focus();
+      beginEffectTrace(cur(), 'kb', b.getAttribute('data-kb-id') || '');
       toast('话术已填入输入框', 'ok');
     });
 
@@ -5801,6 +6160,12 @@
     $('composerInput').addEventListener('input', function () {
       autosize();
       renderComposerGuard();
+      /* 手工改过一个字，就不再说「这条是照着那套话术发的」。
+         归因宁缺毋滥：坐席改写完还挂到原话术头上，回落率统计的就是别人的功劳。
+         清空输入框不发回执，程序性赋值（采用 / 填入 / 发送后清空）不触发 input，
+         所以这条只会因为「人真的敲了键」而失效。 */
+      var es = cur();
+      if (es.pendingEffect) es.pendingEffect = null;
     });
     $('composerInput').addEventListener('keydown', function (e) {
       if (e.key !== 'Enter') return;
@@ -5914,7 +6279,8 @@
           WIZ.ack[i] = !WIZ.ack[i];
           ack.classList.toggle('on', !!WIZ.ack[i]);
           var ck = ack.querySelector('.wz-ck');
-          if (ck) ck.textContent = WIZ.ack[i] ? '✓' : '';
+          /* 勾是 SVG（和渲染那张卡用的是同一个 ICON.check），textContent 装不下 SVG */
+          if (ck) ck.innerHTML = WIZ.ack[i] ? ICON.check : '';
           wzRefreshFoot();
           return;
         }
@@ -6032,7 +6398,7 @@
           '照片授权台账：' + (state.consentLedger ? state.consentLedger.text() : '本会话无图片动作'),
           /* 落盘失败必须有声音：配额炸了之后审计只是内存态，界面上不能装作一切正常 */
           (BUS.report().stats.persistErrors || 0)
-            ? '⚠ 审计落盘失败 ' + BUS.report().stats.persistErrors + ' 次，最近这些消息只在内存里。'
+            ? '审计落盘失败 ' + BUS.report().stats.persistErrors + ' 次，最近这些消息只在内存里。'
             : '审计落盘正常（消息日志不含图片像素，见 bus.js forDisk）。',
           /* 旧版本把原图整份写进过本机磁盘。清掉了要写在包里，
              否则「我们从不落图片像素」这句对老用户的历史数据就是假的。 */
@@ -6229,6 +6595,11 @@
     renderPlayBtn();
     /* 本机偏好先读进来：主题、起始页、助手与提醒都由它决定 */
     prefsLoad();
+    /* 深链 ?pet=off 关掉桌宠 —— 只覆盖本次会话，不写偏好。
+       审计要用它对量「助手不可见时到底还下多少字节」：那 6.9MB 立绘本就不该
+       付给一个 hidden 的元素。键名用 pet 不用 sprite，因为 ?sprite=1 早就另有
+       含义（展开气泡），一个键两种意思会让人读错代码。 */
+    if (/[?&]pet=off/.test(String(location.search || ''))) state.prefs.sprite = false;
     /* 深链 ?theme=dark|light 优先于本机偏好 —— 让两套主题都能被自动化审计到。
        本机存的是「模式」（浅色 / 深色 / 跟随系统），深链只覆盖本次会话 */
     var mTheme = String(location.search || '').match(/[?&]theme=(dark|light)/);
@@ -6245,7 +6616,7 @@
     vlmRegister();
     vlmLoadStatus();
 
-    /* 深链：?view=dashboard|kb|eval|care|channels，?s=N，?play=1，?demo=1，?settings=1，?sprite=1，?band=1，?today=YYYY-MM-DD */
+    /* 深链：?view=dashboard|kb|eval|care|channels，?s=N，?play=1，?demo=1，?settings=1，?sprite=1，?pet=off，?band=1，?today=YYYY-MM-DD */
     var q = String(location.search || '');
     var mIdx = q.match(/[?&]s=(\d+)/);
     var idx = mIdx ? clamp(Number(mIdx[1]), 0, contacts.length - 1) : 0;
@@ -6280,6 +6651,7 @@
     if (!ACCT.me) refreshSession();
     loadAgents();
     kbLoad().then(function () { if (state.view === 'kb') renderKb(); });
+    refreshEffectStats();
 
     connectLive();
 
@@ -6300,10 +6672,25 @@
      后台也不会先把会话、SSE、桌宠都跑起来，白留一堆痕迹。 */
   function boot() {
     prefsLoad();
+    /* 先问一次本机服务（/api/health）：有没有配密钥、上游是谁、默认模型叫什么。
+       这一问只服务于**状态显示**与「同源代理值不值得再试一次」，
+       判定逻辑一律不读它 —— 判级口径仍然只有 policy 一份。 */
+    if (window.LLMClient && window.LLMClient.fetchServerStatus) {
+      window.LLMClient.fetchServerStatus().then(function () { updateStatus(); });
+    }
     /* 深链 ?theme=dark|light 优先于本机偏好 —— 让两套主题都能被自动化审计到。
        本机存的是「模式」（浅色 / 深色 / 跟随系统），深链只覆盖本次会话 */
     var mTheme = String(location.search || '').match(/[?&]theme=(dark|light)/);
     applyTheme(mTheme ? mTheme[1] : state.prefs.theme);
+    /* 「跟随系统」得真的跟着：系统换主题时当场重解析一次。
+       只在 auto 模式下响应 —— 用户显式选了浅色或深色，就不该被系统牵着走。
+       挂在 boot 而不是登录后的 init：夜班的人先看到的是登录页，那一屏也要跟着变。 */
+    var mqDark = window.matchMedia('(prefers-color-scheme: dark)');
+    if (mqDark.addEventListener) {
+      mqDark.addEventListener('change', function () {
+        if (state.prefs.theme === 'auto') applyTheme('auto');
+      });
+    }
     bindGate();
 
     if (gateBypass()) { enterApp(); return; }

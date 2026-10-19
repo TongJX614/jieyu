@@ -75,8 +75,10 @@ module.exports = async function (t) {
   let stubbedFetch = makeFetch([]);
   const locationStub = { protocol: 'file:', origin: 'null' };
 
+  /* memory.js 必须一起加载：llm.js 的前文记忆块是 `window.ConversationMemory` 在就写、不在就静默跳过。
+     少了这个依赖，下面所有关于提示词的断言照样绿 —— 只是那块最重要的「本轮禁止重复提问」根本没进提示词。 */
   const S = load(
-    ['assets/policy.js', 'assets/guard.js', 'assets/orderctx.js', 'assets/crm.js', 'assets/scenarios.js', 'assets/llm.js'],
+    ['assets/policy.js', 'assets/guard.js', 'assets/memory.js', 'assets/orderctx.js', 'assets/crm.js', 'assets/scenarios.js', 'assets/llm.js'],
     {
       localStorage: store,
       location: locationStub,
@@ -92,6 +94,11 @@ module.exports = async function (t) {
   const RP = S.RiskPolicy;
   const key = Object.keys(S.CRM.CUSTOMERS)[0];
   const cust = S.CRM.CUSTOMERS[key];
+  /* OrderContext.build 的签名是 (剧本 def, 顾客, 意图) —— 不是 { customer, orders, message }。
+     传错时 pack.available 恒为 false，提示词里一条订单事实都没有，而所有断言照旧绿：
+     这一格曾经就是这么写错的，「订单事实进提示词」这件事等于从没被测过。 */
+  const INTENT = '产品咨询';
+  const order0 = S.CRM.primaryOrder(key);
 
   const fresh = (script) => { stubbedFetch = makeFetch(script); return stubbedFetch; };
   const setCfg = (patch) => L.writeConfig(patch);
@@ -156,6 +163,56 @@ module.exports = async function (t) {
   t.eq(n2.risk.level, 'low', '空返回风险为 low');
   t.eq(n2.intents[0].name, '常规咨询', '空返回有兜底意图');
 
+  /* ------------------------------------------------ 意图对账 */
+
+  t.suite('llm · 意图对账（模型漏判高危 / 退回兜底 / 不许越权）');
+
+  /* ① 模型把「烂脸」读成产品咨询 → 词典的 danger 意图必须顶到第一位。
+        这是意图版的 riskfloor：模型漏判高危意图时，SLA 与工单分级会全部按错的诉求走。 */
+  const i1 = L.normalize({ intents: [{ name: '产品咨询', confidence: 0.82 }] }, 'llm', '我用了两天，脸过敏烂脸了');
+  t.eq(i1.intents[0].name, '过敏投诉', '模型漏判 danger 意图时，词典把它顶到主诉求');
+  t.eq(i1.intentFloor && i1.intentFloor.raised, '过敏投诉', '抬升动作写进 intentFloor.raised（可核对）');
+  t.ok(i1.intents.some((x) => x.name === '产品咨询'), '模型原来的判断不删除，只是让位');
+  t.ok(i1.intents.length <= 3, '对账之后仍不超过 3 条，实为 ' + i1.intents.length);
+
+  /* ② 模型退回兜底「常规咨询」，而原话明明有具体信号 → 具体信号上位。
+        兜底项不是一种理解，是「没读出来」；界面按常规咨询走等于漏掉物流时效。 */
+  const i2 = L.normalize({ intents: [{ name: '常规咨询', confidence: 0.9 }] }, 'llm', '我的快递还没发货');
+  t.eq(i2.intents[0].name, '物流履约', '模型退回兜底时，词典命中的具体意图顶到第一位');
+  t.eq(i2.intentFloor && i2.intentFloor.promoted, '物流履约', '上位动作写进 intentFloor.promoted');
+  t.eq(i2.intentFloor && i2.intentFloor.raised, null, '普通信号只上位、不算 danger 抬升');
+
+  /* ③ 反面：模型自己给出了具体意图，词典补进来的信号不许夺走第一位 ——
+        模型读过整段上下文，词典只读这一句；对账是兜底，不是夺权。 */
+  const i3 = L.normalize({ intents: [{ name: '成分安全', confidence: 0.9 }] }, 'llm', '我的快递还没发货');
+  t.eq(i3.intents[0].name, '成分安全', '模型的具体意图保持第一，词典信号只补位');
+  t.eq(i3.intentFloor && i3.intentFloor.promoted, null, '没有发生上位');
+  t.ok(i3.intents.some((x) => x.name === '物流履约'), '词典信号仍然在场（可被界面与看板看到）');
+
+  /* ④ 无信号时不制造噪音：模型已经报了意图，不再补一条「常规咨询」 */
+  const i4 = L.normalize({ intents: [{ name: '产品咨询', confidence: 0.7 }] }, 'llm', '这款适合我吗');
+  t.eq(i4.intents.length, 1, '模型意图与词典口径一致时，不重复添加');
+  t.eq(i4.intentFloor, undefined, '没有任何补位/抬升时不写 intentFloor');
+
+  /* ⑤ 词表外的意图名不丢、也不冒充标准名：标 offList，交给界面如实显示 */
+  const i5 = L.normalize({ intents: [{ name: '赔付协商', confidence: 0.9 }] }, 'llm', '你们打算怎么赔');
+  t.eq(i5.intents[0].name, '赔付协商', '模型给的具体说法保留');
+  t.eq(i5.intents[0].offList, true, '词表外的意图标 offList（不静默改写成某个标准名）');
+  t.eq(i5.intents.some((x) => x.name === '常规咨询'), false, '不额外塞一条兜底意图');
+
+  /* ⑥ 三条已满时补进来的信号必须真的在最终列表里 —— 不能 slice 掉之后
+        还在 intentFloor.added 里说「补过了」（轨迹与界面必须同口径）。 */
+  const i6 = L.normalize({
+    intents: [
+      { name: '成分安全', confidence: 0.9 }, { name: '产品咨询', confidence: 0.8 },
+      { name: '会员权益', confidence: 0.7 },
+    ],
+  }, 'llm', '我的快递还没发货');
+  t.eq(i6.intents.length, 3, '对账后仍为 3 条');
+  t.ok(i6.intents.some((x) => x.name === '物流履约'), '词典信号挤掉了模型置信度最低的一条，而不是被切掉');
+  t.eq(i6.intents.some((x) => x.name === '会员权益'), false, '被挤掉的是模型第三条（置信度最低）');
+  t.eq(i6.intentFloor && i6.intentFloor.added.join('|'), '物流履约', 'added 记的是真正留在列表里的');
+
   /* ------------------------------------------------ 提示词 */
 
   t.suite('llm · 提示词：画像 + 订单事实 + 前文');
@@ -165,7 +222,7 @@ module.exports = async function (t) {
   t.eq(L.SYSTEM_PROMPT.indexOf('「」'), -1, 'SYSTEM_PROMPT 不含空壳占位符');
   const prompt = L.buildUserPrompt({
     profile: cust,
-    pack: S.OrderContext.build({ customer: cust, orders: S.CRM.allOrdersOf(key), message: '这个面膜我用了刺痛' }),
+    pack: S.OrderContext.build({ id: key }, cust, INTENT),
     order: S.CRM.primaryOrder(key),
     allOrders: S.CRM.allOrdersOf(key),
     history: [{ role: 'customer', text: '第一次问' }, { role: 'agent', text: '第一次答' }],
@@ -177,9 +234,59 @@ module.exports = async function (t) {
   t.includes(prompt, '【本轮最新消息 — 需要你分析的就是这一条】', '明确划出本轮消息');
   t.includes(prompt, '消费者：这个我还是不敢用', '本轮原文进提示词');
   t.includes(prompt, '客服：第一次答', '前文含客服轮');
-  t.includes(prompt, '上一轮情绪分：55', '带上上一轮情绪分');
+  /* 「上一轮情绪指数」而不是「情绪分」：管线带进来的是 job.prevIndex，
+     即 EmotionPolicy.indexOf(逐句序列) 的综合指数，不是某一句的分。
+     早期提示词写成「情绪分」，模型会拿它跟本轮这一句的分直接比，走向就判错了。 */
+  t.includes(prompt, '上一轮情绪指数：55', '带上上一轮情绪综合指数');
   t.includes(prompt, '第 3 句', '标明本轮是第几句');
+  /* 订单事实真的进提示词（这一条同时钉住 build 的调用签名：传错就是 available=false，
+     下面三条一起变红，而不是像以前那样静默跳过） */
+  t.eq(prompt.indexOf(order0.orderNo) !== -1, true, '提示词带订单号');
+  t.includes(prompt, order0.product, '提示词带商品名');
+  t.includes(prompt, '¥' + order0.amount, '提示词带金额');
   t.eq(prompt.indexOf('「」'), -1, '提示词不含空壳占位符');
+
+  /* ---- 前文记忆块：llm.js 必须把 ConversationMemory.spec() 原样搬进提示词 ----
+     这里断言「提示词里含 spec(mem) 这一整段」而不是只挑几个关键词：
+     llm.js 自己另写一份记忆说明的话，关键词照样命中，但那就会变成第二套标准 ——
+     模型读到的和出站闸门判的是两回事，「已确认的不要再问」只对其中一边生效。 */
+  const CM = S.ConversationMemory;
+  const memHist = [
+    { role: 'customer', text: '上周买的抗老精华，用了两天脸上开始刺痛发红，这是怎么回事？' },
+    { role: 'agent', text: '非常抱歉给您带来困扰，我这边先按订单逐项核实，有结论第一时间答复您。' },
+  ];
+  const memMsg = '我现在整个脸颊都是红的，已经不敢出门了，这算不算毁容？';
+  const memDigest = CM.build(memHist, memMsg, { series: [] });
+  const memSpec = CM.spec(memDigest);
+  t.ok(memDigest.known.length >= 3, '夹具本身要能抽出至少 3 项已确认，否则下面全是空跑');
+  const prompt2 = L.buildUserPrompt({
+    profile: cust,
+    pack: S.OrderContext.build({ id: key }, cust, INTENT),
+    order: S.CRM.primaryOrder(key),
+    allOrders: S.CRM.allOrdersOf(key),
+    history: memHist,
+    message: memMsg,
+    turn: 3,
+    prevScore: 40,
+    memory: memDigest,
+  });
+  t.includes(prompt2, '【前文记忆', '提示词带前文记忆块');
+  t.includes(prompt2, memSpec, '记忆块整段来自 ConversationMemory.spec()（不是 llm.js 自己另写一份）');
+  t.includes(prompt2, '本轮必须先回答的那一句', '要求①：先答本轮这句');
+  t.includes(prompt2, '重复询问了【已确认】', '要求②：已确认的不许再问');
+  t.includes(prompt2, '订单号是否只在 replies[0] 的首句出现了一次', '要求③：订单号只报一次');
+  /* 管线没带 memory 时（老代码直调 analyze），llm.js 必须自己建一次同一份判据，而不是什么都不写 */
+  const prompt3 = L.buildUserPrompt({
+    profile: cust,
+    pack: S.OrderContext.build({ id: key }, cust, INTENT),
+    order: S.CRM.primaryOrder(key),
+    allOrders: S.CRM.allOrdersOf(key),
+    history: memHist,
+    message: memMsg,
+    turn: 3,
+    prevScore: 40,
+  });
+  t.includes(prompt3, memSpec, '没有 input.memory 时提示词里的记忆块与显式传入的那份完全一致（只有一处构建）');
 
   /* ------------------------------------------------ 调用链（stub 网络） */
 
@@ -202,16 +309,46 @@ module.exports = async function (t) {
   await L.analyze({ profile: cust, message: '再问一句' });
   t.eq(f.calls[0].opts.headers.Authorization, 'Bearer sk-probe-0000000000000000', '直连时用配置里的 Key');
 
-  /* 经本地服务访问 → 同源代理优先（密钥可只留服务端） */
+  /* 经本地服务访问 → 同源代理优先。
+     这一条原来是反着断言的（「走代理时不把密钥塞进浏览器请求头」），
+     而那个行为是缺陷：服务端没配环境变量密钥时，代理只能回 500「缺少密钥」，
+     页面里填的 Key 要等退回直连那一跳才用上 —— 每条消息先白跑一次代理，
+     而服务启动横幅写的是「将透传页面设置中填写的 Key」。现在两边一致了。 */
   locationStub.protocol = 'http:';
   locationStub.origin = 'http://localhost:5173';
   L.resetCalls();
   f = fresh([{ ok: true, json: okBody('代理') }]);
   await L.analyze({ profile: cust, message: '走代理' });
   t.eq(f.calls[0].url, 'http://localhost:5173/api/chat', '同源代理优先');
-  t.eq(f.calls[0].opts.headers.Authorization, undefined, '走代理时不把密钥塞进浏览器请求头');
+  t.eq(f.calls[0].opts.headers.Authorization, 'Bearer sk-probe-0000000000000000', '走代理也带上页面填的 Key');
+  t.ok(f.calls[0].url.indexOf('sk-probe') === -1, '密钥不出现在 URL 里（只走请求头）');
+  t.eq(f.calls[0].body.key, undefined, '请求体里没有密钥字段');
   locationStub.protocol = 'file:';
   locationStub.origin = 'null';
+
+  /* 状态灯的口径：它必须与「这条消息到底会不会发给模型」一致。
+     原来 file:// 打开时 serverStatus 永远是 null，于是「待探测」被当成可用 ——
+     既没有页面 Key、也没有同源代理，顶部却写着大模型可用。 */
+  t.suite('llm · 通道可用性：状态灯不许比真实链路更乐观');
+  setCfg({ apiKey: '', mode: 'auto' });
+  let ca = L.channelAvailable();
+  t.eq(ca.ok, false, 'file:// 打开且未填 Key：没有代理也没有直连凭据，必须如实说不可用');
+  t.includes(ca.why || '', '未通过本地服务打开', '原因说清楚是「没有本地服务」，不是含糊的「待探测」');
+  setCfg({ apiKey: 'sk-probe-0000000000000000' });
+  t.eq(L.channelAvailable().ok, true, '页面填了 Key 时 file:// 也能直连，可用');
+  t.eq(L.channelAvailable().via, '页面密钥', '来源标成页面密钥');
+  setCfg({ apiKey: '', mode: 'local' });
+  t.eq(L.channelAvailable().ok, false, '仅本地模式永远报不可用');
+  setCfg({ apiKey: '', mode: 'auto' });
+  locationStub.protocol = 'http:';
+  locationStub.origin = 'http://localhost:5173';
+  ca = L.channelAvailable();
+  t.eq(ca.ok, true, '经本地服务打开、还没探到服务端能力时保留「待探测」，先试一次');
+  t.eq(ca.via, '待探测', '这一格的措辞如实说明还没探测');
+  locationStub.protocol = 'file:';
+  locationStub.origin = 'null';
+  /* 还原后续用例依赖的状态：直连 + 页面 Key（脱敏/自检那组靠它发请求） */
+  setCfg({ apiKey: 'sk-probe-0000000000000000', mode: 'auto' });
 
   /* 备用端点：默认 baseUrl 会额外派生「去掉 /v1」的写法 */
   setCfg({ baseUrl: 'https://api.deepseek.com' });

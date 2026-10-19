@@ -10,6 +10,9 @@
     "eval:dump": "node eval/run.js --dump",
     "demo:channels": "node tools/demo-channels.js",
     "audit": "node tools/audit.js",
+    "audit:net": "node tools/audit.js --only=net",
+    "taste": "node tools/taste.js",
+    "taste:lint": "node tools/taste.js --lint",
     "invariants": "node tools/invariants.js",
     "check": "node tools/invariants.js --fast && node tests/run-all.js"
   },

@@ -5,6 +5,10 @@
    casefile 是赛题「预警与闭环跟踪」的落地，orderctx 是接地判定的关口，
    全是业务核心，却一直靠人眼兜底）。
 
+   加载清单里带上 memory.js：orderctx 的话术开头要接住本轮问句、出站前要过
+   「重复提问」闸，那份记忆就是它的依赖。少加载一个模块只会让这条链静默退化
+   （闸不生效但测试照样绿），所以这里按真实加载顺序装。
+
    本套件的重点不是「把函数跑一遍」，而是钉住三类跨模块契约：
      ① 数据自洽  —— 剧本库 / CRM / policy 三方名字必须对得上
      ② 文档承诺  —— 注释说「调用方改不到真源」「兜底话术一定接地」，就得真的成立
@@ -17,7 +21,7 @@ const { load, memoryStorage } = require('./sandbox');
 
 module.exports = function (t) {
   const S = load(
-    ['assets/policy.js', 'assets/crm.js', 'assets/orderctx.js', 'assets/scenarios.js', 'assets/casefile.js'],
+    ['assets/policy.js', 'assets/memory.js', 'assets/crm.js', 'assets/orderctx.js', 'assets/scenarios.js', 'assets/casefile.js'],
     { localStorage: memoryStorage() },
   );
 
@@ -191,6 +195,151 @@ module.exports = function (t) {
 
     const none = S.OrderContext.localReplies({ available: false }, '过敏投诉', 3);
     t.eq(none.length, 0, '无订单时不兜底生成话术（宁可空着也不编）');
+  }
+
+  /* ================================================================
+     ②b orderctx —— 出站整形：订单号只报一次、重复提问剔除
+     ================================================================ */
+  t.suite('orderctx · 出站整形（单号只报一次 / 不重复追问）');
+
+  const NO = pack.order.orderNo;
+  const SHORT = S.OrderContext.shortProduct(pack.order);
+
+  {
+    const rs = S.OrderContext.orderNoOnce([
+      { text: '您的订单 ' + NO + ' 已核实，' + NO + ' 的批次我也一并发了您。' },
+      { text: '关于订单 ' + NO + '，我们已为您登记。' },
+      { text: '另外 ' + NO + ' 这单可以退款。' },
+    ], pack);
+    t.eq(rs.replies[0].text.split(NO).length - 1, 1, '第 1 条候选只留一次单号（同一条里也不许逐句念）');
+    t.eq(rs.replies[1].text.indexOf(NO), -1, '第 2 条候选一个单号都不留');
+    t.includes(rs.replies[1].text, '关于您这笔「' + SHORT + '」订单',
+      '「关于订单 <单号>」整体换成指代，不留「关于订单 您这笔…订单」这种重复');
+    t.eq(rs.changed, 3, '三条都动过');
+    t.ok(rs.replies.slice(1).every((r) => S.OrderContext.verifyOne(r.text, pack).grounded),
+      '换成指代之后仍算引用订单事实 —— 抠单号不能顺手把话术判成没看订单');
+
+    const untouched = S.OrderContext.orderNoOnce([{ text: '您好' }], { available: false });
+    t.eq(untouched.replies[0].text, '您好', '无订单档案时一字不改');
+    t.eq(untouched.changed, 0, '没改动就不计数');
+  }
+
+  {
+    /* 模型通道的两条老毛病：逐条候选各报一遍单号 + 追问顾客已经说过的项 */
+    const digest = S.ConversationMemory.build([
+      { role: 'customer', text: '我脸颊泛红，用了两天了' },
+      { role: 'agent', text: '您方便提供一下照片吗？' },
+    ], '可以找消协，你们打算怎么赔', {});
+    const out = S.OrderContext.polish([
+      { text: '您这笔 ' + NO + ' 我们已核实。您方便再说一下具体是哪部分让您不满意吗？' },
+      { text: '批次 AF22026-0910 的报告我马上发您，请问您是哪个部位不舒服呢？' },
+    ], pack, digest);
+    t.eq(out.replies[0].text.indexOf('哪部分让您不满意'), -1, '撞已知项的追问被剔除');
+    t.includes(out.replies[0].text, '我们已核实', '同一句里的有效信息不跟着被删');
+    t.eq(out.replies[1].text.indexOf('哪个部位不舒服'), -1, '句尾挂着的重复追问只切那一小句');
+    t.includes(out.replies[1].text, '报告我马上发您', '前半句留在原位');
+    t.eq(/，$/.test(out.replies[1].text), false, '切除后不留孤零零的逗号');
+    t.eq(out.askStripped, 2, '计数与真实改动一致（两条都被切过）');
+    t.ok(out.replies.every((r) => r.redundantAsk && r.redundantAsk.length), '每条都留了「删掉了什么」的痕迹，坐席能核对');
+    t.ok(out.replies.every((r) => S.OrderContext.verifyOne(r.text, pack).grounded), '整形之后两条仍接地');
+  }
+
+  {
+    /* 切空的候选不能就这么交出去：「关于订单 X。」是一句残句，比原来的重复提问更糟。
+       有订单档案就用同一份 pack / 同一份记忆顶上订单接地话术；顶不上就把原文放回去。 */
+    const digest2 = S.ConversationMemory.build([
+      { role: 'customer', text: '我脸颊泛红，用了两天了' },
+    ], '可以找消协，你们打算怎么赔', {});
+    const frag = '关于订单 ' + NO + '，您方便再说一下具体是哪部分让您不满意吗？';
+    const out2 = S.OrderContext.polish([
+      { text: frag, rationale: '模型给的' },
+      { text: '批次 AF22026-0910 的报告我马上发您。' },
+    ], pack, digest2, '监管投诉');
+    t.eq(out2.hollowFilled, 1, '被切空的那一条换成了订单接地话术（计数 1）');
+    t.eq(out2.replies[0].text.indexOf('哪部分让您不满意'), -1, '重复提问不在候选里');
+    t.eq(out2.replies[0].text.indexOf('关于订单'), -1, '「关于订单 X。」这种残句也不在候选里');
+    t.eq(out2.replies[0].engine, 'local-order', '顶上来的那条标明来源是本地订单接地生成');
+    t.includes(out2.replies[0].rationale, '已换成订单接地话术', '推荐依据里说清为什么换了（坐席要看得见）');
+    t.ok(S.OrderContext.verifyOne(out2.replies[0].text, pack).grounded, '顶上来的那条确实引用订单事实');
+    t.eq(out2.replies[1].text, '批次 AF22026-0910 的报告我马上发您。', '没被切的候选一字不动');
+    t.eq(out2.replies[0].text === out2.replies[1].text, false, '顶上来的不与别的候选重复');
+
+    /* 无订单档案：顶不上就把原文放回去 —— 宁可让坐席看见原来那句重复提问，也不要交一句残句 */
+    const noPack = S.OrderContext.polish([{ text: frag }], { available: false }, digest2, '监管投诉');
+    t.eq(noPack.hollowFilled, 0, '无档案时不计数（没东西可顶）');
+    t.eq(noPack.replies[0].text, frag, '无档案时保留原文');
+    t.ok(noPack.replies[0].redundantAsk && noPack.replies[0].redundantAsk.length,
+      '仍然如实报告「这条在重复提问」，界面上不至于看不出问题');
+  }
+
+  {
+    /* 浏览器探针照出来的一例（真界面上单号出现了两遍）：去重跑在补位**之前**，
+       而补位顶上来的本地模板第一条自己就带单号 —— 于是「每句话都报订单号」从补位那条复活。
+       补位优先挑不带单号的，去重挪到最后兜住全部来源（模型给的、本地模板、顶上来的）。 */
+    const digest3 = S.ConversationMemory.build([
+      { role: 'customer', text: '我脸颊泛红，还刺痛，用了两天了' },
+    ], '那你们到底打算怎么处理', {});
+    const out4 = S.OrderContext.polish([
+      { text: '您这笔 ' + NO + ' 我们已核实。' },
+      { text: '请问您具体是哪个部位有反应呢？用了几天了？' },
+      { text: '关于订单 ' + NO + '，我这边为您登记。' },
+    ], pack, digest3, '过敏投诉');
+    t.eq(out4.hollowFilled, 1, '整句都在追问已知项的那条被切空，并由订单接地话术顶上');
+    const allNo = out4.replies.map((r) => r.text).join('\n').split(NO).length - 1;
+    t.eq(allNo, 1, '整组候选合起来只许出现一次单号（补位那条不许把它带回来）：实际 ' + allNo +
+      ' 次 —— ' + out4.replies.map((r) => r.text).join(' ｜ '));
+    t.eq(out4.replies[1].text.indexOf(NO), -1, '顶上来的那条落在第 2 位，一个单号都不许有');
+    t.eq(/您这笔[^「]{0,4}您这笔/.test(out4.replies[1].text), false,
+      '补位挑的是「本来就不带单号」的那条模板，不是先带上来、再被去重改成「您这笔 您这笔…」的结巴句：' +
+      out4.replies[1].text);
+    t.eq(out4.orderNoFixed >= 1, true, '第 3 条的单号同样被换成指代');
+    t.ok(out4.replies.every((r) => S.OrderContext.verifyOne(r.text, pack).grounded),
+      '补位与整形之后三条仍都接地（抠单号不能把话术判成没看订单）');
+  }
+
+  {
+    /* 单号换成指代之后，原文里「订单 JD…」那个空格会留在中文中间 —— 那是机器改写的痕迹。
+       只收「中文字 + 空格 + 中文字」：英文与数字之间的空格有意义，一起删会把型号改坏。 */
+    const out3 = S.OrderContext.polish([
+      { text: '单号 ' + NO + ' 我这边已经报给您了。' },
+      { text: '订单 ' + NO + ' 我这边已经核实。' },
+    ], pack, null);
+    t.eq(/[一-龥」] [一-龥「]/.test(out3.replies[1].text), false,
+      '指代替换后不留中文之间的杂质空格：' + out3.replies[1].text);
+    t.includes(out3.replies[1].text, '您这笔「' + SHORT + '」订单我这边已经核实', '收掉空格后仍然读得通');
+    t.includes(out3.replies[0].text, NO, '第 1 条候选的单号照旧保留');
+  }
+
+  {
+    /* 「兜底话术一定接地、一定读得通」要对**每一份**档案成立，不只是过敏这一单 */
+    const weak = [], messy = [];
+    const intents = Object.keys(S.OrderContext.INTENT_FOCUS);
+    S.SCENARIOS.forEach((sc) => {
+      const p = S.OrderContext.build({ id: sc.id }, S.CRM.byScenario(sc.id), '常规咨询');
+      if (!p.available) return;
+      intents.forEach((it) => {
+        const rs = S.OrderContext.localReplies(p, it, 3);
+        rs.forEach((r, i) => {
+          const tag = sc.id + '/' + it + '#' + (i + 1);
+          if (!r.grounding.grounded) weak.push(tag);
+          /* 拼接出来的病句：括号套括号、空括号、undefined、字段值后面直接跟「的」 */
+          if (/（[^）]*（|（）|\(\)|undefined|null|需调取|，。|。。|：。|、。/.test(r.text)) messy.push(tag + ' :: ' + r.text);
+        });
+      });
+    });
+    t.eq(weak.length, 0, '每一份档案的每组话术都引用订单事实（未接地：' + weak.join('、') + '）');
+    t.eq(messy.length, 0, '话术里没有拼接残骸（问题：' + messy.join(' ／ ') + '）');
+  }
+
+  {
+    /* 词典新增意图而模板没跟上时，会静默落到 `默认` 那组 —— 顾客听到的是套话 */
+    const names = S.IntentPolicy.INTENTS.map((x) => x.name).concat([S.IntentPolicy.FALLBACK.name]);
+    const noTpl = names.filter((n) => S.OrderContext.TPL_INTENTS.indexOf(n) === -1);
+    t.eq(noTpl.length, 0, 'policy 每个意图都有自己的话术组（缺组：' + noTpl.join('、') + '）');
+    const ghost = S.OrderContext.TPL_INTENTS.filter((n) => names.indexOf(n) === -1);
+    t.eq(ghost.length, 0, 'TPL_INTENTS 不许写政策词表里没有的意图名（' + ghost.join('、') + '）');
+    t.eq(S.OrderContext.localReplies(pack, '模型自造的意图名', 3).length, 3,
+      '真不认识的意图名仍走 `默认` 组兜底（不是空话术）');
   }
 
   /* ================================================================

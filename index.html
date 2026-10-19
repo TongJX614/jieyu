@@ -6,6 +6,26 @@
 <title>解语 Jieyu · 美妆客服共情副驾</title>
 <meta name="description" content="解语（Jieyu）—— 面向美妆消费者服务场景的 AI 实时坐席辅助系统：多源数据融合、情绪与意图识别、风险预警与话术推荐。每一条回复都依据订单事实生成。">
 <link rel="icon" href="assets/img/favicon.png" type="image/png">
+<!-- 主题要在样式表生效前就落到 <html> 上。app.js 是 defer 到底部才跑的，
+     在那之前先按 <html data-theme="light"> 画一帧 —— 选了「跟随系统」的夜班坐席
+     每次进来都被浅色闪一下。这里的优先级必须和 app.js 的 applyTheme 完全一致
+     （深链 > 本机模式 > 默认浅色），两处不一致就会先跳一次再被纠正回来。 -->
+<script>
+(function () {
+  'use strict';
+  try {
+    var q = String(location.search || '').match(/[?&]theme=(dark|light)/);
+    var mode = q ? q[1] : (JSON.parse(localStorage.getItem('beauty-cs-prefs') || '{}').theme || 'light');
+    var real = mode === 'dark' ? 'dark'
+      : (mode === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark'
+      : 'light';
+    document.documentElement.setAttribute('data-theme', real);
+    /* 把「首帧前定的那套」留在牌面上：浏览器回归检查会拿它和 app.js 最终定的那套比。
+       两处不一致 = 用户会先看到一帧错的主题再被纠正，这正是要防的闪。 */
+    window.__themePre = real;
+  } catch (e) { /* 隐私模式读不到、或存的是坏数据：留在写死的浅色，等 app.js 接管 */ }
+})();
+</script>
 <link rel="stylesheet" href="assets/styles.css">
 </head>
 <!-- data-gate 是登录门禁：没登录时整块应用不可见，登录页占满视口。
@@ -497,6 +517,19 @@
         </div>
         <div class="panel-body" id="kbList"></div>
       </section>
+
+      <!-- 话术效果回执：知识库回答「有没有人用」，这块回答「用了到底有没有用」。
+           放在同一个视图里是刻意的 —— 两个答案说的是同一批话术，拆两处就没人对着看了。 -->
+      <section class="panel effect-panel">
+        <div class="panel-head">
+          <h2>话术效果回执</h2>
+          <span class="hint" id="effectHint">只在下一轮顾客消息分析收尾后才记账</span>
+          <span class="spacer"></span>
+          <button class="mini" id="btnEffectRefresh" title="重新拉取服务端聚合">刷新</button>
+        </div>
+        <div class="panel-body" id="effectBody"></div>
+        <div class="panel-foot" id="effectFoot">—</div>
+      </section>
     </div>
 
     <!-- 效果评测：把「感觉准」变成可复现的数字 -->
@@ -529,8 +562,13 @@
   </main>
 </div>
 
-<!-- ==================== 话术小助手（可拖动） ==================== -->
-<div class="sprite" id="sprite" style="right:26px;bottom:152px">
+<!-- ==================== 话术小助手（可拖动） ====================
+     hidden 写在标记里，不等 JS 来加：`.sprite-pet` 的 background-image 在 HTML
+     解析到那张图时就去取了，早于任何脚本执行 —— 实测 400KB 的 sprite-idle.png
+     在「用户明明把助手关掉了」的那次打开里照样下载。显隐由 spriteVisible() 判，
+     switchView / prefsApply 各自会把这个属性摘掉；JS 没跑起来时不显示助手，
+     也比多付 400KB 给一个看不见的元素强。 -->
+<div class="sprite" id="sprite" hidden style="right:26px;bottom:152px">
   <div class="sprite-tip" id="spriteTip" hidden></div>
   <div class="sprite-bubble" id="spriteBubble" hidden>
     <div class="sb-head">
@@ -718,7 +756,7 @@
           <button type="button" data-theme-opt="dark">深色</button>
           <button type="button" data-theme-opt="auto">跟随系统</button>
         </div>
-        <div class="form-note">默认浅色；夜间值班可切深色。选择记在本机，带 <code>?theme=</code> 的链接优先。</div>
+        <div class="form-note">默认浅色；夜间值班可切深色。选「跟随系统」时，系统换了主题这一页当场跟着换。选择记在本机，带 <code>?theme=</code> 的链接优先。</div>
       </div>
 
       <div class="form-block">
@@ -965,6 +1003,8 @@
 </div>
 
 <script src="assets/policy.js"></script>
+<!-- 前文记忆层：把「顾客已经说过什么」压成结构化已知项，供提示词、本地话术、出站整形共用 -->
+<script src="assets/memory.js"></script>
 <script src="assets/crm.js"></script>
 <script src="assets/orderctx.js"></script>
 <script src="assets/guard.js"></script>

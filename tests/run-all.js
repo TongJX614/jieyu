@@ -22,7 +22,10 @@ const SUITES = [
   'harness.test.js',
   'llm.test.js',
   'server.test.js',
+  'store.test.js',
+  'effect.test.js',
   'bugfix.test.js',
+  'memory.test.js',
   'domain.test.js',
   'propfit.test.js',
 ];

@@ -133,6 +133,20 @@ window.EmotionPolicy = (function () {
     return 'flat';
   }
 
+  /**
+   * 走势的「严重程度」序：down 最需要立刻接住情绪，up 最不需要。
+   * 存在的意义是让**词典算的走势**和**模型判的走势**能对账 —— 对账规则与风险同一套精神：
+   * 只许就高不许下调（模型说 flat 而词典说 down，按 down 走；反过来不许把 down 抹平）。
+   * 口径放在 policy 一处，阶段里不许再写一份比较逻辑。
+   */
+  var TREND_RANK = { up: 0, flat: 1, down: 2 };
+  function worseOf(a, b) {
+    var ra = TREND_RANK[a], rb = TREND_RANK[b];
+    if (ra == null) return b;
+    if (rb == null) return a;
+    return ra >= rb ? a : b;
+  }
+
   /** 按标点把一段话切成句子 —— 情绪曲线要求「一句话一个点」，不是「一条消息一个点」 */
   function splitSentences(text) {
     var t = String(text || '').replace(/\s+/g, ' ').trim();
@@ -166,9 +180,9 @@ window.EmotionPolicy = (function () {
   }
 
   return {
-    BASE: BASE, DECAY: DECAY, LEX: LEX, BANDS: BANDS,
+    BASE: BASE, DECAY: DECAY, LEX: LEX, BANDS: BANDS, TREND_RANK: TREND_RANK,
     clamp: clamp, labelOf: labelOf, toneOf: toneOf,
-    score: score, indexOf: indexOf, trendOf: trendOf,
+    score: score, indexOf: indexOf, trendOf: trendOf, worseOf: worseOf,
     splitSentences: splitSentences, scoresOf: scoresOf,
   };
 })();

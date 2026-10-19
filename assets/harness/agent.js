@@ -385,7 +385,7 @@
 
       if (obj.final) {
         trace.stage('agent:final', round2(nowMs() - t0), true, '第 ' + (i + 1) + ' 步收敛');
-        var res = LLM.normalize(obj.final, 'llm');
+        var res = LLM.normalize(obj.final, 'llm', (input && input.message) || '');
         res.agent = { mode: 'model', steps: steps.map(pubStep), insight: '' };
         return res;
       }

@@ -205,6 +205,64 @@ module.exports = async function (t) {
     t.eq(run4.result.risk.score, run5.result.risk.score, '重复运行结果稳定（无跨轮污染）');
   }
 
+  /* 情绪走势：模型给的是「理解」，词典给的是「尺子」。
+     原来的实现无条件用词典覆写，模型自报的 down 直接蒸发 ——
+     顾客用平静措辞说出「我明天要见人，脸这样」时被判成 flat，回复就不接情绪了。
+     现在两条都留痕、取更严重的那个；这一组钉的就是「取谁、留什么」。 */
+  t.suite('harness · 情绪走势对账（模型理解 vs 词典尺子）');
+  {
+    /* 只装情绪阶段需要的依赖；模型结论由 stub 给，避免把「模型能不能理解」测成随机数 */
+    async function runEmotion(model, jobPatch, engine) {
+      const h = core.create({ name: 'emo', providerChain: ['stub'] });
+      h.provide('stub', () => Object.assign({
+        engine: engine || 'llm',
+        emotion: model,
+        intents: [{ name: '常规咨询', tone: 'muted', confidence: 0.6 }],
+        risk: { level: 'low', score: 0, signals: [], advice: '' },
+        replies: [],
+      }, {}));
+      h.use({ name: 'facts', run: stages.facts });
+      h.use({ name: 'generate', run: stages.generate });
+      h.use({ name: 'riskfloor', run: stages.riskfloor, fatal: isFatal('riskfloor') });
+      h.use({ name: 'emotion', run: stages.emotion });
+      h.use({ name: 'context', run: stages.context });
+      return h.run(Object.assign(jobFor('算了'), jobPatch || {}), deps);
+    }
+
+    /* ① 词典判 flat（上一句 66、本句 66），模型判 down → 取 down。
+          这正是「措辞平静、实际在崩」的那类消息，也是用户点名的那次事故温度。 */
+    const e1 = await runEmotion({ score: 22, trend: 'down' }, { message: '算了', series: [66], prevIndex: 66 });
+    t.eq(e1.result.emotion.trendDict, 'flat', '词典这把尺子判 flat（两句同为 66）');
+    t.eq(e1.result.emotion.trendModel, 'down', '模型的理解（down）被保留下来');
+    t.eq(e1.result.emotion.trend, 'down', '两者不一致时取更严重的 down，而不是让词典覆写');
+    t.eq(e1.result.emotion.score, 22, '本句情绪分采用模型判断');
+    t.eq(e1.result.context.trendModel, 'down', 'context 里能核对模型的原始判断');
+
+    /* ② 模型判 up、词典判 down → 仍取 down（走势只许就高，不许把恶化说成回暖） */
+    const e2 = await runEmotion({ score: 66, trend: 'up' }, { message: '算了', series: [80], prevIndex: 80 });
+    t.eq(e2.result.emotion.trendDict, 'down', '词典判 down（80 → 66）');
+    t.eq(e2.result.emotion.trend, 'down', '模型说 up 也不许下调走势');
+    t.eq(e2.result.emotion.trendModel, 'up', '模型那条照样留痕，便于复核是否理解偏差');
+
+    /* ③ 模型没给合法走势 → 只用词典，不把空串当判断 */
+    const e3 = await runEmotion({ score: 66, trend: 'sideways' }, { message: '算了', series: [80], prevIndex: 80 });
+    t.eq(e3.result.emotion.trendModel, null, '非法 trend 不采信');
+    t.eq(e3.result.emotion.trend, 'down', '回落到词典口径');
+
+    /* ④ 本地通道没有「理解」，即便字段里带 trend 也不采信 */
+    const e4 = await runEmotion({ score: 66, trend: 'down' }, { message: '算了', series: [80], prevIndex: 80 }, 'local');
+    t.eq(e4.result.emotion.trendModel, null, 'local 引擎不冒充模型判断');
+    t.eq(e4.result.emotion.trend, 'down', '走势仍按词典计算');
+
+    /* ⑤ 一句里多个分句：模型分只覆盖**最后一句**，前面分句仍走词典口径 ——
+          曲线不混尺度，「模型的理解」不能把所有采样点一起抹平。 */
+    const e5 = await runEmotion({ score: 20, trend: 'down' }, { message: '算了算了，我明天还要去见一个重要客户', series: [], prevIndex: null });
+    t.eq(e5.result.emotion.series.length, 2, '按标点拆成两个采样点');
+    t.eq(e5.result.emotion.series[0], 66, '前一分句仍用词典分（66）');
+    t.eq(e5.result.emotion.series[1], 20, '最后一个分句采用模型分（20）');
+    t.eq(e5.result.emotion.score, 20, '本句分 = 曲线最后一个点');
+  }
+
   t.suite('harness · provider 降级语义');
   {
     /* 抛错 = 失败 → 落到下一个通道，并记录原因 */

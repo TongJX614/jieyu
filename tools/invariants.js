@@ -405,7 +405,7 @@ check('ST17', '静态结构', '阈值不在 policy 之外重复（退化兜底�
     : true;
 });
 
-check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权 / 慢哈希 / 代理闸门 / 协商缓存 / 视觉代理', () => {
+check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权 / 慢哈希 / 代理闸门 / 协商缓存 / 传输压缩 / 视觉代理', () => {
   const bad = [];
 
   /* ① 静态托管必须是「默认拒绝 + 显式白名单」。
@@ -494,6 +494,53 @@ check('ST18', '静态结构', 'server 边界：静态白名单 / 写接口鉴权
   if (!/_vlmSkipped/.test(TEST_VIS)) bad.push('视觉代理缺「未授权一次请求都不发」的断言');
   if (!/headers\.Authorization, undefined/.test(TEST_VIS)) bad.push('缺「同源代理不带 Authorization」的断言（密钥不进浏览器这条全靠它）');
   if (!/data-vlm-consent/.test(read('assets/app.js'))) bad.push('界面没有逐张授权控件（通道一接，默认外发就等于改了合规口径）');
+
+  /* ⑨ 传输压缩。审计量的本来就是 transferSize：未压实测首屏 958KB（23 个脚本 +
+     一份 189KB 样式表），新增一个 29.5KB 的模块就能把预算顶穿。
+     这条的回潮形状很安静 —— 删掉 gzip 分支不报错、页面照开，只是首屏默默涨回四倍。 */
+  const compM = /const COMPRESSIBLE_EXT\s*=\s*\[([^\]]*)\]/.exec(SERVER);
+  if (!compM) bad.push('没有可压扩展名清单（「压什么」变成散在代码里的判断）');
+  else {
+    const exts = compM[1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+    const ALREADY = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4', '.woff', '.woff2'];
+    const wrong = exts.filter((e) => ALREADY.indexOf(e) !== -1);
+    if (wrong.length) bad.push('已自压缩的二进制进了清单（再压白烧一次 CPU，还可能变大）：' + wrong.join(','));
+    if (exts.indexOf('.js') === -1 || exts.indexOf('.css') === -1) bad.push('清单里没有 .js/.css —— 首屏的大头正是它们');
+  }
+  const acceptM = /function clientAcceptsGzip\([\s\S]*?\n\}/.exec(SERVER);
+  /* 一律先剥注释再比：这段代码上方的注释本来就在解释 `gzip;q=0`，
+     拿原文做匹配的话，把那句判断整个删掉，ST18 会因为「注释里提到了 q=0」而判绿 ——
+     闸门守的是行为，不是「作者写过这个名词」。 */
+  const acceptCode = acceptM ? stripComments(acceptM[0]) : '';
+  if (!acceptM) bad.push('没有「客户端声明支持才压」的判定（给不支持的客户端发 gzip 是直接坏掉，不是慢）');
+  else {
+    if (!/accept-encoding/i.test(acceptCode)) bad.push('压缩判定没读 Accept-Encoding');
+    if (!/q=0[\s\S]{0,80}return false/.test(acceptCode)) {
+      bad.push('没挡 `gzip;q=0`（那是显式拒绝，「串里有 gzip」不等于支持）');
+    }
+  }
+  /* 正则作用域 = serveStatic 函数体：整份 SERVER 里 `/api/chat` 那条代理也写 body，
+     全文匹配会把那边的头部算进来，判成「静态这边有 Content-Length」之类的假绿。 */
+  const serveM = /function serveStatic\([\s\S]*?\n\}/.exec(SERVER);
+  if (!serveM) bad.push('serveStatic 函数体抓不到（压缩相关的检查全部失去作用域）');
+  else {
+    const SF = stripComments(serveM[0]);
+    if (!/gz \? '-gz' : ''/.test(SF)) {
+      bad.push('校验器没按编码分变体（gzip 与 identity 共用一个 ETag，缓存能拿另一份 body 命中 304，浏览器解出来是乱码）');
+    }
+    if (!/Vary: 'Accept-Encoding'/.test(SF)) bad.push('没写 Vary（同一 URL 两种 body，中间缓存不知道要按声明分开发）');
+    if (!/COMPRESSIBLE_EXT\s*\.\s*indexOf\(ext\)\s*!==\s*-1/.test(SF)) {
+      bad.push('压不压没真的按扩展名判定（清单写得再干净，绕过它就成了「PNG 也压一遍」）');
+    }
+    if (!/if \(gz\)/.test(SF) || !/else\s*\{?\s*\n?\s*headers\['Content-Length'\]\s*=\s*st\.size/.test(SF)) {
+      bad.push('Content-Length 不是只在 identity 分支给（压过的长度要压完才知道，硬给就是把未压缩的数报给浏览器）');
+    }
+    if (!/zlib\.createGzip\(/.test(SF)) bad.push('正文没走 gzip 管道（只有头部口径，没有传输）');
+    const onError = (SF.match(/\.on\('error'/g) || []).length;
+    if (onError < 2) bad.push('gzip 链上两个流（读流、压缩流）要各自接 error，少接一个就是进程级未捕获异常，实为 ' + onError + ' 处');
+  }
+  if (!/zlib\.gunzipSync\(/.test(TEST_SRV)) bad.push('压缩缺「解压后逐字节等于磁盘那份」的断言（压坏了没人知道）');
+  if (!/, 'gzip',/.test(TEST_SRV)) bad.push('压缩没有真 HTTP 断言（audit 的字节数看不出变体混用）');
 
   return bad.length ? { status: 'fail', detail: bad.join('；') }
     : { status: 'pass', detail: '白名单 ' + dirs.concat(files).join('/') };
@@ -748,6 +795,374 @@ check('ST23', '静态结构', '照片生命周期：像素不落盘 · 台账只
 
   return bad.length ? { status: 'fail', detail: bad.join('；') }
     : { status: 'pass', detail: '落盘必经 forDisk 且无像素 · 写盘失败有计数 · 台账不落盘 · 保留期/边长各一处定义 · 丢弃与清扫已装配 · 三侧测试都在看' };
+});
+
+/* ST24 空号是**故意的**：`ST24` 预留给批次 F-1 的「同源判定管线」（`/api/analyze` 必须经
+   asset-runtime 加载、不许自己另写一套计分），那条收尾还没落地。跳一个号比撞一个号便宜。 */
+check('ST25', '静态结构', 'db.json 落盘必须锁内读盘 + 三方合并（两台实例不许互相覆盖）', () => {
+  /* 批次 G 的护栏。这里每条都对应一种「改回去不会报错、只是别人的数据没了」的退化：
+       ① 读盘在锁之后。少了这条，「A 读 → B 写 → A 写」里 A 的合并压根没见过 B 的记录，
+          丢数据照旧发生，而合并代码看起来一行都没少。
+       ② base 必须在补种子字段**之前**抓。抓晚了，本进程删掉的记录会被判成「对方新建」，
+          从盘里复活成僵尸 —— 而且重启之后才看得见。
+       ③ 回写内存必须走 reconcileInto（保对象身份）。换成 `DB = merged.db` 不会报错，
+          但 `agentOf()` 早就取走的引用变成孤儿，那次请求的写入静默丢失。
+       ④ 发号前先看盘。锁只保护写，号是在写之前定的。
+       ⑤ 合并模块保持纯函数：一旦它 require('fs')，单测里那十几种交错就只能靠起真服务复现。 */
+  const bad = [];
+  const SRVC = stripComments(SERVER);
+  const MERGE_FILE = exists('server/store-merge.js') ? read('server/store-merge.js') : '';
+  const MERGE = stripComments(MERGE_FILE);
+
+  if (!MERGE_FILE) return { status: 'fail', detail: 'server/store-merge.js 不存在' };
+
+  /* ① 独占创建锁 + 顺序 */
+  if (!/fsp\.open\(\s*DB_LOCK_FILE\s*,\s*'wx'\s*\)/.test(SRVC)) {
+    bad.push('没有用 wx 独占创建 db.json.lock（其它写法都不跨进程互斥）');
+  }
+  /* 顺序必须在 writeOnce **函数体内**比，不能拿全文比：
+     `readDiskDb()` 在发号那条口（diskNextKb）上也调了一次，而那一次本来就不该持锁 ——
+     全文 indexOf 会先撞上它，于是闸门报一个假红。
+     （同一个坑本项目已经踩过两次：正则/字符串的作用域大于约定的作用域。）
+     两边都取同一个坐标系：函数体内的下标。 */
+  const wo = (/async function writeOnce\(\)\s*\{[\s\S]*?\n\}/.exec(SRVC) || [''])[0];
+  if (!wo) bad.push('writeOnce 函数体没抓到 —— 下面这些「顺序」断言全都没有坐标系了');
+  const acquireAt = wo.indexOf('await acquireDbLock()');
+  const readAt = wo.indexOf('await readDiskDb()');
+  if (acquireAt === -1 || readAt === -1 || acquireAt > readAt) {
+    bad.push('读盘没有发生在拿到锁之后（顺序反了就还是「A 读 → B 写 → A 写」，合并救不回来）');
+  }
+  if (!/finally\s*\{[\s\S]{0,80}releaseDbLock\(\)/.test(SRVC)) bad.push('锁没有在 finally 里释放（写盘抛错就把锁占到进程结束）');
+
+  /* ② 合并这条路径 */
+  if (!/StoreMerge\.mergeSnapshots\(\s*\{\s*disk:\s*disk\.db\s*,\s*ours:\s*DB\s*,\s*base:\s*dbBase\s*\}/.test(SRVC)) {
+    bad.push('落盘没有把 disk / ours / base 三份一起交给合并（少一份就分不清是谁删的、谁新建的）');
+  }
+  const baseAt = SRVC.indexOf('dbBase = JSON.parse(JSON.stringify(seed))');
+  const seedAt = SRVC.indexOf('seed.agents = SEED_AGENTS');
+  if (baseAt === -1 || seedAt === -1 || baseAt > seedAt) {
+    bad.push('loadDb 的 base 必须在补种子坐席**之前**抓（抓晚了，本进程的删除会被判成对方新建）');
+  }
+
+  /* ③ 身份保持 */
+  if (!/StoreMerge\.reconcileInto\(\s*DB\s*,\s*merged\.db\s*\)/.test(SRVC)) {
+    bad.push('合并结果没有原地并回内存（换成整份换新会让 await 之前取走的记录引用变孤儿，静默丢一次写）');
+  }
+  if (/DB\s*=\s*merged\.db/.test(SRVC)) bad.push('出现了 `DB = merged.db`：这正是被禁止的整份换新');
+  /* 原子替换只有一处。2026-10-19 把 rename 包进 renameReplace() 之后，原来那条
+     /rename\(\s*tmp\s*,\s*DB_FILE/ 数的是字面量，包一层就报 0 处 —— 假红。
+     闸门要盯的是形状背后的那件事：**落盘只能经由这一个出口**，而且这个出口不许把异常吞掉。
+     所以三条一起看：调用点恰好 1 处、原语 rename 全文恰好 1 次（就在 helper 里）、
+     helper 的失败路径必须抛出去（重试白名单之外的码不许静默成功）。 */
+  const rrCalls = (SRVC.match(/renameReplace\(\s*tmp\s*,\s*DB_FILE/g) || []).length;
+  if (rrCalls !== 1) {
+    bad.push('经由 renameReplace 往 db.json 上做的原子替换必须只有一处，实为 ' + rrCalls + ' 处');
+  }
+  const renamePrims = (SRVC.match(/\b(?:fsp\.)?rename\(/g) || []).length;
+  if (renamePrims !== 1) {
+    bad.push('rename 原语只许出现在 renameReplace 里（别处再调一次就绕过了重试与错误码，实为 ' +
+      renamePrims + ' 处）');
+  }
+  const rrBody = (/async function renameReplace\([\s\S]*?\n\}/.exec(SRVC) || [''])[0];
+  if (!rrBody) bad.push('renameReplace 函数体没抓到');
+  if (!/if \(\s*!RENAME_RETRY_CODES\.includes\(\s*e\.code\s*\)\s*\|\|/.test(rrBody)) {
+    bad.push('renameReplace 的白名单没有真的挡住重试分支（只「引用」了错误码不算 —— 挡不住就会把 ENOENT 这类真异常也吃掉）');
+  }
+  if (!/throw e/.test(rrBody)) bad.push('renameReplace 的失败路径没有抛出：静默成功等于「以为落盘了」');
+  if ((SRVC.match(/const RENAME_RETRY_MS\s*=/g) || []).length !== 1) {
+    bad.push('RENAME_RETRY_MS 的定义处应为 1');
+  }
+
+  /* ④ 发号前看盘（同样只在 handleKbCreate 体内比） */
+  const kc = (/function handleKbCreate\([\s\S]*?\n\}/.exec(SRVC) || [''])[0];
+  const allocAt = kc.indexOf('await diskNextKb()');
+  const incAt = kc.indexOf('db.nextKb++');
+  if (!kc || allocAt === -1 || incAt === -1 || allocAt > incAt) {
+    bad.push('话术发号之前没有读盘取高水位（两台会发出同一个序号，现在只是被时间戳前缀掩盖着）');
+  }
+  if (!/async function diskNextKb/.test(SRVC) || !/catch \(e\) \{\s*return 0;/.test(SRVC)) {
+    bad.push('diskNextKb 必须自己吞掉读盘异常：它挂在 readJson().then() 里，reject 会被误报成「请求体不是合法 JSON」');
+  }
+
+  /* ⑤ 纯函数 + 严格模式 */
+  if (/'use strict'/.test(MERGE_FILE) === false) bad.push('store-merge.js 缺 \'use strict\'');
+  if (/require\(\s*['"]fs['"]|readFileSync|writeFile/.test(MERGE)) bad.push('store-merge.js 碰到了文件系统 —— 它必须是纯函数，否则这些分支没法脱离真磁盘断言');
+  if (/Date\.now\(\)|Math\.random\(\)/.test(MERGE)) bad.push('store-merge.js 里有不确定来源（时间/随机）：同一组输入必须永远得到同一个结果');
+  if (!/COLLECTIONS/.test(MERGE) || !/nextKb/.test(MERGE)) bad.push('store-merge.js 少了已知表或发号器的声明');
+
+  /* ⑥ 阈值只有一处 + 界面看得见 */
+  for (const k of ['LOCK_WAIT_MS', 'LOCK_STALE_MS', 'STALL_RETRY_MS']) {
+    const defs = (SRVC.match(new RegExp('const ' + k + '\\s*=', 'g')) || []).length;
+    if (defs !== 1) bad.push(k + ' 的定义处应为 1，实为 ' + defs);
+  }
+  for (const k of ['keptFromDisk', 'honoredDeletes', 'lockTimeouts', 'stalled', 'corruptReads']) {
+    if (!new RegExp(k + '\\s*:').test(SRVC)) bad.push('/api/health 的 store 里没有 ' + k);
+  }
+
+  /* ⑦ 测试真的在看这几件事：闸门只保证此刻的形状，测试才保证下次改动还看得见 */
+  const ST = exists('tests/store.test.js') ? stripComments(read('tests/store.test.js')) : '';
+  if (!ST) bad.push('tests/store.test.js 不存在');
+  if (!/require\('\.\.\/server\/store-merge\.js'\)/.test(ST)) bad.push('store 单测没有引用被测模块本体（在重抄一遍逻辑）');
+  /* 认「起两台」要看**调用次数**，不是 `DATA_DIR: DIR` 出现几次 —— 那行写在共用的 launch() 里，
+     调两次也只出现一次。原来的写法数的是字面量，报的是假红。 */
+  if ((ST.match(/await launch\(/g) || []).length < 2) {
+    bad.push('集成部分必须起**两台**实例共用同一个 DATA_DIR，否则这条缺陷永远复现不出来');
+  }
+  if (!/const DIR = path\.join\(os\.tmpdir\(\)/.test(ST) || !/DATA_DIR:\s*DIR/.test(ST)) {
+    bad.push('两台实例没有指向同一个临时数据目录（各自一份就测不到跨进程覆盖）');
+  }
+  if (!/keptFromDisk/.test(ST)) bad.push('集成测试没有核对 keptFromDisk（绿了也不知道合并按没按下去）');
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: 'wx 锁内读盘 · base 抓在播种前 · 回写保身份 · 发号前看盘 · 纯函数 · health 自述 · 两台共目录的测试在看着' };
+});
+
+check('ST26', '静态结构', '立绘字节必须受显隐与首屏控制 · 且资源预算真的能判红', () => {
+  /* 批次 G 前端这一半的护栏。6.9MB 的帧图原来是无条件预热的：
+       ① 显隐判据必须只有一份，而且**下载**也归它管。少一条，助手关掉后字节照付，
+          界面上却一切正常 —— 没人会为一个看不见的元素去查流量。
+       ② 首屏落定前不许开火。这一条丢了，延后就退化成「和首屏抢」。
+       ③ 预热也不能悄悄断掉：预载没了不会报错，只会拖拽时卡一下，
+          所以「该下的至少下够」和「不该下的别下」必须成对存在。
+       ④ 预算若不影响退出码，审计崩了和审计绿了长得一模一样。 */
+  const bad = [];
+  const APP = exists('assets/app.js') ? read('assets/app.js') : '';
+  const HTML = exists('index.html') ? read('index.html') : '';
+  const CSS = exists('assets/styles.css') ? read('assets/styles.css') : '';
+  const AUD = exists('tools/audit.js') ? stripComments(read('tools/audit.js')) : '';
+
+  /* ① 一条队列 · 一个显隐判据 · 不许留裸的 new Image() 预热带 */
+  if (!/var SPRITE_EMPTY_SHEETS\s*=\s*\[/.test(APP)) bad.push('app.js 没有 SPRITE_EMPTY_SHEETS 这张延后预热清单');
+  if (!/SPRITE_EMPTY_SHEETS\.forEach\(heatSheet\)/.test(APP)) bad.push('空手帧清单没有走 heatSheet（绕过队列就没有显隐与首屏闸门）');
+  if (!/function heatSheet\(/.test(APP) || !/function pumpHeat\(/.test(APP)) bad.push('heatSheet / pumpHeat 缺一 —— 下载判据没有单一收口');
+  if (!/heatSheet\(PropFit\.spriteOf\(/.test(APP)) bad.push('preheatProp 没有走队列（道具那 6 张同样按显隐放行）');
+  /* 计数在剥掉注释的源码上做：这段护栏自己的说明文字里就写着 `new Image()`，
+     不剥的话第一条就跑出假红（本项目踩过：注释里的字样会被当成代码）。 */
+  const imgNews = (stripComments(APP).match(/new Image\(\)/g) || []).length;
+  if (imgNews !== 1 || !/function pumpHeat\(\)[\s\S]{0,700}new Image\(\)/.test(stripComments(APP))) {
+    bad.push('全文件应当只剩一个 new Image()（就在 pumpHeat 里），实为 ' + imgNews +
+      ' 处 —— 别处再自己发一张，就绕过了显隐与首屏两道闸门');
+  }
+  const pv = (/function spriteVisible\(\)\s*\{[\s\S]*?\n  \}/.exec(APP) || [''])[0];
+  if (!/state\.prefs\.sprite !== false/.test(pv) || !/state\.view === 'workbench'/.test(pv)) {
+    bad.push('spriteVisible 没有同时看 view 与 prefs.sprite —— 显隐判据散回各处就又会各写一遍');
+  }
+  if ((APP.match(/hidden = !spriteVisible\(\)/g) || []).length !== 2) {
+    bad.push('桌宠显隐应当有两处赋值（switchView / prefsApply）都走 spriteVisible()，实为 ' +
+      (APP.match(/hidden = !spriteVisible\(\)/g) || []).length + ' 处');
+  }
+  if (/hidden\s*=\s*[^\n]*state\.prefs\.sprite === false/.test(APP)) {
+    bad.push('还剩一处自己写显隐条件（该走 spriteVisible()）');
+  }
+  /* 每个把助手变可见的入口都必须重新放行队列 */
+  if (!/window\.addEventListener\(\s*'load'\s*,\s*pumpHeat\s*\)/.test(APP)) {
+    bad.push('没有 load 扳机：队首那张图会永远等在队列里（预载断了不报错，只卡拖拽）');
+  }
+  for (const fn of ['switchView', 'prefsApply']) {
+    const m = new RegExp('function ' + fn + '\\([\\s\\S]*?\\n  \\}').exec(APP);
+    if (!m) { bad.push(fn + ' 函数体没抓到 —— 这条扳机断言没有坐标系'); continue; }
+    if (!/pumpHeat\(\)/.test(m[0])) bad.push(fn + ' 改了显隐却没有重新放行帧图队列');
+  }
+
+  /* ② 首屏落定之前一张都不发 */
+  const ph = (/function pumpHeat\(\)\s*\{[\s\S]*?\n  \}/.exec(APP) || [''])[0];
+  if (!ph) bad.push('pumpHeat 函数体没抓到');
+  if (!/spriteVisible\(\)/.test(ph)) bad.push('pumpHeat 没有按显隐放行');
+  if (!/document\.readyState !== 'complete'/.test(ph)) bad.push('pumpHeat 没有等首屏 load 落定');
+  if (!/heatQueue\.shift\(\)/.test(ph) || /while\s*\([\s\S]*heatQueue\.shift/.test(ph)) {
+    bad.push('pumpHeat 必须一次只发一张（一次抽干就又变回同一 tick 七个请求）');
+  }
+
+  /* ③ 标记里就得是 hidden：JS 摘属性之前，CSS 的 background-image 已经在下载了 */
+  if (!/<div class="sprite" id="sprite" hidden/.test(HTML)) {
+    bad.push('index.html 的 #sprite 没写 hidden（脚本跑起来之前那张 408KB 的 idle 帧就已经发了请求）');
+  }
+  if (!/body\[data-gate="1"\]\s*\.sprite\s*\{[^}]*display:\s*none/.test(CSS)) {
+    bad.push('门禁期间没有把桌宠 display:none —— 登录页背后不该一边下载立绘一边逐帧动画');
+  }
+  if (APP.indexOf('[?&]pet=off') === -1) bad.push('缺 ?pet=off 深链：审计就没法对量「助手关掉时还下多少字节」');
+
+  /* ④ 预算：三条场景成对存在，而且超标真的会退出 1 */
+  if (!/const NET_SCENARIOS = \[/.test(AUD)) bad.push('audit.js 没有 NET_SCENARIOS —— 字节成本又回到没人看');
+  for (const k of ['gate', 'workbench-pet-on', 'workbench-pet-off']) {
+    if (!new RegExp("key:\\s*'" + k + "'").test(AUD)) bad.push('资源预算缺场景 ' + k);
+  }
+  if (!/spriteKB:\s*0/.test(AUD)) bad.push('没有「助手不在场时立绘必须为 0」这条预算');
+  if (!/minSpriteReqs:\s*[1-9]/.test(AUD)) {
+    bad.push('没有「该下的立绘至少下够」这条下限 —— 只留上限的话，把预载删掉也能全绿');
+  }
+  if (!/m\.unique\s*>\s*sc\.maxTotalKB/.test(AUD)) bad.push('预算没按去重字节算（桌宠随机做动作会让总字节飘 600KB，闸门变掷骰子）');
+  if (!/report\.budgetFail\.push/.test(AUD)) bad.push('超标没有记进 budgetFail');
+  if (!/process\.exit\(\s*report\.fatal \|\| report\.budgetFail\.length \?\s*1 :\s*0\s*\)/.test(AUD)) {
+    bad.push('audit.js 的退出码没有带上 budgetFail（红了的预算仍然退出 0）');
+  }
+  /* 字节只有在真浏览器里才看得见：静态扫描能证明形状，证明不了「没发请求」。 */
+  const BC = exists('tests/browser-check.js') ? read('tests/browser-check.js') : '';
+  if (!/name: 'sprite-heat'/.test(BC)) {
+    bad.push('浏览器检查没有 sprite-heat —— 「关着不下、打开才放行」这一对只有真页面测得出来');
+  }
+
+  /* 顺手把量摆出来：这张清单到底值多少字节，改动画的人应该一眼看见 */
+  let heatKB = 0;
+  const names = ((/var SPRITE_EMPTY_SHEETS\s*=\s*\[([\s\S]*?)\]/.exec(APP) || [, ''])[1].match(/'[^']+'/g) || []);
+  names.forEach((n) => {
+    const f = 'assets/img/' + n.replace(/'/g, '') + '.png';
+    if (exists(f)) heatKB += fs.statSync(abs(f)).size;
+    else bad.push('预热清单里的文件不存在：' + f);
+  });
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: '显隐+首屏双闸门的一条队列 · 标记里就 hidden · 门禁 display:none · ' +
+        names.length + ' 张空手帧 ' + Math.round(heatKB / 1024) + 'KB 只在助手可见时才付 · 三场景预算能判红' };
+});
+
+check('ST27', '静态结构', '话术效果回执：只报结构化事实 · 只在闭合时上报 · 落盘的祖先必须等于盘上真有过的东西', () => {
+  /* 批次 H 的护栏。这张表是新长出来的攻击面，也是一次真丢记录的现场，所以每条都对应
+     一个「改回去不会报错、只是数字开始骗人」的退化：
+       ① 白名单是唯一入库通道。多放一个键进去，顾客原文/照片就顺着这张「看起来只有分数」
+          的表流到盘上 —— 而盘上文件是会被复制走的。
+       ② 读写都要登录态。「谁的话术有效」是绩效读数，匿名可读等于让局域网里任意机器
+          翻别人的工号表现。
+       ③ 升降（delta）只在上报端用 policy 那一把尺子算。服务端一旦自己排一次等级序，
+          项目里就有两把尺子，而它们的分界线将来一定不一样（ST17/ST19 同一个病）。
+       ④ 前端只在闭合时上报：没有下一轮的读数就不许记账。少这条，未闭合的会话会被
+          当成「话术有效」刷进分母，回落率再也读不出意思。
+       ⑤ **这条是这次撞出来的真缺陷**：`dbBase`（合并的共同祖先）必须来自写进盘里的
+          那一份字符串。原来那里是「rename 完成之后再从内存抓一份」，而 writeFile/rename
+          中间隔着两个 await —— 落在窗口里的那条记录进了祖先却没进文件，下一次合并
+          读到「base 有、盘上没有」就判成「对方把它删了」，尊重一次谁都没做过的删除，
+          把它从盘上抹掉。十条并发回执实测丢 8 条，而 accepted 照样是 12、HTTP 照样全 200。
+       ⑥ 上限与淘汰必须自述：一张只追加、没人清理的表，将来某天读出来 1000 条，
+          看的人不知道前面被挤掉了多少。 */
+  const bad = [];
+  const SRVC = stripComments(SERVER);
+  const STATS_FILE = exists('server/effect-stats.js') ? read('server/effect-stats.js') : '';
+  const STATS = stripComments(STATS_FILE);
+  const APPC = stripComments(APP);
+  const MERGE = exists('server/store-merge.js') ? stripComments(read('server/store-merge.js')) : '';
+
+  if (!STATS_FILE) return { status: 'fail', detail: 'server/effect-stats.js 不存在 —— 这张表没有唯一口径' };
+
+  /* ① 白名单：只有 effect-stats 认得的键才进库 */
+  if (!/'use strict'/.test(STATS_FILE)) bad.push('effect-stats.js 缺 \'use strict\'');
+  if (/require\(\s*['"]fs['"]|readFileSync|writeFile|createConnection/.test(STATS)) {
+    bad.push('effect-stats.js 碰到了文件系统或网络 —— 它必须是纯函数，否则这些分支只能起真服务才复现');
+  }
+  const fieldsRegion = (/const FIELDS = \{[\s\S]*?\n\};/.exec(STATS) || [''])[0];
+  if (!fieldsRegion) bad.push('FIELDS 这张表没抓到 —— 下面的白名单断言没有坐标系');
+  for (const k of ['source', 'delta', 'levelBefore', 'levelAfter', 'scoreBefore', 'scoreAfter',
+    'emoBefore', 'emoAfter', 'kbId', 'sess', 'turn']) {
+    if (!new RegExp('\\b' + k + ':').test(fieldsRegion)) bad.push('白名单少了 ' + k + '（它不在表里 = 上报端永远存不下这一格）');
+  }
+  /* 「不存在的键」这类断言必须打在**列的取值**上，不能只查子串：
+     `text:` 在别处出现（注释、错误消息）就会让这条恒真。这里先在剥过注释的 FIELDS 体内找。 */
+  for (const forbidden of ['text', 'customerMessage', 'messages', 'photo', 'name', 'phone', 'consent', 'token']) {
+    if (new RegExp('\\b' + forbidden + '\\s*:').test(fieldsRegion)) {
+      bad.push('白名单里冒出了 ' + forbidden + ' —— 这张表存在的前提就是它一个字的原文都不收');
+    }
+  }
+  const reqRegion = (/const REQUIRED = \[[\s\S]*?\]/.exec(STATS) || [''])[0];
+  if (!reqRegion) bad.push('REQUIRED 没抓到');
+  for (const k of ['source', 'delta', 'levelBefore', 'levelAfter', 'turn']) {
+    if (!new RegExp("'" + k + "'").test(reqRegion)) bad.push('REQUIRED 少了 ' + k + '（缺了它就不该 200，而是 400）');
+  }
+  if ((STATS.match(/const LIMIT\s*=/g) || []).length !== 1) bad.push('LIMIT 的定义处应为 1，实为 ' + (STATS.match(/const LIMIT\s*=/g) || []).length);
+  /* 「排先后」长这样：`LEVELS.indexOf(a) < LEVELS.indexOf(b)`。
+     原来写成 `[<>]` 就把它判进去了，于是把合法的存在性判断
+     （`LEVELS.indexOf(raw) >= 0`）也报成假红 ——  membership 是允许的，排序才不是。 */
+  if (/LEVELS\.indexOf\([^)]*\)\s*<=?\s*LEVELS\.indexOf\(|LEVEL_ORDER|LEVELS\.sort\(/.test(STATS)) {
+    bad.push('effect-stats.js 在给等级排先后 —— 那是 policy.js 的活（两把尺子迟早分家）');
+  }
+
+  /* ② 路由：先认人，再认方法 */
+  const rt = (/if \(p === '\/api\/effect'\) \{[\s\S]*?\n  \}/.exec(SRVC) || [''])[0];
+  if (!rt) bad.push('路由里没有 /api/effect 这一段（前端发的回执会落到静态兜底上，静默 404）');
+  const idAt = rt.indexOf('agentOf(req)');
+  const postAt = rt.indexOf('handleEffectCreate(');
+  const getAt = rt.indexOf('handleEffectList(');
+  if (idAt === -1 || postAt === -1 || getAt === -1 || idAt > postAt || idAt > getAt) {
+    bad.push('/api/effect 的读与写没有都排在 agentOf() 之后（匿名可读等于在局域网里翻别人的绩效）');
+  }
+  if (!/sendJson\(res,\s*401/.test(rt)) bad.push('/api/effect 没有 401 这条路');
+  if (!/sendJson\(res,\s*405/.test(rt)) bad.push('/api/effect 没有把别的方法明说 405（静默当 GET 就是「写了但没落盘」的错觉来源）');
+  if (/rankOf|riskLevels/.test(SRVC)) bad.push('server.js 自己算起等级序 —— delta 必须由上报端用 policy 那一把尺子给');
+
+  /* ③ 入库这条路：频控 → 清洗 → 必填 → 服务端盖 id → 追加 → 淘汰可见 */
+  const hc = (/function handleEffectCreate\([\s\S]*?\n\}/.exec(SRVC) || [''])[0];
+  if (!hc) bad.push('handleEffectCreate 函数体没抓到');
+  const rlAt = hc.indexOf('rateLimitOk(effectWindows');
+  const parseAt = hc.indexOf('readJson(req)');
+  if (rlAt === -1 || parseAt === -1 || rlAt > parseAt) bad.push('频控没有排在解析请求体之前（先收 4MB 再拒绝 = 一条免费的放大路径）');
+  if (!/EffectStats\.sanitize\(\s*p\s*,\s*\{\s*agent:\s*agent\.id/.test(hc)) {
+    bad.push('入库前没有走 sanitize，或坐席归属不是从令牌里取的（客户端自报工号 = 谁的账都能涂）');
+  }
+  if (!/EffectStats\.REQUIRED\.filter/.test(hc)) bad.push('必填缺失没有按 REQUIRED 判（400 会说不出缺了哪一格）');
+  if (!/out\.rec\.id = 'ef-' \+/.test(hc)) bad.push('id 没有由服务端盖（没有 id 的记录会退到「按内容去重」，两条同时刻的会被合成一条）');
+  if (!/EffectStats\.pushRecord\(\s*db\.effect\s*,\s*out\.rec\s*,\s*EffectStats\.LIMIT\s*\)/.test(hc)) {
+    bad.push('追加没有走 pushRecord（绕过它就没有环形上限，也没有淘汰计数）');
+  }
+  if (!/effectDropped \+= dropped/.test(hc)) bad.push('淘汰掉的条数没有记账（只追加的表不报「挤掉了多少」，读数就没有边界）');
+  if (!/effectStripped \+= out\.droppedKeys/.test(hc)) bad.push('被剥离的键数没有记账（上报端坏了会一直 200，没人知道）');
+  if (!/sweepWindows\(effectWindows, now\)/.test(SRVC)) {
+    bad.push('effect 的频控窗口表没有被清扫 —— 这些防刷的表自己会一直长');
+  }
+
+  /* ④ health 自述：这张表的读数必须一眼能核 */
+  const hl = (/if \(p === '\/api\/health'\) \{[\s\S]*?\n  \}/.exec(SRVC) || [''])[0];
+  if (!hl) bad.push('/api/health 函数段没抓到');
+  for (const pair of [['accepted:', 'effectAccepted'], ['rejected:', 'effectRejected'], ['stripped:', 'effectStripped'],
+    ['droppedOld:', 'effectDropped'], ['kept:', '(loadDb().effect || []).length'], ['limit:', 'EffectStats.LIMIT']]) {
+    if (hl.indexOf(pair[0]) === -1) bad.push('health 的 effect 格少了 ' + pair[0]);
+  }
+
+  /* ⑤ 这次的真缺陷：文件与共同祖先必须来自同一次序列化 */
+  const wo = (/async function writeOnce\(\)\s*\{[\s\S]*?\n\}/.exec(SRVC) || [''])[0];
+  if (!wo) bad.push('writeOnce 函数体没抓到 —— 「谁先谁后」这类断言全都没有坐标系');
+  const textAt = wo.indexOf('const text = JSON.stringify(DB, null, 2);');
+  const writeAt = wo.indexOf('await fsp.writeFile(tmp, text');
+  const baseAt = wo.indexOf('dbBase = JSON.parse(text)');
+  if (textAt === -1 || writeAt === -1 || baseAt === -1) {
+    bad.push('writeOnce 里没有「序列化一次 → 写盘 → 祖先取自同一份字符串」这条链（base 与文件一旦来源不同，下一次合并就会凭空尊重一次删除）');
+  } else if (!(textAt < writeAt && writeAt < baseAt)) {
+    bad.push('text / writeFile / dbBase 三者的顺序不对：祖先必须来自已经落盘的那份内容');
+  }
+  if (/dbBase\s*=\s*JSON\.parse\(\s*JSON\.stringify\(\s*DB\s*\)\s*\)/.test(wo)) {
+    bad.push('writeOnce 里又出现「写完盘再从**内存**抓 base」—— 落在 writeFile/rename 两个 await 之间的改动会进祖先却不进文件（批次 H 丢 8/12 条的形状）');
+  }
+  if (!/const COLLECTIONS = \[[^\]]*'effect'/.test(MERGE)) {
+    bad.push('store-merge.js 的 COLLECTIONS 不认 effect —— 不登记就退到「顶层未知字段」那条路，两台并发写时照样互相盖');
+  }
+
+  /* ⑥ 前端：只在闭合时上报，且只报结构化字段 */
+  const ce = (/function closeEffect\([\s\S]*?\n  \}/.exec(APPC) || [''])[0];
+  if (!ce) bad.push('app.js 里 closeEffect 没抓到（上报链路整条都没了，界面上那格数字会变成摆设）');
+  if (!/o\.turn \+ 1 !== S\.custTurn/.test(ce)) bad.push('闭合判据没了：下一条顾客消息必须**恰好**是紧跟的那一轮，否则归因给了别的对话');
+  if (!/RP\.rankOf\(/.test(ce)) bad.push('delta 不是用 policy.rankOf 算的（前端自己排等级序 = 第二把尺子）');
+  if (!/apiJson\('\/api\/effect',\s*\{\s*method:\s*'POST'/.test(ce)) bad.push('closeEffect 没有 POST /api/effect');
+  if (/\.messages|def\.name|phone|customerMessage/.test(ce)) bad.push('回执里混进了原文/姓名/手机号 —— 上报的只能是结构化事实');
+  const epCount = (APPC.match(/'\/api\/effect'/g) || []).length;
+  if (epCount !== 2) bad.push('app.js 里 \'/api\/effect\' 应当只有 POST 与 GET 各一处，实为 ' + epCount + ' 处');
+  const ae = (/function armEffect\([\s\S]*?\n  \}/.exec(APPC) || [''])[0];
+  if (!/p\.turn === \(S\.analyzedTurn \|\| 0\)/.test(ae)) bad.push('armEffect 没有校验「这条建议就是当前这一轮的」');
+  const bt = (/function beginEffectTrace\([\s\S]*?\n  \}/.exec(APPC) || [''])[0];
+  if (!bt || !/!a \|\| !a\.risk/.test(bt)) bad.push('beginEffectTrace 没有拿到风险读数就记下 before —— 上报的就是一个没参照的数');
+  if (!/pendingEffect = null/.test(APPC)) bad.push('手工改过输入框却没有作废归因（照着话术发 ≠ 改了十个字还发给原来那条）');
+
+  /* ⑦ 测试与浏览器检查真的在看这几件事 */
+  const ET = exists('tests/effect.test.js') ? stripComments(read('tests/effect.test.js')) : '';
+  if (!ET) bad.push('tests/effect.test.js 不存在');
+  if (!/require\('\.\.\/server\/effect-stats\.js'\)/.test(ET)) bad.push('effect 单测没有引用被测模块本体（在重抄一遍逻辑）');
+  if (!/Promise\.all\(/.test(ET)) bad.push('effect 测试没有并发突发写 —— 那条「祖先 ≠ 文件」的缺陷只在写窗口里被撞得到');
+  if (!/honoredDeletes/.test(ET)) bad.push('effect 测试没有盯 honoredDeletes（丢记录的哨兵：单进程没人删过东西，它一旦非 0 就是 base 记了盘上没有的 id）');
+  if (!/我脸烂了/.test(ET)) bad.push('effect 测试没有拿一句顾客原文去试落盘（隐私这条只能靠真的往里灌才验得出）');
+  if (!/status,\s*401/.test(ET)) bad.push('effect 测试没有验未登录被挡');
+  const BC = exists('tests/browser-check.js') ? read('tests/browser-check.js') : '';
+  if (!/name: 'effect-view'/.test(BC)) bad.push('浏览器检查没有 effect-view —— 「采用→发送→下一轮才闭合」这条链只有真页面走得出');
+
+  return bad.length ? { status: 'fail', detail: bad.join('；') }
+    : { status: 'pass', detail: '白名单 11 列 · REQUIRED 5 项 · 读写先认人 · 频控在解析前 · id/时间戳服务端盖 · ' +
+        '淘汰与剥离有计数 · delta 由前端用 policy 尺子算 · 闭合才上报 · 祖先取自落盘那一份字符串 · ' +
+        'effect.test.js + effect-view 浏览器检查在看着' };
 });
 
 check('RT01', '运行时契约', '按 index.html 顺序加载后声明的全局都在', () => {

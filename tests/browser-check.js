@@ -21,7 +21,9 @@ const os = require('os');
 const path = require('path');
 
 const PORT = Number(process.env.CDP_PORT || 9333);
-const BASE = process.env.BASE_URL || 'http://localhost:5173';
+/* 尾斜杠必须剥掉：后面每处都是 `BASE + '/?…'` 直接拼，带上斜杠就发出
+   `GET //?…` 这种空 authority 的请求目标 —— 实测它会让服务端 URL 解析抛错。 */
+const BASE = (process.env.BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
 const OUT = (process.argv.find((a) => a.startsWith('--out=')) || '').slice(6) ||
   path.join(os.tmpdir(), 'beauty-cs-shots');
 const ONLY = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7);
@@ -406,10 +408,12 @@ const CHECKS = [
         /* 红线兜底覆盖表：证明「判对了」不只是分数自己到的档。
            浏览器里跑的是同一份 eval/kit.js，所以这张表与 npm run eval 的输出同源。 */
         floorRows: document.querySelectorAll('#evalBody .ev-floors tbody tr').length,
+        /* 勾与叉已从字形换成 SVG（界面里不用 emoji），所以这里数的是
+           「单元格里那颗 .ev-ok / .ev-bad 里的图标」，不再是 textContent 里的字符 */
         floorProved: [...document.querySelectorAll('#evalBody .ev-floors tbody tr')]
-          .filter(tr => /✓/.test(tr.textContent)).length,
+          .filter(tr => tr.querySelector('.ev-ok svg')).length,
         floorUnproven: [...document.querySelectorAll('#evalBody .ev-floors tbody tr')]
-          .filter(tr => /✗\s*0/.test(tr.textContent)).map(tr => tr.children[0].textContent),
+          .filter(tr => tr.querySelector('.ev-bad svg')).map(tr => tr.children[0].textContent),
         floorKinds: [...document.querySelectorAll('#evalBody .ev-floors tbody tr')]
           .map(tr => tr.children[0].textContent + ':' + tr.children[1].textContent),
       };
@@ -1529,6 +1533,52 @@ const CHECKS = [
     })()`,
   },
   {
+    /* 立绘预热的两个方向都得在真浏览器里证到 —— 静态扫描看不见网络请求：
+       ① 关掉桌宠时**一张都不许下**。这批图 4.7MB，界面上没有任何异常，
+          只有 devtools 的 Network 面板看得出区别，所以最容易悄悄退回去。
+       ② 重新打开时必须真的把队列放行。只测①的话，「预载整个断了」也是零字节、
+          也是绿 —— 而它的症状是拖起来卡一下，没人会为此改代码。
+       走的是真控件（网站设置里的复选框），不是直接改 state：后者绕过要测的那段。 */
+    name: 'sprite-heat',
+    url: '/?s=1&nolive=1&gate=off&pet=off',
+    wait: 3200,
+    probe: () => `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const out = {}, bad = [];
+      const want = (cond, label) => { if (!cond) bad.push(label); };
+      const sheets = () => performance.getEntriesByType('resource')
+        .filter((e) => /\\/sprite-[^/]+\\.png$/.test(e.name))
+        .map((e) => e.name.split('/').pop());
+      const sprite = document.getElementById('sprite');
+
+      /* ① 助手不在场 */
+      out.hidden = sprite.hidden === true;
+      out.display = getComputedStyle(sprite).display;
+      out.whileOff = sheets();
+      want(out.hidden || out.display === 'none',
+        '?pet=off 之后桌宠应当不在场上（hidden=' + sprite.hidden + ' display=' + out.display + '）');
+      want(out.whileOff.length === 0,
+        '桌宠关着却下了 ' + out.whileOff.length + ' 张立绘：' + out.whileOff.join(','));
+
+      /* ② 打开开关：队列必须接着放 */
+      const cb = document.getElementById('prefSprite');
+      want(!!cb, '找不到「网站设置 → 话术小助手」开关');
+      if (cb && !cb.checked) cb.click();
+      await sleep(400);
+      out.nowVisible = !sprite.hidden && getComputedStyle(sprite).display !== 'none';
+      want(out.nowVisible, '勾上开关后桌宠仍然看不见 —— 显隐没有跟着偏好走');
+      await sleep(5000);
+      out.whileOn = sheets();
+      /* 空手 7 张 + 当前道具 5 张 + 待机/脸上限 = 至少 8 张才算队列真的在放 */
+      want(out.whileOn.length >= 8,
+        '打开桌宠 5 秒后只下了 ' + out.whileOn.length + ' 张立绘（应至少 8 张）—— 预载没被放行：' +
+        out.whileOn.join(','));
+
+      if (bad.length) throw new Error('立绘预热断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
     /* 风险看板：分布卡去掉进度横条、分级标准提到同一行之后，整页不许再滚。
        横条把一张卡撑到近两倍高，挤得下面要滚动 —— 这是纯布局问题，
        只有真浏览器的 scrollHeight / clientHeight 量得出来。 */
@@ -2008,6 +2058,88 @@ const CHECKS = [
     })()`,
   },
   {
+    /* 主题不能「先画一帧错的再纠正」。index.html 头部那段内联脚本在样式表生效前
+       就把 data-theme 定下来，优先级必须和 app.js 的 applyTheme 完全一致 ——
+       两处一旦漂移（有人删了内联脚本、或只改了一边的优先级），界面上就是
+       「深色用户每次进来白闪一下」，而这种闪在截图里永远看不出来。
+       这里先把本机偏好铺成 dark 再进页面：铺状态必须发生在跳转之前，
+       所以走 pre，probe 里再对「首帧前定的」和「最终定的」两个值。 */
+    name: 'theme-prepaint',
+    url: '/?view=workbench&nolive=1',
+    wait: 2500,
+    pre: `(() => {
+      localStorage.setItem('beauty-cs-prefs', JSON.stringify({ theme: 'dark' }));
+      return true;
+    })()`,
+    post: `(() => {
+      localStorage.removeItem('beauty-cs-prefs');
+      localStorage.removeItem('beauty-cs-theme');
+      return true;
+    })()`,
+    probe: `(() => {
+      const out = {};
+      out.pre = window.__themePre || null;
+      out.final = document.documentElement.getAttribute('data-theme');
+      out.stored = localStorage.getItem('beauty-cs-theme') || null;
+      const on = document.querySelector('#prefTheme button.on');
+      out.seg = on ? on.getAttribute('data-theme-opt') : null;
+      const bad = [];
+      const want = (cond, label) => { if (!cond) bad.push(label); };
+      want(out.pre === 'dark', '首帧前的内联脚本没定出深色（脚本被删了，或优先级和 applyTheme 漂了）：' + out.pre);
+      want(out.final === 'dark', '最终主题不是深色：' + out.final);
+      want(out.pre === out.final, '首帧前与最终主题不一致，会闪一帧：' + out.pre + ' → ' + out.final);
+      want(out.stored === 'dark', '生效主题没记进 beauty-cs-theme（审计与截图工具读这个键）：' + out.stored);
+      want(out.seg === 'dark', '外观分段控件应选中「深色」，实为 ' + out.seg);
+      if (bad.length) throw new Error('主题首帧断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 「跟随系统」这一档要同时成立两件事，缺一不可：
+       ① 进来第一帧就按系统当前主题画（内联脚本自己解析 auto，不等 app.js）；
+       ② 系统主题中途翻了，这一页当场跟着翻（boot 里挂的 matchMedia change 监听）。
+       ②尤其容易被悄悄弄丢：监听挪进登录后的 init，登录页那段夜间换肤就再也不跟了，
+       而这条只能靠「先钉成 dark 进页面、加载完再翻成 light」量出来。 */
+    name: 'theme-auto',
+    url: '/?view=workbench&nolive=1',
+    wait: 2500,
+    pre: `(() => {
+      localStorage.setItem('beauty-cs-prefs', JSON.stringify({ theme: 'auto' }));
+      return true;
+    })()`,
+    post: `(() => {
+      localStorage.removeItem('beauty-cs-prefs');
+      localStorage.removeItem('beauty-cs-theme');
+      return true;
+    })()`,
+    emulate: [{ name: 'prefers-color-scheme', value: 'dark' }],
+    during: [{ name: 'prefers-color-scheme', value: 'light' }],
+    probe: `(async () => {
+      const out = {};
+      out.pre = window.__themePre || null;
+      /* change 事件是异步派发的，探针紧接着读就会读到翻转前的值 —— 随机红绿灯。
+         所以这里轮询等它跟上，最多 3 秒；等不到就是把「没跟上」如实报成失败 */
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      let waited = 0;
+      while (document.documentElement.getAttribute('data-theme') !== 'light' && waited < 3000) {
+        await sleep(100); waited += 100;
+      }
+      out.followMs = waited;
+      out.final = document.documentElement.getAttribute('data-theme');
+      out.stored = localStorage.getItem('beauty-cs-theme') || null;
+      const on = document.querySelector('#prefTheme button.on');
+      out.seg = on ? on.getAttribute('data-theme-opt') : null;
+      const bad = [];
+      const want = (cond, label) => { if (!cond) bad.push(label); };
+      want(out.pre === 'dark', '系统为深色时，首帧前就该解析成深色，实为 ' + out.pre);
+      want(out.final === 'light', '系统翻成浅色后界面没跟上（matchMedia 监听丢了？）：' + out.final);
+      want(out.stored === 'light', '生效主题应跟着翻成浅色，实为 ' + out.stored);
+      want(out.seg === 'auto', '外观分段控件应保持选中「跟随系统」，实为 ' + out.seg);
+      if (bad.length) throw new Error('跟随系统断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
     /* 风险对账闸必须要在**真实浏览器**里成立一次：
        单测证明阶段函数算得对，这条证明页面真的把它装配进了管线（脚本清单、
        加载顺序、window 挂载任何一处断了，界面上的分数就会退回模型自报的数）。
@@ -2230,6 +2362,564 @@ const CHECKS = [
       return out;
     })()`,
   },
+  {
+    /* 话术效果回执：全站唯一一条「前端算完、服务端只存事实」的链路。
+       单测能证 sanitize/aggregate 的算术，证不了「点采用 → 发送 → 下一轮顾客消息」
+       真的会打出一个 POST —— 那是三段前端状态机（pending → open → closed）串起来的结果，
+       只在真浏览器里按人的顺序点一遍才看得见。
+       登录在 pre 里铺令牌：`gate=off` 只关门禁不发证，没有 Authorization
+       服务端一律 401，界面上「送达 0」是真话，可那条断言就退化成「什么都没发生」。
+       第三轮专证反向用例：改过一个字的话术不再归因给原话术，所以不该再多一条回执。 */
+    name: 'effect-view',
+    url: '/?s=1&nolive=1&view=workbench',
+    wait: 3200,
+    screenshot: true,
+    pre: `(async () => {
+      const r = await fetch('/api/auth/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: 'CS013', pin: '1234' }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (j && j.token) localStorage.setItem('beauty-cs-token', j.token);
+      return !!(j && j.token);
+    })()`,
+    post: `(() => { try { localStorage.removeItem('beauty-cs-token'); } catch (e) { } return true; })()`,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const qa = (s) => Array.prototype.slice.call(document.querySelectorAll(s));
+      const txt = (s) => ((q(s) || {}).textContent || '').replace(/\\s+/g, ' ').trim();
+      const input = q('#composerInput');
+      const foot = () => txt('#effectFoot');
+      const numOf = (label) => {
+        const s = foot(); const i = s.indexOf(label);
+        if (i < 0) return null;
+        let j = i + label.length, n = '';
+        while (j < s.length && s.charAt(j) >= '0' && s.charAt(j) <= '9') { n += s.charAt(j); j++; }
+        return n === '' ? null : Number(n);
+      };
+      const wait = async (fn, ms) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < ms) { if (fn()) return true; await sleep(250); }
+        return false;
+      };
+      const replySig = () => ((qa('#spriteBody .ra-body')[0] || {}).textContent || '');
+      const freshUse = () => qa('#spriteBody [data-use]').filter((b) => !b.disabled && b.textContent.trim() === '采用')[0] || null;
+      const backToAgent = async () => {
+        if (q('#composer').classList.contains('cust')) { q('#btnComposerMode').click(); await sleep(220); }
+      };
+      const posts = [];
+      const rawFetch = window.fetch;
+      window.fetch = function (u, o) {
+        try {
+          if (String(u).indexOf('/api/effect') >= 0 && o && String(o.method) === 'POST') posts.push(String(o.body));
+        } catch (e) { }
+        return rawFetch.apply(this, arguments);
+      };
+      const out = {};
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+
+      /* 剧本第一条消息在 loadScenario 里同步接入，等它把建议话术摆出来 */
+      out.r1 = await wait(() => !!freshUse(), 14000);
+      want(out.r1 === true, '第一轮没给出可采用的建议话术');
+      out.adopt0 = txt('#statAdopt');
+      want(/\\d/.test(out.adopt0) && out.adopt0.indexOf('%') >= 0,
+        '有建议之后「采纳率」必须是百分数（这里原来永远是「—」，因为分母没有人写）：' + out.adopt0);
+
+      const u0 = freshUse();
+      u0.click();
+      await sleep(320);
+      out.adopt1 = txt('#statAdopt');
+      want(out.adopt1 !== out.adopt0,
+        '点了采用，分子该动：' + out.adopt0 + ' → ' + out.adopt1);
+      /* 「采用」这个动作会把气泡收起来（坐席的注意力要在输入框上），所以「已采用」
+         那个标签在此刻的 DOM 里读不到 —— 但重复计数是能被证的：同一个按钮再点一次，
+         分子必须纹丝不动。这就是采纳率敢不敢报上天的那一条。 */
+      u0.click();
+      await sleep(320);
+      out.adopt2 = txt('#statAdopt');
+      want(out.adopt2 === out.adopt1,
+        '同一条建议点两次「采用」，采纳率被重复计数：' + out.adopt1 + ' → ' + out.adopt2);
+      want(q('#composerInput').value.length > 0, '「采用」应把话术填进输入框');
+      await backToAgent();
+      q('#btnSend').click();
+      await sleep(500);
+
+      /* 第二轮：坐席一回复，剧本自己投递下一条顾客消息 —— 闭合就发生在那一次结算里 */
+      out.closed1 = await wait(() => posts.length >= 1, 16000);
+      want(out.closed1 === true, '发出话术后顾客回了下一轮，却没有闭合出一条回执');
+      const rec = JSON.parse(posts[0] || '{}');
+      out.keys = Object.keys(rec).sort().join(',');
+      want(out.keys === 'delta,emoAfter,emoBefore,kbId,levelAfter,levelBefore,scoreAfter,scoreBefore,sess,source,turn',
+        '回执字段必须恰好是白名单那一组，实为 ' + out.keys);
+      want(['improved', 'worse', 'flat'].indexOf(rec.delta) >= 0, 'delta 不在三种之内：' + rec.delta);
+      want(['high', 'medium', 'low'].indexOf(rec.levelBefore) >= 0 &&
+        ['high', 'medium', 'low'].indexOf(rec.levelAfter) >= 0, '两端等级不合法');
+      want(/^[0-9a-f]{8}$/.test(String(rec.sess)), '会话身份应是指纹而不是剧本 id：' + rec.sess);
+      want(posts[0].indexOf('刺痛') < 0 && String(rec.kbId) === '', '顾客原文或剧本 id 混进了回执');
+      out.emoNull = (rec.emoBefore === null || typeof rec.emoBefore === 'number');
+
+      /* 第三轮：采用之后手工补一个字，这条就不再是「照那套话术发的」 */
+      out.r3 = await wait(() => !!freshUse(), 14000);
+      want(out.r3 === true, '第二轮没给出建议话术');
+      const u2 = freshUse();
+      u2.click();
+      await sleep(320);
+      input.value = input.value + '（补充一句）';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      await backToAgent();
+      q('#btnSend').click();
+      await sleep(500);
+      const sigBefore = replySig();
+      out.newRound = await wait(() => replySig() !== sigBefore, 16000);
+      want(out.newRound === true, '第三轮顾客消息没结算，负向用例没跑到');
+      await sleep(1200);
+      out.postsAfterEdit = posts.length;
+      want(out.postsAfterEdit === 1,
+        '手工改写过的话术不该再记一条效果回执，实为 ' + posts.length + ' 条');
+
+      q('.rail-btn[data-view="kb"]').click();
+      await sleep(1400);
+      out.cards = qa('#effectBody .ef-stat').length;
+      want(out.cards === 4, '效果面板应有四格读数（闭合/回落/风险分/情绪），实为 ' + out.cards);
+      out.sent = numOf('· 送达 ');
+      want(out.sent !== null && out.sent >= 1, '面板底部应说得出送达了几条，实为 ' + out.sent);
+      out.failed = numOf('· 未送达 ');
+      want(out.failed === 0, '有回执打不出去（401 或服务端拒收）：未送达 ' + out.failed);
+      out.foot = foot();
+      want(out.foot.indexOf('未闭合不计入') >= 0, '口径没写在界面上：' + out.foot);
+      want(out.foot.indexOf('话术正文与顾客原文都不出浏览器') >= 0, '隐私口径没写在界面上');
+      want(txt('#effectBody').indexOf('刺痛') < 0, '顾客原文出现在效果面板里');
+      out.adoptKb = txt('#statAdopt');
+      want(out.adoptKb.indexOf('%') >= 0, '切视图之后采纳率被冲掉了：' + out.adoptKb);
+
+      window.fetch = rawFetch;
+      if (bad.length) throw new Error('话术效果回执断言失败：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 前文记忆有没有真的接上界面 —— 用户提的那次事故就是这个形状：
+       顾客已经说过「脸颊泛红、用了两天」，系统还在问「您方便再说一下哪部分不满意吗？」。
+       单测证明的是函数对；这一条证明的是**页面用上了那套函数**：
+       真实装载顺序 → 真实点击发送 → 真实渲染出来的候选气泡 → 真实那一轮的运行轨迹。
+       判据也故意取自页面自己的 window.ConversationMemory，而不是探针里另写一套正则：
+       探针自带的口径和管线口径分叉时，这条会一起说谎。 */
+    name: 'memory-context',
+    url: '/?s=1&nolive=1',
+    wait: 3000,
+    screenshot: true,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const qa = (s) => Array.prototype.slice.call(document.querySelectorAll(s));
+      const flat = (s) => String(s == null ? '' : s).replace(/\\s+/g, ' ').trim();
+      const out = {};
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+
+      /* ---- ① 装载：memory.js 必须早于每一个用它的模块 ---- */
+      const srcs = qa('script').map((s) => s.getAttribute('src') || '');
+      const pos = (n) => srcs.indexOf('assets/' + n);
+      out.scriptPos = ['memory.js', 'orderctx.js', 'engine.js', 'llm.js', 'app.js'].map((n) => n + ':' + pos(n)).join(' ');
+      want(pos('memory.js') >= 0, 'index.html 没有加载 assets/memory.js');
+      ['orderctx.js', 'engine.js', 'llm.js', 'app.js'].forEach((n) => {
+        want(pos('memory.js') >= 0 && pos(n) > pos('memory.js'), 'memory.js 没有排在 ' + n + ' 之前');
+      });
+      const CM = window.ConversationMemory, H = window.AnalysisHarness;
+      want(!!CM && typeof CM.build === 'function' && typeof CM.stripRedundantAsk === 'function',
+        'window.ConversationMemory 没挂上或缺 build/stripRedundantAsk');
+      want(!!H && typeof H.lastTrace === 'function', '管线没有 lastTrace（轨迹这一腿读不到）');
+
+      const list = q('#chatList');
+      const input = q('#composerInput');
+      const cands = () => qa('#spriteBody .ra-body').map((e) => flat(e.textContent));
+      const traceId = () => { const t = H.lastTrace(); return t && t.id ? String(t.id) : ''; };
+      const asCustomer = async (t) => {
+        if (!q('#composer').classList.contains('cust')) { q('#btnComposerMode').click(); await sleep(220); }
+        input.value = t;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        q('#btnSend').click();
+        await sleep(150);
+      };
+      /* 结算的判据是「这一轮跑完了一条新的运行轨迹」，不是「候选文本变了」——
+         本地引擎对同一单、同一意图给的候选本来就可能是同一套，
+         拿文本变化当条件会把一次正常结算读成超时。（第一版就是这么红的。） */
+      const settle = async (idBefore) => {
+        for (let i = 0; i < 1100; i++) {
+          if (traceId() !== idBefore && !list.querySelector('.bubble.typing')) return true;
+          await sleep(15);
+        }
+        return false;
+      };
+
+      /* ---- ② 事故原话：先交已知项，再用 ASR 听岔的那句逼系统「重新问一遍」 ---- */
+      let tid = traceId();
+      await asCustomer('我脸颊泛红，还刺痛，用了两天了');
+      out.r1 = await settle(tid);
+      want(out.r1 === true, '第一句顾客消息没在 ~16 秒内结算（分析没跑完，后面全是空转）');
+      tid = traceId();
+      await asCustomer('可以找肖先的版本，你们打算怎么赔');
+      out.r2 = await settle(tid);
+      want(out.r2 === true, '第二句顾客消息没在 ~16 秒内结算');
+
+      const texts = cands();
+      out.candCount = texts.length;
+      out.cands = texts;
+      want(texts.length >= 2, '界面渲染出的候选少于两条，实为 ' + texts.length + '（读的是真 DOM：函数对了但没渲染出来照样红）');
+
+      /* ---- ③ 订单号与已知项的取值口径：都从 DOM 读，判据用页面自己的模块 ---- */
+      const readHist = () => qa('#chatList .msg').filter((el) => !el.classList.contains('sys')).map((el) => ({
+        role: el.classList.contains('me') ? 'agent' : 'customer',
+        text: flat((el.querySelector('.bubble') || {}).textContent),
+      }));
+      /** 用「最后一条顾客消息」当本轮，其余当前文 —— 与管线在 facts 阶段做的事同构 */
+      const buildDigest = () => {
+        const hist = readHist();
+        let lastCust = -1;
+        for (let i = hist.length - 1; i >= 0; i--) { if (hist[i].role === 'customer') { lastCust = i; break; } }
+        want(lastCust >= 0, 'DOM 里读不到顾客消息');
+        return CM.build(hist.slice(0, lastCust), lastCust >= 0 ? hist[lastCust].text : '', {});
+      };
+      /** 还在问已知项的候选（用页面自己的 stripRedundantAsk 再量一遍渲染出来的文本） */
+      const stillAsking = (arr, dg) => arr.map((t) => {
+        const s = CM.stripRedundantAsk(t, dg);
+        return s.removed.length ? s.removed.map((x) => x.label + '←「' + x.raw + '」').join('，') : '';
+      }).filter(Boolean);
+      /** 切完留下的残骸：空括号、半截标点、undefined、被删到只剩一个逗号 */
+      const messyOf = (arr) => arr.filter((t) => !t
+        || /（[^）]*（|（）|\\(\\)|undefined|null|需调取|，。|。。|：。|、。/.test(t)
+        || /^[，、。：]/.test(t) || /[，、；：]$/.test(t));
+
+      const def = (window.SCENARIOS || [])[1] || null;
+      out.scenarioId = def ? def.id : '';
+      const pack = def ? window.OrderContext.build(def, window.CRM.byScenario(def.id), '常规咨询') : { available: false };
+      const NO = pack.available ? String(pack.order.orderNo || '') : '';
+      want(!!NO, '过敏这一单读不到订单号（④⑦ 会失去意义）');
+
+      /* ---- ④ 已知项：顾客说过的东西必须被记住 ---- */
+      const digest = buildDigest();
+      out.known = (digest.known || []).map((k) => k.label).join('、');
+      out.knownN = (digest.known || []).length;
+      want(out.knownN >= 3, '顾客已说过「脸颊泛红 / 刺痛 / 两天」，页面模块从真 DOM 读出的已知项却只有 ' +
+        out.knownN + ' 项：' + out.known);
+      want(/症状/.test(out.known) && /部位/.test(out.known) && /时间/.test(out.known),
+        '已知项里缺「症状 / 部位 / 时间」之一：' + out.known);
+
+      /* 这一条是整起事故的正身：渲染出来的那句候选，拿同一把尺子再量一次，
+         不该还能量出「在问已经说过的东西」。上面已证明 digest 非空，
+         所以这里不会出现「digest 空 → 永远不重复」的空转绿。 */
+      out.stillAsking = stillAsking(texts, digest);
+      want(out.stillAsking.length === 0, '界面上这些话术还在向顾客要已经给过的信息：' + out.stillAsking.join(' ｜ '));
+
+      /* ---- ⑤ 订单号只许在第一条报一次 ---- */
+      const times = texts.join('\\n').split(NO).length - 1;
+      out.orderNoTimes = times;
+      want(times <= 1, '订单号在候选里报了 ' + times + ' 遍（只许「推荐」那条说一次）');
+      if (times === 1) want(texts[0].indexOf(NO) !== -1, '唯一那次不在第一条候选里');
+
+      /* ---- ⑥ 切完不能留残句 ---- */
+      out.messy = messyOf(texts);
+      want(out.messy.length === 0, '候选里有拼接残骸或半截标点：' + out.messy.join(' ｜ '));
+
+      /* ---- ⑦ 接地结论要看得见，整形要真的在这一轮跑过 ---- */
+      out.groundedFlags = qa('#spriteBody .ra-flags .flag').filter((e) => /依据订单/.test(e.textContent || '')).length;
+      want(out.groundedFlags >= 1, '候选里没有任何一条标出「依据订单 N 项」（接地结果没渲染到界面）');
+      const tr = H.lastTrace() || {};
+      out.traceStages = (tr.stages || []).map((s) => s.name).join('>');
+      out.hollowFilled = tr.facts ? tr.facts.hollowFilled : 'no-facts';
+      out.askStripped = tr.facts ? tr.facts.askStripped : 'no-facts';
+      want(tr.facts && Object.prototype.hasOwnProperty.call(tr.facts, 'hollowFilled'),
+        '最近一轮轨迹里没有 hollowFilled 这一格 → 出站整形闸没在真实管线上跑（facts: ' +
+        Object.keys(tr.facts || {}).join(',') + '）');
+      out.polishTrace = (tr.decisions || []).filter((d) => /出站整形/.test(d))[0] || '';
+      /* 轨迹与界面必须同口径：整形删过句子，界面就得有地方让坐席核对删了哪句；
+         反过来没删过却冒出这一行，说明渲染用的是上一轮的残留。
+         两头一起钉，才不会因为「本地模板本来就不问已知项」而变成一条空转的绿。 */
+      const whyStrip = () => qa('#spriteBody .why-line').filter((e) => /前文核对/.test(e.textContent || ''));
+      out.whyStripCount = whyStrip().length;
+      want((Number(tr.facts && tr.facts.askStripped) > 0) === (whyStrip().length > 0),
+        '轨迹里 askStripped=' + out.askStripped + '，界面上「前文核对」那行有 ' + out.whyStripCount + ' 条，两边对不上');
+
+      /* ---- ⑧ 模型不听话的那一跳：由代码兜住，不靠提示词劝 ----
+         本地模板本来就绕开已知项（④ 已证），所以只有造一个「不守规矩的模型」
+         才看得见整形闸在界面上真的起作用。
+         桩的是 chat 而不是 analyze，因为 Agent 通道用 chat 做多步规划：
+         让 chat 抛错**并不会让出通道** —— provider 内部自己降级到规则规划 + 本地引擎，
+         照样以 provider:agent 成功收场（第一版就红在这，误以为 reject 能把这一跳推到 llm）。
+         所以直接喂它一份「第 1 步就收敛、final 不守规矩」的模型输出，脏话术进的是真管线。 */
+      const LLM = window.LLMClient;
+      const rawAnalyze = LLM.analyze, rawChat = LLM.chat;
+      const DIRTY = {
+        emotion: { score: 40, trend: 'down' },
+        intents: [{ name: '过敏投诉', confidence: 0.8 }],
+        risk: { level: 'low', score: 10, signals: [], advice: '' },
+        replies: [
+          { text: '您这笔 ' + NO + ' 我们已核实。请问您具体是哪个部位有反应呢？用了几天了？', confidence: 0.9 },
+          { text: '关于订单 ' + NO + '，批次报告我马上发您。您方便再说一下哪里不舒服吗？', confidence: 0.8 },
+          { text: '您再描述一下情况我才能判断。订单 ' + NO + ' 这边我先为您登记。', confidence: 0.7 },
+        ],
+      };
+      try {
+        LLM.chat = () => Promise.resolve({ content: JSON.stringify({ final: DIRTY }) });
+        /* 万一 Agent 因为预算让位，llm 通道拿到的是同一份脏输出 —— 两条模型路都得过闸 */
+        LLM.analyze = () => Promise.resolve(LLM.normalize(DIRTY, 'llm'));
+        tid = traceId();
+        await asCustomer('那你们到底打算怎么处理');
+        out.r3 = await settle(tid);
+        want(out.r3 === true, '桩了模型之后第三条顾客消息没结算（整形那一跳没跑成）');
+        const t3 = H.lastTrace() || {};
+        out.provider3 = (t3.stages || []).filter((s) => /^provider:/.test(s.name))
+          .map((s) => s.name + (s.ok ? '' : '!')).join('>');
+        out.agentMode3 = t3.facts ? t3.facts.agentMode : null;
+        out.modelFinal3 = (t3.stages || []).filter((s) => /^agent:/.test(s.name))
+          .map((s) => s.name + (s.ok ? '' : '!')).join('>');
+        /* 走没走模型通道要说得出口：Agent 在第 1 步收敛出 final，或者干脆落到 llm 提供者。
+           只盯 provider 名字不够 —— provider:agent 成功时话术也可能来自它内部的本地降级。 */
+        const modelHop = /provider:llm(>|$)/.test(out.provider3 + '>') ||
+          (out.agentMode3 === 'model' && /agent:final/.test(out.modelFinal3));
+        want(modelHop, '这一轮的话术不是模型给的（桩没生效，整形闸自然无事可做）：通道 ' +
+          out.provider3 + '、agentMode=' + out.agentMode3 + '、Agent 轨迹 ' + out.modelFinal3);
+        out.askStripped3 = t3.facts ? t3.facts.askStripped : null;
+        out.orderNoFixed3 = t3.facts ? t3.facts.orderNoFixed : null;
+        want(Number(out.askStripped3) >= 1, '不守规矩的模型进了管线，整形闸却没删掉任何重复追问：' + out.askStripped3);
+        want(Number(out.orderNoFixed3) >= 1, '三条候选各报一遍单号，却没被换成指代：' + out.orderNoFixed3);
+        const texts3 = cands();
+        out.cands3 = texts3;
+        /* 渲染的必须是这一轮的桩输出，不是上一轮残留的本地候选：
+           被闸改写的只是「单号」和「重复追问」，模型自己那几句陈述必须还在界面上。 */
+        out.stubSeen3 = ['已核实', '批次报告', '为您登记'].filter((k) => texts3.some((t) => t.indexOf(k) !== -1));
+        want(out.stubSeen3.length >= 1, '候选里没有桩模型说过的任何一句，界面用的不是这一轮：' + texts3.join(' ｜ '));
+        const dg3 = buildDigest();
+        want(texts3.join('\\n').split(NO).length - 1 <= 1,
+          '桩模型跑完之后，界面上的候选仍然逐条报单号：' + texts3.join(' ｜ '));
+        const still3 = stillAsking(texts3, dg3);
+        out.stillAsking3 = still3;
+        want(still3.length === 0, '桩模型那轮界面上还在问已知项：' + still3.join(' ｜ '));
+        const messy3 = messyOf(texts3);
+        out.messy3 = messy3;
+        want(messy3.length === 0, '切掉重复追问之后留下残句：' + messy3.join(' ｜ '));
+        out.whyStrip3 = whyStrip().length;
+        want(out.whyStrip3 >= 1, '轨迹删了 ' + out.askStripped3 + ' 处重复追问，界面上却没有「前文核对」那行给坐席核对');
+      } finally {
+        LLM.analyze = rawAnalyze;
+        LLM.chat = rawChat;
+      }
+
+      if (bad.length) throw new Error('前文记忆断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
+  {
+    /* 四项能力（情绪走势 / 意图识别 / 风险评估 / 话术生成）到底有没有**真的**走模型，
+       以及模型拿到的提示词里到底有没有聊天上下文与商品信息 ——
+       这两件事在单测里都只能间接证明：单测证明函数对，证明不了页面把对的数据塞了进去。
+       这里用一条伪造的模型响应，同时量三件事：
+         ① 请求体：前文原文 / 记忆槽位 / 逐句情绪曲线 / 订单号商品批次 / 本轮原话，五项都在；
+         ② 返回值：四个维度显示的正是模型给的那个数（不是词典兜底的值）；
+         ③ 界面：候选话术是模型那三句，且没有答非所问标记。
+       判据里的订单号 / 商品名 / 批次都从页面自己的 OrderContext 取，
+       不在探针里另写一份 —— 否则量到的是「探针以为的订单」，不是界面真读到的那份。 */
+    name: 'model-context',
+    url: '/?s=1&nolive=1',
+    wait: 3200,
+    post: `(() => { try { localStorage.removeItem('beauty-cs-config'); } catch (e) { } return true; })()`,
+    probe: `(async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const q = (s) => document.querySelector(s);
+      const qa = (s) => Array.prototype.slice.call(document.querySelectorAll(s));
+      const flat = (s) => String(s == null ? '' : s).replace(/\\s+/g, ' ').trim();
+      const txt = (s) => flat((q(s) || {}).textContent || '');
+      const out = {};
+      const bad = [];
+      const want = (c, l) => { if (!c) bad.push(l); };
+
+      const H = window.AnalysisHarness;
+      const LLM = window.LLMClient;
+      want(!!H && !!LLM, '管线或模型客户端没加载');
+      const traceId = () => { const t = H.lastTrace(); return t && t.id ? String(t.id) : ''; };
+      const busy = () => !!document.querySelector('#chatList .bubble.typing');
+
+      /* 等开场那条剧本消息的本地分析收尾，避免它和下面两轮抢同一个会话队列 */
+      for (let i = 0; i < 200 && (!traceId() || busy()); i++) await sleep(100);
+
+      const def = (window.SCENARIOS || [])[1] || null;
+      const pack = def ? window.OrderContext.build(def, window.CRM.byScenario(def.id), '过敏投诉') : { available: false };
+      want(!!(pack && pack.available && pack.order && pack.order.orderNo), '场景 1 没有订单，后面的商品事实断言无处可验');
+      const NO = pack.available ? String(pack.order.orderNo) : '';
+      const PROD = pack.available ? String(pack.order.product || '') : '';
+      const BATCH = pack.available ? String(pack.order.batch || '') : '';
+      out.order = NO + '｜' + PROD + '｜' + BATCH;
+
+      /* 伪造模型：四个维度都给出与词典**明显不同**的值，才能证明界面用的是模型结论。
+         情绪 22（词典对这句是中性 66）、意图「赔付协商」（词典词表里没有）、
+         风险 83 高危、三条话术带本轮原话与订单强事实（自己先过得了贴题闸）。 */
+      const MODEL_OUT = {
+        emotion: { score: 22, label: '模型自填的错标签', trend: 'down' },
+        intents: [{ name: '赔付协商', confidence: 0.93 }],
+        risk: { level: 'low', score: 83, signals: ['要求赔付'], advice: '升级资深客服并留档，禁止承诺具体金额' },
+        replies: [
+          { text: '您说脸颊泛红、刺痛已经两天，我记下了。订单 ' + NO + '（' + PROD + '，批次 ' + (BATCH || '—') + '）我先按不良反应登记：请先停用这一瓶，我已为您预约线上皮肤检测，并把处理节点同步给您。', confidence: 0.92, rationale: '回答本轮赔付诉求并接住已说过的症状与时长', kb: '不良反应处理' },
+          { text: '这瓶' + PROD + '的批次检测报告我马上发您，同时把这两天的使用记录一起存档，方便您后续核对。', confidence: 0.86, rationale: '引用批次与商品事实，给可核对材料', kb: '批次溯源' },
+          { text: '关于这瓶' + PROD + '的赔付诉求，我会按公司关怀流程为您申请，并把审批节点逐条同步给您，不让您反复追问。', confidence: 0.8, rationale: '给权益路径，不承诺金额', kb: '客诉升级流程' },
+        ],
+      };
+
+      const rawFetch = window.fetch;
+      const seen = [];
+      window.fetch = function (u, o) {
+        const url = String(u || '');
+        if (url.indexOf('/api/chat') >= 0 || url.indexOf('/chat/completions') >= 0) {
+          let body = {};
+          try { body = JSON.parse((o && o.body) || '{}'); } catch (e) { }
+          seen.push({ url: url, body: body });
+          const sys = String((((body.messages || [])[0] || {}).content) || '');
+          const payload = sys.indexOf('Agent 工作模式') >= 0
+            ? { thought: '订单与前文都已核实', final: MODEL_OUT }
+            : MODEL_OUT;
+          const text = JSON.stringify({
+            model: 'stub-model',
+            choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(payload) } }],
+          });
+          return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(text) });
+        }
+        return rawFetch.apply(this, arguments);
+      };
+
+      /* 页面填 Key 的通道：file:// 下没有代理，但 http 下会先走代理 ——
+         fetch 已被桩掉，两种走法都到不了网络，量的是同一条请求体。 */
+      try {
+        LLM.writeConfig({
+          apiKey: 'sk-model-context-0000000000000000',
+          baseUrl: 'https://stub.invalid/v1',
+          model: 'stub-model', mode: 'auto', budgetMs: 15000, maxCalls: 100,
+        });
+        if (LLM.resetCalls) LLM.resetCalls();
+      } catch (e) { want(false, '写模型配置失败：' + e.message); }
+
+      const input = q('#composerInput');
+      const asCustomer = async (t) => {
+        if (!q('#composer').classList.contains('cust')) { q('#btnComposerMode').click(); await sleep(220); }
+        input.value = t;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        q('#btnSend').click();
+        await sleep(160);
+      };
+      const settle = async (idBefore) => {
+        for (let i = 0; i < 1400; i++) {
+          if (traceId() !== idBefore && !busy()) return true;
+          await sleep(15);
+        }
+        return false;
+      };
+      /* 坐席回复也要真的进聊天记录：第二轮提示词里的「客服：」那一行，
+         量的就是「指代能不能靠上一轮追问还原」，没有这一行就无从谈起。 */
+      const asAgent = async (t) => {
+        if (q('#composer').classList.contains('cust')) { q('#btnComposerMode').click(); await sleep(220); }
+        input.value = t;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        q('#btnSend').click();
+        await sleep(160);
+      };
+
+      try {
+        /* ---- 第一轮：先让前文里真的有一句顾客诉求与一句客服追问 ---- */
+        let tid = traceId();
+        await asCustomer('我脸颊泛红，还刺痛，用了两天了');
+        out.r1 = await settle(tid);
+        want(out.r1 === true, '第一轮没在 ~21 秒内结算（模型桩没把这一跳跑完）');
+        const t1 = H.lastTrace() || {};
+        out.provider1 = t1.facts ? t1.facts.provider : null;
+        out.agentMode1 = t1.facts ? t1.facts.agentMode : null;
+        want(out.provider1 === 'agent' || out.provider1 === 'llm', '第一轮没走模型通道，实为 ' + out.provider1);
+        await asAgent('请问您是脸颊哪个部位不舒服？我这边先为您登记。');
+
+        /* ---- 第二轮：这句就是用户点名的事故原话（ASR 听岔的「肖先」） ---- */
+        tid = traceId();
+        await asCustomer('可以找肖先的版本，你们打算怎么赔');
+        out.r2 = await settle(tid);
+        want(out.r2 === true, '第二轮没在 ~21 秒内结算');
+
+        /* ---- ① 请求体：上下文与商品信息真的进了提示词 ---- */
+        const wants = seen.filter((x) => {
+          const m = (x.body.messages || [])[1];
+          return m && String(m.content || '').indexOf('可以找肖先的版本') >= 0;
+        });
+        out.modelCalls = seen.length;
+        out.roundCalls = wants.length;
+        want(wants.length >= 1, '没有一次模型请求带着本轮原话（' + seen.length + ' 次调用）');
+        const user = wants.length ? String((wants[wants.length - 1].body.messages || [])[1].content || '') : '';
+        out.promptChars = user.length;
+        out.hasHistory = user.indexOf('【对话历史】') >= 0;
+        out.hasPriorCustomer = user.indexOf('我脸颊泛红') >= 0;
+        out.hasPriorAgent = /客服：/.test(user);
+        out.hasMemory = user.indexOf('【前文记忆') >= 0;
+        out.hasKnown = /已确认（\\*\\*禁止再要求顾客重复其中任何一项\\*\\*）：/.test(user);
+        out.hasSeries = user.indexOf('此前逐句情绪分') >= 0 || user.indexOf('情绪逐句分') >= 0;
+        out.hasOrderNo = NO ? user.indexOf(NO) >= 0 : false;
+        out.hasProduct = PROD ? user.indexOf(PROD) >= 0 : false;
+        out.hasBatch = BATCH ? user.indexOf(BATCH) >= 0 : false;
+        out.hasMessage = user.indexOf('【本轮最新消息') >= 0 && user.indexOf('可以找肖先的版本') >= 0;
+        want(out.hasHistory, '提示词里没有【对话历史】块');
+        want(out.hasPriorCustomer, '顾客上一句原话没进提示词：模型看不到「脸颊泛红」');
+        want(out.hasPriorAgent, '客服上一轮的追问没进提示词：指代无法还原');
+        want(out.hasMemory, '提示词里没有【前文记忆】块');
+        want(out.hasKnown, '记忆块没有「已确认…禁止再要求重复」这一行');
+        want(out.hasSeries, '逐句情绪曲线没进提示词，trend 只能靠猜');
+        want(out.hasOrderNo, '订单号没进提示词：' + NO);
+        want(out.hasProduct, '商品名没进提示词：' + PROD);
+        if (BATCH) want(out.hasBatch, '批次号没进提示词：' + BATCH);
+        want(out.hasMessage, '本轮原话没有作为「需要你分析的就是这一条」单独给出');
+
+        /* ---- ② 返回值：四个维度显示的是模型给的值，不是词典兜底 ---- */
+        const tr = H.lastTrace() || {};
+        const f = tr.facts || {};
+        out.provider2 = f.provider;
+        out.agentMode2 = f.agentMode;
+        out.agentTools = f.agentTools;
+        out.riskScore = f.riskScore;
+        out.riskClaimed = f.riskClaimedScore;
+        out.emotionIndex = f.emotionIndex;
+        out.trendModel = f.trendModel;
+        want(f.provider === 'agent' || f.provider === 'llm', '第二轮没走模型通道，实为 ' + f.provider);
+        want(f.agentMode === 'model' || f.provider === 'llm', 'Agent 没按模型规划跑，agentMode=' + f.agentMode);
+        want(Number(f.riskClaimedScore) === 83, '轨迹里没有模型自报的 83 分，实为 ' + f.riskClaimedScore);
+        want(Number(f.riskScore) === 83, '风险评估显示的分数不是模型那个（词典把它改了？），实为 ' + f.riskScore);
+        want(String(f.trendModel) === 'down', '情绪走势没采信模型的 down，实为 ' + f.trendModel);
+        want(Number(f.emotionIndex) !== null && isFinite(Number(f.emotionIndex)),
+          '情绪指数没算出来，实为 ' + f.emotionIndex);
+
+        const emo = txt('#bandStrip .bs-em .bs-v');
+        const intent = txt('#bandStrip .bs-intent .bs-v');
+        const risk = txt('#bandStrip .bs-risk .risk-badge');
+        const sub = txt('#sbSub');
+        out.bandEmotion = emo;
+        out.bandIntent = intent;
+        out.bandRisk = risk;
+        out.spriteSub = sub;
+        want(Number(emo) === 22, '情绪读数不是模型给的 22，实为「' + emo + '」');
+        want(intent === '赔付协商', '主意图不是模型给的「赔付协商」，实为「' + intent + '」');
+        want(/高危/.test(risk), '风险等级徽标不是模型 83 分对应的「高危」，实为「' + risk + '」');
+        want(/大模型/.test(sub), '建议面板没说这一轮来自大模型，实为「' + sub + '」');
+
+        /* ---- ③ 界面：候选是模型那三句，且没有「答非所问」 ---- */
+        const texts = qa('#spriteBody .ra-body').map((e) => flat(e.textContent));
+        out.cands = texts;
+        out.offTopic = qa('#spriteBody .ra-flags .flag').filter((e) => /答非所问/.test(e.textContent || '')).length;
+        want(texts.length === 3, '界面候选不是 3 条，实为 ' + texts.length);
+        want(texts.some((t) => t.indexOf('按不良反应登记') >= 0), '推荐位不是模型那条「按不良反应登记」：' + texts.join(' ｜ '));
+        want(texts.some((t) => /脸颊泛红|刺痛/.test(t)), '三条候选没有一条接住顾客说过的症状');
+        want(texts.join('\\n').split(NO).length - 1 <= 1, '订单号在候选里出现超过一次');
+        want(out.offTopic === 0, '模型给的话术被判成答非所问 ' + out.offTopic + ' 条（贴题闸把好话术打掉了）');
+      } finally {
+        window.fetch = rawFetch;
+      }
+
+      if (bad.length) throw new Error('模型上下文断言失败 ' + bad.length + ' 项：' + bad.join(' | '));
+      return out;
+    })()`,
+  },
 ];
 
 /* ------------------------------------------------------------------ CDP */
@@ -2244,6 +2934,20 @@ async function waitForDevtools(retries = 60) {
     catch (e) { await new Promise((r) => setTimeout(r, 250)); }
   }
   throw new Error('DevTools 端口未就绪');
+}
+
+/* 在页面里跑一段源码并取回值。probe / pre / post 三条路都走这里，
+   所以「探针自己写坏了」只会在一个地方冒出来，不会某条路上静默吞掉。 */
+async function evalSrc(c, src) {
+  try {
+    const r = await c.send('Runtime.evaluate', {
+      expression: src, returnByValue: true, awaitPromise: true,
+    });
+    if (r.exceptionDetails) {
+      return { error: (r.exceptionDetails.exception || {}).description || r.exceptionDetails.text };
+    }
+    return { value: r.result.value };
+  } catch (e) { return { error: e.message }; }
 }
 
 function cdp(ws) {
@@ -2313,10 +3017,37 @@ function cdp(ws) {
       /* 门禁默认关闭：除 login-gate 外，所有检查都从「已进入」的状态起跑，
          否则每条断言都会撞在登录页上，测不到任何业务行为 */
       const nav = chk.gate ? chk.url : chk.url + (chk.url.indexOf('?') === -1 ? '?' : '&') + 'gate=off';
+      let probe = null, probeErr = null;
+      /* pre：在「跳转之前」于当前页面跑一段源码。用来铺首帧前就要读到的状态
+         （localStorage 里的主题偏好、门禁票据…）—— 这些必须在页面脚本运行前就位，
+         放进 probe 里就晚了，probe 跑的时候首帧早就画完了。 */
+      const preRes = chk.pre ? await (async () => {
+        /* 先落到目标源上再铺状态：新标签页停在 about:blank，那里读 localStorage
+           直接抛 SecurityError（没有 origin），pre 就没法工作。 */
+        await c.send('Page.navigate', { url: BASE + '/?nolive=1' });
+        /* 而且要等页面真的起来：boot() 里的 applyTheme 会 prefsSave 覆盖整份偏好，
+           pre 抢在它前面写就等于白写 —— 这类「铺了但被盖掉」的坑只会表现为
+           下一条断言莫名其妙地红。等的信号用 applyTheme 自己写下的那个键：
+           它一出现，说明偏好已经落过一轮盘了。 */
+        for (let i = 0; i < 60; i++) {
+          const ready = await evalSrc(c,
+            "(() => !!localStorage.getItem('beauty-cs-theme'))()");
+          if (ready.value === true) return evalSrc(c, chk.pre);
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        return { error: '预热页在 12 秒内没写出 beauty-cs-theme，pre 无处可铺' };
+      })() : null;
+      if (preRes && preRes.error) probeErr = 'pre 抛错：' + preRes.error;
+      /* emulate：跳转之前就把媒体特性钉住，否则首帧读到的还是系统默认值，
+         「跟随系统」那条路径根本不会被走到 */
+      if (chk.emulate) await c.send('Emulation.setEmulatedMedia', { features: chk.emulate });
       await c.send('Page.navigate', { url: BASE + nav });
       await new Promise((r) => setTimeout(r, chk.wait || 2000));
-      let probe = null, probeErr = null;
-      try {
+      /* during：页面已经加载完、探针还没跑之前，再改一次模拟媒体特性。
+         配合 pre 里铺的 auto 偏好，就能一次量到两件事：
+         __themePre 记下「首帧前解析成了哪套」，data-theme 记下「系统翻转后跟没跟上」。 */
+      if (chk.during) await c.send('Emulation.setEmulatedMedia', { features: chk.during });
+      if (!probeErr) try {
         /* probe 可以是模板字符串，也可以是个返回字符串的函数（要按参数拼源码的用后者）。
            直接把它塞进 expression 时，函数会被 JSON 序列化丢掉字段 → CDP 回一句
            「Invalid parameters」，看起来像浏览器出了问题，其实是探针没生成。
@@ -2325,12 +3056,12 @@ function cdp(ws) {
         if (typeof src !== 'string' || !src.trim()) {
           throw new Error('探针源码为空（probe 返回了 ' + Object.prototype.toString.call(src) + '）');
         }
-        const r = await c.send('Runtime.evaluate', {
-          expression: src, returnByValue: true, awaitPromise: true,
-        });
-        if (r.exceptionDetails) probeErr = (r.exceptionDetails.exception || {}).description || r.exceptionDetails.text;
-        else probe = r.result.value;
+        const r = await evalSrc(c, src);
+        if (r.error) probeErr = r.error; else probe = r.value;
       } catch (e) { probeErr = e.message; }
+      /* post：探完就把铺下去的状态擦掉。检查项之间共用同一个页面与同一份
+         localStorage，不留手就会把下一条检查带进沟里 */
+      if (chk.post) await evalSrc(c, chk.post);
 
       let shot = null;
       if (chk.screenshot) {

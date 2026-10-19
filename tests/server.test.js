@@ -16,7 +16,10 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+const zlib = require('zlib');
 const { spawn } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -24,6 +27,21 @@ const PORT = Number(process.env.SERVER_TEST_PORT || 5399);
 const BASE = 'http://127.0.0.1:' + PORT;
 const DEMO_PIN = '1234';          // 演示口令：README 里写死的，不是需要保护的机密
 const SEED_AGENT = 'CS013';
+
+/* 每台被 spawn 的服务都给它**自己的**数据目录。
+   为什么：`saveDb()` 落的是各进程自己的整份快照，两台同时开就互相覆盖（实测撞过）。
+   以前这些测试直接写演示那台的 `server/data/db.json` —— 注册一个测试坐席就把真档案改了，
+   还会和另一台实例互相盖。测试没有理由碰真数据。 */
+const DATA_DIRS = [];
+function dataDir(tag) {
+  const d = path.join(os.tmpdir(), 'beauty-cs-srvtest-' + tag + '-' + process.pid);
+  try { fs.mkdirSync(d, { recursive: true }); } catch (e) { /* 已存在即可 */ }
+  DATA_DIRS.push(d);
+  return d;
+}
+function dropDataDirs() {
+  DATA_DIRS.forEach((d) => { try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* 留给系统清 */ } });
+}
 
 /* 与项目同前缀的兄弟目录：旧代码的 startsWith(ROOT) 会把它当「根目录内」 */
 const SIBLING_NAME = path.basename(ROOT) + '-probe';
@@ -48,6 +66,32 @@ const request = (method, p, body, headers) => requestAt(BASE, method, p, body, h
 const json = (r) => { try { return JSON.parse(r.text); } catch (e) { return null; } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* gzip 的正文不是文本：`res.setEncoding('utf8')` 会在解码前就把字节的非法序列
+   换成 U+FFFD，压回来不再是同一份文件 —— 那样「解出来和磁盘上逐字节相同」这条
+   断言恒假。压缩相关的用例一律走这个拿原始 Buffer 的版本。
+   另外只等 `end` 是不够的：声明了 Content-Length 却没送够，Node 直接掐 socket，
+   `end` 永远不会来 —— 负向验证跑这一条时把整轮跑到超时。断流也要当场拿到结果，
+   所以 `close` / `aborted` 同样收尾，并把 `res.complete` 带出去给断言用。 */
+function requestRaw(method, p, headers) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(BASE + p, { method, headers: headers || {} }, (res) => {
+      const chunks = [];
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve({ status: res.statusCode, headers: res.headers, buf: Buffer.concat(chunks), complete: !!res.complete });
+      };
+      res.on('data', (c) => chunks.push(Buffer.from(c)));
+      res.on('end', finish);
+      res.on('aborted', finish);
+      res.on('close', finish);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /* /api/vlm 的最小合法身体：一段文字 + 一张浏览器本机的 data URL 图 */
 const vlmMsg = (url, extra) => Object.assign({
   messages: [{ role: 'user', content: [
@@ -69,6 +113,40 @@ async function waitHealth(timeoutMs, base) {
   return null;
 }
 
+/* SSE 只能真读流：Node 侧没有 EventSource，就自己按空行切帧。
+   这条口是「所有在线坐席同时看到同一条顾客消息」的唯一实现，而它此前
+   **一条断言都没有** —— 测试只从 /api/health 读过 sseClients 那个数，
+   数对了既不代表帧发对了，也不代表补拉对了、断线后真的回收了。 */
+function sseOpen(p) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(BASE + p, { method: 'GET' });
+    req.on('response', (res) => {
+      let buf = '';
+      const frames = [];
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        buf += c;
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) { frames.push(buf.slice(0, i)); buf = buf.slice(i + 2); }
+      });
+      resolve({ res: res, req: req, frames: frames });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** 一帧 SSE 文本 -> {event, data}。`: connected` / `: hb` 这类注释帧归到 event='comment' */
+function sseFrame(f) {
+  const out = { event: '', data: '' };
+  for (const line of String(f).split('\n')) {
+    if (line.startsWith('event:')) out.event = line.slice(6).trim();
+    else if (line.startsWith('data:')) out.data += line.slice(5).trim();
+    else if (line.startsWith(':') && !out.event) out.event = 'comment';
+  }
+  return out;
+}
+
 module.exports = async function (t) {
   let siblingMade = false;
   const cleanup = () => {
@@ -77,9 +155,13 @@ module.exports = async function (t) {
     try { fs.rmdirSync(SIBLING); } catch (e) { /* ignore */ }
   };
 
+  const MAIN_DIR = dataDir('main');
   const child = spawn(process.execPath, [path.join('server', 'server.js')], {
     cwd: ROOT,
-    env: Object.assign({}, process.env, { PORT: String(PORT), DEEPSEEK_API_KEY: '', LLM_API_KEY: '' }),
+    env: Object.assign({}, process.env, {
+      PORT: String(PORT), DEEPSEEK_API_KEY: '', LLM_API_KEY: '',
+      DATA_DIR: MAIN_DIR,
+    }),
     stdio: 'ignore',
   });
 
@@ -88,6 +170,13 @@ module.exports = async function (t) {
     t.suite('server · 启动与健康检查');
     t.ok(health, '服务在 12s 内起来并返回 /api/health');
     if (!health) return;
+    /* 「有进程在答」不等于「我 spawn 的那台在答」：上一轮我在 5399 上留了一个自己起的服务，
+       子进程绑不上端口、静默失败，而 waitHealth 从那台**旧进程**拿到了 200 ——
+       于是整套服务端断言跑在过期代码上，终端全绿。身份核对是唯一能挡住这一类的。 */
+    t.eq(health.pid, child.pid,
+      '回答 /api/health 的就是本次 spawn 的子进程（端口被遗留进程占着时这条会红，并提示先停掉它）');
+    t.ok(typeof health.bootId === 'string' && health.bootId.length >= 8,
+      '响应里带本次启动的随机身份（与 pid 合起来才能证明「这台是新的」）');
 
     t.eq(health.ok, true, 'health.ok 为 true');
     t.includes(String(health.upstream), 'http', 'health 回显上游地址');
@@ -312,6 +401,106 @@ module.exports = async function (t) {
       try { fs.unlinkSync(PROBE); } catch (e) { /* ignore */ }
     }
 
+    /* ---------- 传输压缩 ----------
+       上面那套协商缓存解决「没改不重传」，解决不了「第一次和改版后那一次全量 958KB」。
+       首屏是 23 个脚本 + 一份 189KB 样式表，`assets/memory.js` 一进来就把总量顶到
+       预算之上 —— 该压的是传输，不是把内容删薄。
+       这一套的用例全部拿原始 Buffer：gzip 正文按 utf8 收会变成乱码再变不回原文件。 */
+    t.suite('server · 静态资源 gzip（只按客户端声明压，变体各有各的校验器）');
+    const GZ_HDR = { 'Accept-Encoding': 'gzip' };
+    const APP = path.join(ROOT, 'assets', 'app.js');
+    const APP_BYTES = fs.readFileSync(APP);
+
+    /* ① 不声明支持 → 原样路径一个字节都不许变（Node 的默认测试客户端就走这条） */
+    const plain = await requestRaw('GET', '/assets/app.js');
+    t.eq(plain.status, 200, '不带 Accept-Encoding 也照常 200');
+    t.eq(plain.headers['content-encoding'], undefined, '客户端没声明支持就不压');
+    t.eq(Number(plain.headers['content-length']), APP_BYTES.length, '原样路径仍报真实字节数');
+    t.eq(plain.buf.equals(APP_BYTES), true, '原样正文与磁盘上那份逐字节相同');
+    t.eq(plain.complete, true, '原样响应完整送达（声明的 Content-Length 与真实送出的字节对得上）');
+
+    /* ② 声明支持 → 压，并且解出来必须逐字节还原 */
+    const zipped = await requestRaw('GET', '/assets/app.js', GZ_HDR);
+    t.eq(zipped.status, 200, '声明 gzip 后 200');
+    t.eq(zipped.headers['content-encoding'], 'gzip', '响应标了 Content-Encoding: gzip');
+    /* 先验魔数再解压：断言不该抛异常 —— 服务端压根没压的时候 gunzipSync 直接 throw，
+       整个文件从这一条往后全部不跑（负向验证里那轮只跑到 103 条就是这个原因）。 */
+    const isGzip = zipped.buf.length > 2 && zipped.buf[0] === 0x1f && zipped.buf[1] === 0x8b;
+    t.eq(isGzip, true, '正文真的以 gzip 魔数 1f 8b 开头');
+    t.eq(isGzip && zlib.gunzipSync(zipped.buf).equals(APP_BYTES), true, '解压后与磁盘上那份逐字节相同（压坏了不会被浏览器悄悄吞掉）');
+    t.ok(zipped.buf.length < APP_BYTES.length / 2, '确实省了：' + zipped.buf.length + 'B vs ' + APP_BYTES.length + 'B');
+    t.eq(zipped.complete, true, '压缩响应完整送达（不给 Content-Length 就得靠分块正常收尾，不能把连接弄断）');
+    t.eq(zipped.headers['content-length'] === undefined
+      || Number(zipped.headers['content-length']) === zipped.buf.length, true,
+      '只要报了 Content-Length 就必须等于真实送达的字节数（拿未压缩的数配压缩的正文 = 浏览器读到一半被掐断）');
+    t.eq(zipped.headers['content-length'], undefined, '压过的不给 Content-Length（长度要压完才知道，凑数就得整份读进内存）');
+
+    /* ③ Vary：同一 URL 现在有两种 body，不标这一条，链路缓存会把 gzip 那份发给没声明的客户端 */
+    t.eq(zipped.headers['vary'], 'Accept-Encoding', '压缩响应带 Vary: Accept-Encoding');
+    t.eq(plain.headers['vary'], 'Accept-Encoding', 'identity 那份也带 —— 今天没压不代表下一个请求没压');
+
+    /* ④ 校验器按变体分开：这是 gzip 最经典的踩坑，共用一个 ETag 会让缓存拿另一份 body 命中 304 */
+    const ePlain = String(plain.headers['etag'] || '');
+    const eGzip = String(zipped.headers['etag'] || '');
+    t.ok(/^"[0-9a-f]+-[0-9a-f]+-gz"$/.test(eGzip), '压缩变体的校验器带 -gz 后缀，实际 ' + eGzip);
+    t.not(eGzip === ePlain, '两种变体的校验器不同（同标记 = 缓存可以拿乱码命中）');
+    t.eq((await requestRaw('GET', '/assets/app.js',
+      Object.assign({ 'If-None-Match': ePlain }, GZ_HDR))).status, 200,
+      '拿 identity 的校验器问 gzip → 200，不许 304');
+    t.eq((await requestRaw('GET', '/assets/app.js',
+      Object.assign({ 'If-None-Match': eGzip }, GZ_HDR))).status, 304,
+      '拿 gzip 自己的校验器问 gzip → 304');
+    t.eq((await requestRaw('GET', '/assets/app.js', { 'If-None-Match': eGzip })).status, 200,
+      '反过来也一样：gzip 的校验器不能放行一个 identity 请求');
+    const hit = await requestRaw('GET', '/assets/app.js', Object.assign({ 'If-None-Match': eGzip }, GZ_HDR));
+    t.eq(hit.buf.length, 0, '304 没有正文');
+    t.eq(hit.headers['content-encoding'], undefined, '304 不回 Content-Encoding（正文在客户端缓存里）');
+
+    /* ⑤ 显式拒绝与「压根不支持 gzip」 */
+    const rej = await requestRaw('GET', '/assets/app.js', { 'Accept-Encoding': 'gzip;q=0' });
+    t.eq(rej.headers['content-encoding'], undefined, 'gzip;q=0 是显式拒绝，不能因为字符串里有 gzip 就压');
+    const brOnly = await requestRaw('GET', '/assets/app.js', { 'Accept-Encoding': 'deflate, br' });
+    t.eq(brOnly.headers['content-encoding'], undefined, '只支持 deflate/br 的客户端不给它 gzip');
+    const browserish = await requestRaw('GET', '/assets/app.js', { 'Accept-Encoding': 'gzip, deflate, br, zstd' }
+    );
+    t.eq(browserish.headers['content-encoding'], 'gzip', '浏览器那串多编码里挑 gzip（本服务只实现这一种）');
+
+    /* ⑥ 该跳过的两类：小文件压完加头部反而更大；PNG 已经压过，再压是白烧 CPU */
+    const small = path.join(ROOT, 'assets', '__gz_probe__.txt');
+    try {
+      fs.writeFileSync(small, 'A', 'utf8');
+      const rSmall = await requestRaw('GET', '/assets/__gz_probe__.txt', GZ_HDR);
+      t.eq(rSmall.headers['content-encoding'], undefined, '低于体积阈值的小文件不压');
+      t.eq(rSmall.buf.toString('utf8'), 'A', '小文件原样送达');
+    } finally {
+      try { fs.unlinkSync(small); } catch (e) { /* ignore */ }
+    }
+    let pngName = '';
+    try {
+      pngName = fs.readdirSync(path.join(ROOT, 'assets', 'img'))
+        .filter((f) => /\.png$/i.test(f))[0] || '';
+    } catch (e) { /* 目录不在就跳过这条 */ }
+    if (pngName) {
+      const pngBytes = fs.readFileSync(path.join(ROOT, 'assets', 'img', pngName));
+      const rPng = await requestRaw('GET', '/assets/img/' + pngName, GZ_HDR);
+      t.eq(rPng.headers['content-encoding'], undefined, '图片不在可压扩展名里（gzip 对 PNG 无效）');
+      t.eq(Number(rPng.headers['content-length']), pngBytes.length, 'PNG 仍按真实字节数返回');
+    }
+
+    /* ⑦ HEAD 语义不能被压缩链打破：只给头部、不 pipe、不给正文 */
+    const headGz = await requestRaw('HEAD', '/assets/app.js', GZ_HDR);
+    t.eq(headGz.status, 200, 'HEAD + gzip 仍 200');
+    t.eq(headGz.buf.length, 0, 'HEAD 不送正文');
+    t.eq(headGz.headers['content-length'], undefined, 'HEAD 压过的那份不给长度（给就是猜的）');
+
+    /* ⑧ 压过的仍然是同一份资源：首页 no-cache 口径不变 */
+    const idxGz = await requestRaw('GET', '/index.html', GZ_HDR);
+    t.eq(idxGz.headers['cache-control'], 'no-cache', '首页即便压缩仍是 no-cache');
+    const idxIsGz = idxGz.buf.length > 2 && idxGz.buf[0] === 0x1f && idxGz.buf[1] === 0x8b;
+    t.eq(idxIsGz, true, '首页也真的压了（同样带 1f 8b 魔数）');
+    t.eq(idxIsGz ? zlib.gunzipSync(idxGz.buf).slice(0, 15).toString('utf8') : '', '<!DOCTYPE html>',
+      '首页解压后就是那份 HTML');
+
     /* ---------- 写接口鉴权 ----------
        /api/kb 的增删过去完全公开：任意网站一条 text/plain 的简单 POST（连预检都不要）
        就能往全部坐席的话术库里塞任意内容 —— 那是话术库，不是公告栏。
@@ -436,6 +625,7 @@ module.exports = async function (t) {
       env: Object.assign({}, process.env, {
         PORT: String(PORT2), DEEPSEEK_API_KEY: '', LLM_API_KEY: '',
         INGEST_TOKEN: INGEST_TOK, LLM_MAX_RPM: '2', VLM_MAX_RPM: '1',
+        DATA_DIR: dataDir('token'),
       }),
       stdio: 'ignore',
     });
@@ -443,6 +633,7 @@ module.exports = async function (t) {
       const h2 = await waitHealth(12000, BASE2);
       t.ok(h2, '第二台在 12s 内起来');
       if (h2) {
+        t.eq(h2.pid, child2.pid, '第二台也是本次 spawn 的（端口 5400 被占时不许拿旧进程冒充）');
         t.eq(h2.ingestMode, 'token', 'health 自述当前是令牌模式');
         t.eq(h2.chatLimit.max, 2, 'health 自述代理频控上限');
 
@@ -519,6 +710,7 @@ module.exports = async function (t) {
         VLM_BASE_URL: 'http://127.0.0.1:' + UP_PORT + '/v1',
         VLM_API_KEY: VLM_SECRET, VLM_MODEL: 'qa-vlm',
         VLM_MAX_RPM: '40', VLM_MAX_BODY_KB: '8',
+        DATA_DIR: dataDir('vlm'),
       }),
       stdio: 'ignore',
     });
@@ -526,6 +718,7 @@ module.exports = async function (t) {
       const h3 = await waitHealth(12000, BASE3);
       t.ok(h3, '第三台在 12s 内起来并返回 /api/health');
       if (!h3) return;
+      t.eq(h3.pid, child3.pid, '第三台同样是本次 spawn 的（这一台带 VLM 配置，错认成旧进程等于什么都没测）');
       t.eq(h3.vlm.configured, true, '配了上游 + 密钥才叫 configured');
       t.eq(h3.vlm.model, 'qa-vlm', 'health 自述当前会用哪个模型');
       t.eq(h3.vlm.keySource, 'server', '密钥来源标明在服务端（不是「客户端透传」）');
@@ -582,9 +775,361 @@ module.exports = async function (t) {
       upSrv.close();
       await sleep(150);
     }
+
+    /* ================================================================
+       下面四段补的是「代码写了、但一条断言都没有」的那几块：
+         · SSE —— 全部在线坐席看到同一条消息的唯一实现，以前只读过 health 里那个数；
+         · 坐席账号全链 —— 注册/会话/心跳/登出/注销五个口，以前只有 login 被顺手用过一次；
+         · 异步落盘 —— 改成合并写之后，「响应回来了、盘还没写」是新常态，必须真去盘上读；
+         · 旧口令库就地升级 + 上游超时 —— 两条只在真进程里才存在的路径。
+       以及第五段：账号库坏了怎么办。这一条决定演示现场会不会白屏。
+       ================================================================ */
+
+    /* 帧是异步到达的，断言之前先等一个条件成立。拿到假就返回 null，让下面的断言红。 */
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + (ms || 3000);
+      for (;;) {
+        const v = pred();
+        if (v) return v;
+        if (Date.now() > deadline) return null;
+        await sleep(40);
+      }
+    };
+
+    /* -------------------------------------------------- ④ 实时推送 */
+
+    t.suite('server · /api/events 实时推送（补拉 · 广播 · 断线清理）');
+    {
+      const seqBase = ((json(await request('GET', '/api/messages?since=0')) || {}).seq) || 0;
+      const tag = 'SSE' + Date.now().toString(36);
+      const tx1 = '推送测试甲 ' + tag;
+      const tx2 = '推送测试乙 ' + tag;
+      await request('POST', '/api/ingest', { text: tx1, customerId: key, msgId: tag + '-1' });
+      await request('POST', '/api/ingest', { text: tx2, customerId: key, msgId: tag + '-2' });
+
+      const conn = await sseOpen('/api/events?since=' + seqBase);
+      t.eq(conn.res.statusCode, 200, 'SSE 建连返回 200');
+      t.includes(String(conn.res.headers['content-type']), 'text/event-stream',
+        'Content-Type 是 text/event-stream（浏览器据此才按帧解析，写成 json 就整条口废了）');
+
+      await until(() => conn.frames.some((f) => sseFrame(f).event === 'hello'));
+      const fr = conn.frames.map(sseFrame);
+      t.eq(fr[0].event, 'comment', '第一帧是 `: connected` 注释帧（先点亮流，事件名从 hello 才开始）');
+      const hello = fr.filter((f) => f.event === 'hello')[0];
+      t.ok(hello, 'hello 帧到达');
+      const hj = hello ? JSON.parse(hello.data) : {};
+      t.eq(hj.missed, 2, 'hello 报「补 2 条」—— 建连之前投的那两条一条都不能漏');
+      const replay = fr.filter((f) => f.event === 'message');
+      t.eq(replay.length, 2, '重放了两帧 message（数字对不算，帧真发出来才算）');
+      const texts = replay.map((f) => { try { return JSON.parse(f.data).text; } catch (e) { return ''; } }).sort();
+      t.eq(texts.join('|'), [tx1, tx2].sort().join('|'), '补拉内容与原文逐字一致（顺序按 seq，不按到达时刻）');
+
+      const h1 = json(await request('GET', '/api/health'));
+      t.eq(h1.sseClients, 1, '在线订阅数记的是这条真连接（不是每秒轮询出来的估算值）');
+
+      const tx3 = '推送测试丙 ' + tag;
+      await request('POST', '/api/ingest', { text: tx3, customerId: key, msgId: tag + '-3' });
+      await until(() => conn.frames.map(sseFrame).some((f) => f.event === 'message' && f.data.indexOf(tag + '-3') >= 0));
+      t.ok(conn.frames.map(sseFrame).some((f) => f.data.indexOf(tx3) >= 0),
+        '第 3 条不等重连、当场就推到了在线连接上（这才是「实时」那两个字）');
+
+      conn.req.destroy();
+      let clientsAfterClose = -1;
+      for (let i = 0; i < 40 && clientsAfterClose !== 0; i++) {
+        clientsAfterClose = ((json(await request('GET', '/api/health')) || {}).sseClients);
+        await sleep(50);
+      }
+      t.eq(clientsAfterClose, 0, '客户端断线后订阅表真被回收（不清就是每条断线的坐席留一个死 res，写它还会抛，推送计数越跑越假）');
+
+      const conn2 = await sseOpen('/api/events?since=' + (((json(await request('GET', '/api/messages?since=0')) || {}).seq) || 0));
+      await until(() => conn2.frames.some((f) => sseFrame(f).event === 'hello'));
+      const hj2 = JSON.parse((conn2.frames.map(sseFrame).filter((f) => f.event === 'hello')[0] || { data: '{}' }).data);
+      t.eq(hj2.missed, 0, '带着最新 seq 重连，一条都不该补（补拉按 seq 而不是按「你没看过」）');
+      t.eq(conn2.frames.map(sseFrame).filter((f) => f.event === 'message').length, 0, '重连没有把历史消息再喷一遍');
+      conn2.req.destroy();
+      let clients2 = -1;
+      for (let i = 0; i < 40 && clients2 !== 0; i++) {
+        clients2 = ((json(await request('GET', '/api/health')) || {}).sseClients);
+        await sleep(50);
+      }
+      t.eq(clients2, 0, '第二条连接也一样收干净（订阅表回到空，不留幽灵坐席）');
+    }
+
+    /* -------------------------------------------------- ⑤ 坐席账号全生命周期 */
+
+    t.suite('server · 坐席账号全链（注册 → 会话 → 心跳 → 登出 → 注销）');
+    {
+      /* 工号按时间戳取，跑一百轮也不和上一轮撞。
+         故意不用 CS013：那个工号在「登录失败锁定」那段已经被刷过失败计数，
+         共用同一来源就互相污染（键是「工号@来源」）。 */
+      const rid = 'QZ' + String(1000 + (Date.now() % 8000));
+      const RPIN = 'qa-pin-' + rid;
+      const authOf = (tk) => ({ 'Content-Type': 'application/json', Authorization: 'Bearer ' + tk });
+
+      /* 先钉校验分支：服务端规则必须和界面写的一样，不能界面拦了服务端照单全收 */
+      const badId = await request('POST', '/api/auth/register', { agentId: 'QA', name: '太短号', role: '客服', pin: '1234' });
+      t.eq(badId.status, 400, '工号只有 2 位字母没有数字 → 400（正则写死在服务端）');
+      const badName = await request('POST', '/api/auth/register', { agentId: 'QA99', name: '甲', role: '客服', pin: '1234' });
+      t.eq(badName.status, 400, '姓名 1 个字 → 400');
+      const badRole = await request('POST', '/api/auth/register', { agentId: 'QA98', name: '质检戊', role: '老板', pin: '1234' });
+      t.eq(badRole.status, 400, '岗位不在白名单 → 400（等级与岗位不能让注册人自己挑）');
+      const badPin = await request('POST', '/api/auth/register', { agentId: 'QA97', name: '质检己', role: '客服', pin: '123' });
+      t.eq(badPin.status, 400, '口令 3 位 → 400（4–32 位是 scrypt 存得有意义的前提）');
+
+      const rReg = await request('POST', '/api/auth/register', { agentId: rid, name: '质检丙', role: '质检', pin: RPIN });
+      t.eq(rReg.status, 201, '合法注册 → 201');
+      const reg = json(rReg);
+      t.ok(reg && reg.ok, '注册响应 ok');
+      t.ok(/^[a-f0-9]{48}$/.test(String(reg.token || '')),
+        '发下来的是 24 字节随机令牌（' + String(reg.token || '').length + ' 位十六进制），不是工号或自增 id');
+      t.eq(reg.agent.id, rid, '回显的档案就是刚建的那个（不含 salt / pinHash）');
+      t.eq(reg.agent.level, 'L1', '新人固定 L1：等级决定工单派给谁，不能自己给自己定级');
+      t.eq(rReg.text.indexOf('salt'), -1, '注册响应原文里没有 salt');
+      t.eq(rReg.text.indexOf('pinHash'), -1, '注册响应原文里没有 pinHash');
+
+      const rDup = await request('POST', '/api/auth/register', { agentId: rid, name: '同名人', role: '客服', pin: RPIN });
+      t.eq(rDup.status, 409, '同工号重复注册 → 409，不是静默覆盖别人口令');
+
+      const rAgents = await request('GET', '/api/agents');
+      t.eq(rAgents.text.indexOf('pinHash'), -1, '坐席列表接口不吐口令哈希（这条口任何人都能读）');
+      t.eq(rAgents.text.indexOf('"salt"'), -1, '坐席列表接口不吐盐');
+
+      /* 四种「看着像但不合法」的 Authorization 都得 401：
+         bearerToken() 是一条 ^Bearer\s+([a-f0-9]{24,64})$ 的锚定正则，
+         任何一格松掉，就等于换一个写法能绕过登录态。 */
+      const shapes = [
+        ['Bearer 后不是十六进制', 'Bearer zz'],
+        ['Bearer 后太短（<24）', 'Bearer ' + 'a'.repeat(8)],
+        ['Basic 冒充 Bearer', 'Basic ' + reg.token],
+        ['裸令牌没有 Bearer 前缀', reg.token],
+      ];
+      for (const [label, value] of shapes) {
+        const bad = await request('GET', '/api/auth/session', null, { Authorization: value });
+        t.eq(bad.status, 401, '畸形凭证 ' + label + ' → 401');
+      }
+
+      const sess = json(await request('GET', '/api/auth/session', null, authOf(reg.token)));
+      t.eq(sess.agent.id, rid, '带对令牌时会话认的就是这个工号');
+
+      const rBusy = await request('POST', '/api/presence', { status: 'busy' }, authOf(reg.token));
+      t.eq(rBusy.status, 200, '在线状态改 busy → 200');
+      t.eq(json(rBusy).agent.status, 'busy', '响应回显新状态（界面据此画那个点，不能自己猜）');
+      const rJunk = await request('POST', '/api/presence', { status: 'on-holiday' }, authOf(reg.token));
+      t.eq(rJunk.status, 400, '状态只认 online / busy / away，别的写法不入库');
+
+      const rOut = await request('POST', '/api/auth/logout', {}, authOf(reg.token));
+      t.eq(rOut.status, 200, '登出 → 200');
+      const sessAfter = await request('GET', '/api/auth/session', null, authOf(reg.token));
+      t.eq(sessAfter.status, 401, '登出后同一令牌立刻失效（只删前端存的 token 不算登出）');
+      const unDead = await request('POST', '/api/auth/unregister', {}, authOf(reg.token));
+      t.eq(unDead.status, 401, '拿着已登出的令牌注销 → 401（注销只认活会话）');
+
+      const rRe = json(await request('POST', '/api/auth/login', { agentId: rid, pin: RPIN }));
+      t.eq(rRe.ok, true, '同人口令能重新登录（注册不是只活一次的会话）');
+      const rWrong = await request('POST', '/api/auth/login', { agentId: rid, pin: '0000' });
+      t.eq(rWrong.status, 401, '口令不对 → 401');
+
+      const tk2 = rRe.token;
+      const rUn = json(await request('POST', '/api/auth/unregister', {}, authOf(tk2)));
+      t.eq(rUn.ok, true, '本人注销成功');
+      t.eq(rUn.removed, rid, '注销只删自己（没有目标 id 参数，越权面为零）');
+      const after = json(await request('GET', '/api/agents'));
+      t.not((after.agents || []).some((a) => a.id === rid), '账号列表里已经没有这个工号');
+      const sessGone = await request('GET', '/api/auth/session', null, authOf(tk2));
+      t.eq(sessGone.status, 401, '注销时该工号的所有令牌一起作废（账号没了会话不该还活着）');
+    }
+
+    /* -------------------------------------------------- ⑥ 异步落盘 */
+
+    t.suite('server · 异步落盘：合并写真的落到盘上');
+    {
+      const DBF = path.join(MAIN_DIR, 'db.json');
+      const h0 = json(await request('GET', '/api/health'));
+      t.ok(Number.isFinite(h0.store.writes) && h0.store.writes >= 1,
+        'health 自述已发生 ' + h0.store.writes + ' 次写盘（异步之后必须有这句话，不然「没写」和「没读到」分不开）');
+      t.eq(h0.store.errors, 0, '写盘错误计数为 0');
+
+      const cid = 'QC' + String(1000 + (Date.now() % 8000));
+      const CPIN = 'qc-pin-' + cid;
+      const rc = await request('POST', '/api/auth/register', { agentId: cid, name: '落盘丁', role: '运营', pin: CPIN });
+      t.eq(rc.status, 201, '建一个专门用来验盘的工号');
+      const tkc = json(rc).token;
+
+      /* 「响应回来了」不再等于「盘上有了」——这是异步化换来的新语义，
+         所以要等到看见为止；等不到就是丢写。上限 3s，正常第一次轮询就中。 */
+      let onDisk = '';
+      for (let i = 0; i < 60 && onDisk.indexOf('"' + cid + '"') < 0; i++) {
+        try { onDisk = fs.readFileSync(DBF, 'utf8'); } catch (e) { /* 还没写出第一个文件 */ }
+        await sleep(50);
+      }
+      t.includes(onDisk, '"' + cid + '"', '注册落进了本进程的 DATA_DIR/db.json');
+      let parsed = null;
+      let parseErr = '';
+      try { parsed = JSON.parse(onDisk); } catch (e) { parseErr = e.message; }
+      t.ok(parsed, '盘上是完整 JSON，不是半个文件（原子替换的意义）：' + parseErr);
+      const rec = parsed && (parsed.agents || []).filter((a) => a.id === cid)[0];
+      t.ok(rec, '能读回那条档案');
+      t.eq(rec && rec.pinAlg, 'scrypt', '新建口令用 scrypt 存');
+      t.ok(rec && String(rec.salt || '').length >= 16, '每条自带随机盐（' + ((rec || {}).salt || '').length + ' 位十六进制）');
+      t.eq(JSON.stringify(rec || {}).indexOf(CPIN), -1, '盘上没有明文口令');
+
+      /* 合并写的直接证据：20 个并发请求 = 20 次 saveDb()，但磁盘上不该出现 20 份整文件。
+         这条断言比的是「次数」而不是「耗时」，所以慢机器上也不会假绿。 */
+      const w0 = (json(await request('GET', '/api/health')).store || {}).writes;
+      const mk = (s) => request('POST', '/api/presence', { status: s },
+        { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tkc });
+      const burst = [];
+      for (let i = 0; i < 20; i++) burst.push(mk(i % 2 ? 'away' : 'busy'));
+      const codes = await Promise.all(burst);
+      t.ok(codes.every((c) => c.status === 200), '20 个并发心跳全部 200（异步落盘没有把请求挤失败）');
+      const w1 = (json(await request('GET', '/api/health')).store || {}).writes;
+      t.ok(w1 - w0 < 20, '20 个并发请求合并成 ' + (w1 - w0) + ' 次写盘 —— 同步版就是 20 次，每次冻住事件循环，在线坐席的推送跟着一起等');
+
+      await sleep(300);
+      let last = '';
+      try { last = fs.readFileSync(DBF, 'utf8'); } catch (e) { last = ''; }
+      let converged = null;
+      try { converged = JSON.parse(last); } catch (e) { /* 让下面的断言红，并带出错误 */ }
+      const rec2 = converged && (converged.agents || []).filter((a) => a.id === cid)[0];
+      t.ok(rec2 && ['busy', 'away'].indexOf(rec2.status) >= 0,
+        '一轮 burst 之后盘上是某一刻的完整快照，状态收敛到最后写入值（实际 ' + ((rec2 || {}).status) + '）');
+
+      const clean = await request('POST', '/api/auth/unregister', {}, { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tkc });
+      t.eq(clean.status, 200, '收走这个试号：测试不该在演示账号库里留垃圾');
+    }
+
+    /* -------------------------------------------------- ⑦ 旧库迁移 + 上游超时 */
+
+    /* ---------- 第四台：预先塞一份「旧版口令库」，并把上游指向一台装死的服务器 ----------
+       两件事都必须真起进程：
+         · 就地升级（sha256 → scrypt）只发生在 verifyPin 验过之后，且要落盘才看得见；
+         · 上游超时靠 AbortController 到点掐断，「等满配置的秒数然后 504」
+           在单测里只能测函数返回，测不出「请求没有被钉死在那儿」。 */
+    t.suite('server · 旧口令库就地升级 + 上游超时不钉死请求');
+    const DIR4 = dataDir('legacy');
+    const LG_SALT = 'a1b2c3d4e5f60718';
+    const LG_PIN = 'qalegacy8877';   // 带 q / l / g / y：绝不可能在十六进制串里撞出来，「明文口令」那条断言才有意义
+    fs.writeFileSync(path.join(DIR4, 'db.json'), JSON.stringify({
+      agents: [{
+        id: 'LG01', name: '佟佟', role: '客服', level: 'L2', status: 'online',
+        salt: LG_SALT,
+        pinHash: crypto.createHash('sha256').update(LG_SALT + ':' + LG_PIN).digest('hex'),
+      }],
+      kb: [], nextKb: 1,
+    }));
+    const HANG_PORT = PORT + 5;
+    const hangSrv = http.createServer((rq, rs) => { rq.resume(); /* 故意一个字都不回 */ });
+    await new Promise((resolve, reject) => {
+      hangSrv.once('error', reject);
+      hangSrv.listen(HANG_PORT, '127.0.0.1', resolve);
+    });
+    const PORT4 = PORT + 4;
+    const BASE4 = 'http://127.0.0.1:' + PORT4;
+    const child4 = spawn(process.execPath, [path.join('server', 'server.js')], {
+      cwd: ROOT,
+      env: Object.assign({}, process.env, {
+        PORT: String(PORT4), DATA_DIR: DIR4,
+        LLM_BASE_URL: 'http://127.0.0.1:' + HANG_PORT,
+        DEEPSEEK_API_KEY: 'sk-hang-upstream', LLM_API_KEY: '',
+        LLM_TIMEOUT_MS: '700',
+      }),
+      stdio: 'ignore',
+    });
+    try {
+      const h4 = await waitHealth(12000, BASE4);
+      t.ok(h4, '第四台在 12s 内起来');
+      if (h4) {
+        t.eq(h4.pid, child4.pid, '第四台也是本次 spawn 的');
+        t.eq(h4.upstreamTimeoutMs.chat, 700, 'health 自述聊天上游只等 700ms（对接方不必自己数秒）');
+        t.eq(h4.keySource, 'server', '这一台服务端配了密钥');
+
+        const raw0 = fs.readFileSync(path.join(DIR4, 'db.json'), 'utf8');
+        t.includes(raw0, '"salt"', '起步是一份带盐的旧库');
+        t.eq(raw0.indexOf('pinAlg'), -1, '起步时库里没有 pinAlg —— 正是「靠 sha256 存口令」的那个年代的形状');
+
+        const lg = await requestAt(BASE4, 'POST', '/api/auth/login', { agentId: 'LG01', pin: LG_PIN });
+        t.eq(lg.status, 200, '旧库口令仍能登录（迁移不能把老人挡在门外）');
+
+        let upgraded = '';
+        for (let i = 0; i < 60 && upgraded.indexOf('"pinAlg"') < 0; i++) {
+          try { upgraded = fs.readFileSync(path.join(DIR4, 'db.json'), 'utf8'); } catch (e) { /* 还没写出 */ }
+          await sleep(50);
+        }
+        t.includes(upgraded, '"pinAlg": "scrypt"',
+          '验过之后就地升级并落盘：老 db.json 不用删，一条条迁到强哈希');
+        if (upgraded.indexOf(LG_PIN) >= 0) t.ok(false, '升级后的文件里出现了明文口令');
+        else t.ok(true, '升级后的文件仍然没有明文口令');
+
+        const again = await requestAt(BASE4, 'POST', '/api/auth/login', { agentId: 'LG01', pin: LG_PIN });
+        t.eq(again.status, 200, '升级后用 scrypt 再登一次也通过（盐也换了新的）');
+        const wrongAfter = await requestAt(BASE4, 'POST', '/api/auth/login', { agentId: 'LG01', pin: '000000' });
+        t.eq(wrongAfter.status, 401, '升级后错口令照样 401（不是把校验整个跳过去了）');
+
+        /* 装死的上游：必须在配置的秒数处断开并回 504，而不是让这条请求挂着不动。
+           原来这里只有一个 502 —— 界面上「超时」和「连不上」塌成一句话，
+           对接方分不清是这轮太大还是地址/密钥写错了。 */
+        const t0 = Date.now();
+        const hung = await requestAt(BASE4, 'POST', '/api/chat',
+          { messages: [{ role: 'user', content: '随便说点什么' }] }, VLM_JSON).catch((e) => ({ status: 0, text: String(e.message) }));
+        const el = Date.now() - t0;
+        t.eq(hung.status, 504, '上游装死 → 504，不是 502，也不是永远不返回（实测 ' + el + 'ms）');
+        t.includes(((json(hung) || {}).error || {}).message || '', '超时', '错误话里说清是「超时」');
+        t.ok(el >= 600, '确实等满了配置的窗口（' + el + 'ms ≥ 700ms 的容差下界）而不是秒回一个假超时');
+        t.ok(el < 15000, '也在 15s 内断开（' + el + 'ms）：没等成默认的 60 秒');
+        const alive = await requestAt(BASE4, 'GET', '/api/health');
+        t.eq(alive.status, 200, '超时之后这台机器照常服务（AbortController 掐的是上游，不是自己）');
+      }
+    } finally {
+      child4.kill();
+      try { hangSrv.closeAllConnections(); } catch (e) { /* 老版本 Node 没这个方法 */ }
+      hangSrv.close();
+      await sleep(150);
+    }
+
+    /* -------------------------------------------------- ⑧ 坏库回落 */
+
+    t.suite('server · 账号库损坏时回落种子，并当场修回合法文件');
+    const DIR5 = dataDir('broken');
+    fs.writeFileSync(path.join(DIR5, 'db.json'), '{ 这不是 JSON');
+    const PORT5 = PORT + 6;
+    const BASE5 = 'http://127.0.0.1:' + PORT5;
+    const child5 = spawn(process.execPath, [path.join('server', 'server.js')], {
+      cwd: ROOT,
+      env: Object.assign({}, process.env, {
+        PORT: String(PORT5), DATA_DIR: DIR5, DEEPSEEK_API_KEY: '', LLM_API_KEY: '',
+      }),
+      stdio: 'ignore',
+    });
+    try {
+      const h5 = await waitHealth(12000, BASE5);
+      t.ok(h5, '第五台带着一个坏 db.json 也起来了（读盘失败不能让进程跟着倒）');
+      if (h5) {
+        t.eq(h5.pid, child5.pid, '第五台也是本次 spawn 的');
+        /* 没有任何请求碰过账号库 —— 文件已经在 listen 回调里被 loadDb() 修好了。
+           以前 loadDb 是懒加载：第一个登录请求才去读盘，于是「坏文件」会先被
+           当成「没有文件」，在用户眼前多卡一次同步读盘 + 一次写盘。 */
+        let fixed = '';
+        for (let i = 0; i < 60 && !fixed; i++) {
+          try { JSON.parse(fs.readFileSync(path.join(DIR5, 'db.json'), 'utf8')); fixed = 'ok'; } catch (e) { await sleep(50); }
+        }
+        t.ok(fixed, '坏文件在启动当口就被重写回合法 JSON，不需要谁来按一次登录');
+        const ag5 = json(await requestAt(BASE5, 'GET', '/api/agents'));
+        t.eq((ag5.agents || []).length, 3, '回落到 3 个种子坐席');
+        t.includes(JSON.stringify(ag5), 'CS013', '种子工号 CS013 在册');
+        const lg5 = await requestAt(BASE5, 'POST', '/api/auth/login', { agentId: SEED_AGENT, pin: DEMO_PIN });
+        t.eq(lg5.status, 200, '演示口令照样能登（现场坏库不等于现场演示不了）');
+        t.ok(/^[a-f0-9]{48}$/.test(String((json(lg5) || {}).token || '')), '坏库回落之后照样发得出合法令牌');
+        t.eq(lg5.text.indexOf('pinHash'), -1, '登录响应原文里没有口令哈希');
+      }
+    } finally {
+      child5.kill();
+      await sleep(150);
+    }
+
   } finally {
     cleanup();
     child.kill();
+    dropDataDirs();      // 三台的临时数据目录都要收走，不许在系统临时目录里堆
     await sleep(150);
   }
 };

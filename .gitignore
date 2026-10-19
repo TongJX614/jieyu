@@ -20,3 +20,10 @@ Thumbs.db
 # 运行时数据：坐席账号与自建话术由服务端落盘，不进版本库
 # （首次启动会自动按种子数据重建，所以删掉也不会丢演示能力）
 server/data/
+
+# npm run taste 的输出（三档视口的截图 + report.json），每次跑都会覆盖
+.taste-skill/
+
+# 上游 taste-skill 技能本体（1.8MB，第三方代码）：本地装好即可跑 npm run taste，
+# 但它是可再获取的外部依赖，不进版本库。安装方法见 项目结构与功能说明.md §六点六
+.skills/

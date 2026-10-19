@@ -77,7 +77,7 @@
   /** 单行摘要，日志 / 报告用 */
   Trace.prototype.line = function () {
     return this.id + ' · ' + this.ms + 'ms · ' + this.stages.map(function (s) {
-      return s.name + (s.ok ? '' : '✗') + '(' + s.ms + ')';
+      return s.name + (s.ok ? '' : ' 未过') + '(' + s.ms + ')';
     }).join(' → ');
   };
 

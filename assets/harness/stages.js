@@ -35,7 +35,21 @@
     var pack = OC.build(job.def, job.crm, job.priorIntent || '');
     state.pack = pack;
 
-    /* 模型输入在这里成型：画像 + 订单事实包 + 冻结的前文 + 本轮消息 */
+    /* 前文记忆在这里定型（唯一一处构建），随后一路复用：
+       提示词、本地模板、出站整形读的都是同一份 digest —— 分叉的表现是
+       「提示词说别问部位、生成的话术还在问部位」，那份分叉查起来极贵。
+       扫描用的是 memoryScan（记忆窗，最长 = ConversationMemory.MAX_SCAN）而不是
+       history（提示词原文窗）：顾客二十句前说过的部位，模型不必重看原文，
+       但「不许再问一遍」必须仍然成立。
+       ConversationMemory 没加载时留空：话术照常生成，只是不记得前文。 */
+    var history = (job.ctx && job.ctx.history) || [];
+    var scan = (job.ctx && job.ctx.memoryScan) || history;
+    var CMem = ctx.deps.ConversationMemory || null;
+    var memory = CMem
+      ? CMem.build(scan, job.message, { series: job.series || [], index: job.prevIndex })
+      : null;
+
+    /* 模型输入在这里成型：画像 + 订单事实包 + 冻结的前文 + 记忆 + 本轮消息 */
     state.input = {
       profile: job.profile,
       pack: pack,
@@ -44,9 +58,12 @@
       orderTrace: pack.trace,
       facts: pack.facts,
       allOrders: job.allOrders || [],
-      history: (job.ctx && job.ctx.history) || [],
+      history: history,
       message: job.message,
       prevScore: job.prevIndex,
+      /* 逐句情绪曲线：模型据此判 trend（本句相对上一句），不用再自己发明一套走向口径 */
+      series: (job.series || []).slice(),
+      memory: memory,
       turn: job.ctx ? job.ctx.turns : undefined,
       carried: job.ctx ? job.ctx.carried : undefined,
       /* 视觉观察也进模型输入：默认模型没有视觉能力，但结构化观察是可读文本；
@@ -58,8 +75,19 @@
     ctx.set('orderAvailable', !!pack.available);
     ctx.set('orderFacts', n);
     ctx.set('orderNo', pack.available ? pack.order.orderNo : '');
+    /* 记忆条数进轨迹：「这轮到底记住了几项」必须看得见，否则「它记住了前文」
+       是一句只有出问题时才会被发现的口头保证。
+       扫描条数与原文窗口条数是**两个数**（记忆窗比原文窗长）：只报一个数的话，
+       「窗口滑走了所以忘了」和「抽不出槽位所以不知道」在轨迹里长得一模一样。 */
+    ctx.set('memoryKnown', memory ? memory.known.length : 0);
+    ctx.set('memoryPending', memory ? memory.pending.length : 0);
+    ctx.set('memoryScanned', scan.length);
+    ctx.set('ctxCarried', history.length);
+    ctx.set('ctxFirstKept', !!(job.ctx && job.ctx.firstKept));
     ctx.decide(pack.available
-      ? '先核订单：' + pack.order.orderNo + ' · ' + pack.order.product + ' → 装配 ' + n + ' 项事实'
+      ? '先核订单：' + pack.order.orderNo + ' · ' + pack.order.product + ' → 装配 ' + n + ' 项事实' +
+        (memory && memory.known.length ? '；前文已确认 ' + memory.known.length + ' 项（扫 ' +
+          scan.length + ' 条），本轮禁止重复提问' : '')
       : '该客户无订单档案 → 话术退化为通用接待（不引用商品与物流结论）');
   }
 
@@ -213,12 +241,32 @@
         : ' → 未达泛红阈值，不叠加信号'));
   }
 
-  /* ⑤ 接地校验：话术必须落到订单事实上，否则标出未接地 */
+  /* ⑤ 接地校验：先做出站整形，再校验话术是否落到订单事实上 */
   function ground(state, ctx) {
     var OC = need(ctx.deps, 'OrderContext');
     var result = state.result;
     if (!result || !Array.isArray(result.replies)) return;
     var pack = state.pack;
+
+    /* 出站整形（订单号只留一次 + 剔除重复提问）。放在 verify **之前**：
+       整形会把 replies[1..] 的订单号换成带商品名的指代，verify 判的是整形后
+       真正呈现给坐席的那份文本 —— 先 verify 再整形，标注的就是没送出去的话。
+       这一条对**全部通道**生效：模型不听话时由代码兜住，而不是只在提示词里劝。 */
+    var pol = OC.polish ? OC.polish(result.replies, pack, (state.input && state.input.memory) || null,
+      (result.intents && result.intents[0] && result.intents[0].name) || '')
+      : { replies: result.replies, orderNoFixed: 0, askStripped: 0, hollowFilled: 0, topicFlagged: 0, topicReplaced: 0 };
+    if (pol.orderNoFixed || pol.askStripped || pol.topicFlagged) {
+      ctx.decide('出站整形：' + pol.orderNoFixed + ' 条重复订单号已换成指代、' +
+        pol.askStripped + ' 条剔除了对已确认信息的重复提问' +
+        (pol.hollowFilled ? '，其中 ' + pol.hollowFilled + ' 条被切空后已换成订单接地话术' : '') +
+        (pol.topicFlagged ? '；贴题闸标出 ' + pol.topicFlagged + ' 条接不住顾客原话也引不到订单事实的候选' : '') +
+        (pol.topicReplaced ? '，第一条已整条换成接地且贴题的话术' : ''));
+    }
+    ctx.set('orderNoFixed', pol.orderNoFixed);
+    ctx.set('askStripped', pol.askStripped);
+    ctx.set('hollowFilled', pol.hollowFilled || 0);
+    ctx.set('topicFlagged', pol.topicFlagged || 0);
+    ctx.set('topicReplaced', pol.topicReplaced || 0);
 
     var verdict = OC.verify(result.replies, pack);
     for (var i = 0; i < result.replies.length; i++) result.replies[i].grounding = verdict[i];
@@ -233,7 +281,7 @@
     result.orderFallbackApplied = false;
     if (!grounded && pack && pack.available) {
       var top = (result.intents && result.intents[0] && result.intents[0].name) || '常规咨询';
-      var fb = OC.localReplies(pack, top, 1)[0];
+      var fb = OC.localReplies(pack, top, 1, (state.input && state.input.memory) || null)[0];
       if (fb) {
         if (result.replies.length >= 3) result.replies = result.replies.slice(0, 2);
         result.replies.unshift(fb);
@@ -296,6 +344,11 @@
 
     var series = (job.series || []).slice();
     var sentScores = EP.scoresOf(job.message);
+    /* 词典对「本句」的读数必须先留一份：模型分马上会覆盖最后一个采样点，
+       而 trendDict 要核对的正是**词典自己**怎么看这一句。
+       原来直接在覆盖后的分数上算词典走势，两条走势都以模型那个数为起点 ——
+       「词典 flat / 模型 down」这种分歧永远测不出来，对账等于自己跟自己对。 */
+    var dictLast = sentScores.length ? sentScores[sentScores.length - 1] : EP.score(job.message || '').score;
 
     /* 大模型路径：模型给的分是「本轮这一句」的整体共情判断，用它盖掉最后一句；
        同一消息内的其他分句仍走统一词典口径 —— 曲线不混尺度，也不丢掉模型的理解 */
@@ -313,15 +366,32 @@
     result.emotion.indexLabel = EP.labelOf(index);
     result.emotion.sentences = sentScores.length;
 
-    /* 走势 = 本句 vs 本句之前那一句（跨消息连续，保证「一句一个点」） */
+    /* 走势 = 本句 vs 本句之前那一句（跨消息连续，保证「一句一个点」）。
+       词典那条是尺子，模型那条是理解 —— 两个都要留痕，取**更严重**的那个：
+       原来这里无条件覆写成词典值，模型自报的 trend 直接蒸发，
+       于是「接不接住情绪」完全取决于词典有没有命中情绪词，
+       顾客用一句平静措辞说出「我明天要见人，脸这样」这种隐含崩溃时就被判成 flat。 */
     var prevPos = series.length - sentScores.length - 1;
     var prevMsg = prevPos >= 0 ? series[prevPos] : null;
-    result.emotion.trend = prevMsg === null ? 'flat' : EP.trendOf(lastScore, prevMsg);
+    var dictTrend = prevMsg === null ? 'flat' : EP.trendOf(dictLast, prevMsg);
+    var modelTrend = (result.engine === 'llm' || result.engine === 'agent')
+      ? String((result.emotion && result.emotion.trend) || '') : '';
+    var okModelTrend = ['up', 'down', 'flat'].indexOf(modelTrend) !== -1 ? modelTrend : '';
+    result.emotion.trend = EP.worseOf(dictTrend, okModelTrend);
+    result.emotion.trendDict = dictTrend;
+    result.emotion.trendModel = okModelTrend || null;
 
     state.series = series;
     state.index = index;
     ctx.set('sentences', sentScores.length);
     ctx.set('emotionIndex', index);
+    ctx.set('trendDict', dictTrend);
+    ctx.set('trendModel', okModelTrend || '');
+    ctx.set('trend', result.emotion.trend);
+    if (okModelTrend && okModelTrend !== dictTrend) {
+      ctx.decide('情绪走势对账：词典 ' + dictTrend + ' / 模型 ' + okModelTrend +
+        ' → 取更严重的 ' + result.emotion.trend + '（走势只许就高不许下调）');
+    }
   }
 
   /* ⑧ 前文体检：把「这一句判定的依据」挂到结果上，界面据此可核对 */
@@ -336,8 +406,24 @@
       customerTurns: c.customerTurns,
       intentSource: result.intentSource || 'current',
       history: c.history || [],
+      /* 记忆扫描窗与原文窗是两个数；首条诉求靠「永久保留」才没被裁掉时要标出来，
+         否则界面显示「已读前文 21 句」而模型实际只看得到 20 条，差的那条正是来意本身 */
+      scanned: c.scanned || (c.history || []).length,
+      firstKept: !!c.firstKept,
+      intentFloor: result.intentFloor || null,
+      trendDict: (result.emotion && result.emotion.trendDict) || null,
+      trendModel: (result.emotion && result.emotion.trendModel) || null,
     };
     ctx.set('intentSource', result.context.intentSource);
+    ctx.set('ctxScanned', result.context.scanned);
+    ctx.set('ctxFirstKept', result.context.firstKept);
+    if (result.intentFloor && (result.intentFloor.added.length || result.intentFloor.raised || result.intentFloor.promoted)) {
+      ctx.decide('意图对账：词典补入 ' + (result.intentFloor.added.join('、') || '无') +
+        (result.intentFloor.raised ? '，其中 danger 级「' + result.intentFloor.raised +
+          '」顶到主诉求（模型漏判高危意图不许静默通过）'
+          : result.intentFloor.promoted ? '，模型退回兜底「常规咨询」而原话有具体信号，'
+            + '「' + result.intentFloor.promoted + '」顶到主诉求' : ''));
+    }
   }
 
   return {

@@ -14,12 +14,18 @@
                    （不是单页采样：会把六个视图都走一遍再停表）
      4) 可访问性   自写检查：文字对比度(WCAG AA) / 可访问名 / 表单标签 /
                    图片 alt / 标题层级 / tabindex / 重复 id / 对话框 aria
-     5) 资源      页面自身与样式的传输体积
+     5) 传输体积   performance resource / navigation 计时：每屏总字节、其中「到 load 为止」
+                  与「load 之后延后下载」各多少、立绘占多少、延后那波挤不挤
+                  —— 三条场景各带一份预算，超标就退出 1（见 NET_SCENARIOS）
 
    用法：
      node tools/audit.js                 全量审计，报告落在 %TEMP%\cs-audit
      node tools/audit.js --out=D:\shots   指定报告目录
-     node tools/audit.js --only=css      只跑某一段（perf|css|a11y|churn）
+     node tools/audit.js --only=css      只跑某一段（perf|css|a11y|churn|interact|net）
+     node tools/audit.js --only=net      只看资源预算（快，六秒级）
+
+   退出码：0 = 跑通且资源预算全部达标；1 = 审计异常或预算超标。
+   可访问性 / 未命中 CSS 不改变退出码 —— 它们是待办清单，不是断掉的闸门。
 
    前置：本机 Chrome；页面由 `npm start` 提供（http://localhost:5173）。
    ========================================================================== */
@@ -28,6 +34,7 @@
 
 const { spawn } = require('child_process');
 const fs = require('fs');
+const http = require('http');
 const os = require('os');
 const path = require('path');
 
@@ -52,6 +59,27 @@ const VIEWS = [
   { key: 'eval', url: '/?view=eval&nolive=1' },
   { key: 'care', url: '/?view=care&nolive=1' },
   { key: 'channels', url: '/?view=channels&nolive=1' },
+];
+
+/* 资源预算：三条场景各司其职，每个数字都是实测 + 一点点余量。
+   2026-10-19 起服务端静态资源走 gzip（js/css/html/json/svg，见 server.js 的 serveStatic），
+   这里量的 transferSize 就是压缩后的传输字节 —— 同一份代码，未压实测
+   gate 980.9KB / 关掉桌宠 913.8KB，压完掉到 390.4KB / 362.7KB。
+   预算跟着重新标定，**不是把数字放宽**：桌宠那条 2.8MB 精灵图不参与压缩（PNG 已经自压缩），
+   所以 pet-on 的总量只从 5688.7KB 降到 5137.5KB。
+   余量刻意压得薄（6% 上下）—— 留 30% 的话，谁再往里塞一张 300KB 的图也不会响，
+   那就不是闸门是装饰。
+   spriteKB / minSpriteReqs 是一对：前者管「不该下的别下」，
+   后者管「该下的不许悄悄不下」—— 只留前一条的话，把预载整个删掉也能全绿。
+   settleMs 是给延后预热的：立绘走 requestIdleCallback 一张张放，等短了会把
+   「还没下完」误读成「省下来了」。 */
+const NET_SCENARIOS = [
+  { key: 'gate', url: '/?nolive=1', settleMs: 3500,
+    maxTotalKB: 415, maxLoadKB: 380, spriteKB: 0, minSpriteReqs: 0 },
+  { key: 'workbench-pet-on', url: '/?s=1&nolive=1&gate=off', settleMs: 9000,
+    maxTotalKB: 5400, maxLoadKB: 930, spriteKB: null, minSpriteReqs: 12 },
+  { key: 'workbench-pet-off', url: '/?s=1&nolive=1&gate=off&pet=off', settleMs: 9000,
+    maxTotalKB: 385, maxLoadKB: 385, spriteKB: 0, minSpriteReqs: 0 },
 ];
 
 const want = (sec) => !ONLY.length || ONLY.indexOf(sec) !== -1;
@@ -394,9 +422,112 @@ const LEAK_PROBE = String.raw`(async () => {
   return { nodesAfter3: n1, nodesAfter33: n2, growth: n2 - n1, warmed: nav.length * 2, perBox: perBox };
 })()`;
 
+/* --------------------------------------------------- 传输体积探针（资源预算） */
+
+const NET_PROBE = String.raw`(() => {
+  const es = performance.getEntriesByType('resource');
+  const nav = performance.getEntriesByType('navigation')[0] || null;
+  const ext = (u) => { const m = /\.([a-z0-9]{1,5})(\?|#|$)/i.exec(u); return m ? m[1].toLowerCase() : 'other'; };
+  /* transferSize 含响应头，本地服务器没压缩时它≈文件大小；
+     某些条目（缓存命中、已中断的 SSE）会是 0，退回 encodedBodySize。 */
+  const bytes = (e) => e.transferSize || e.encodedBodySize || 0;
+  const loadOk = !!(nav && nav.loadEventEnd);
+  const loadEnd = loadOk ? nav.loadEventEnd : 0;
+  const by = {};
+  const late = {};
+  const top = [];
+  const firstOf = {};      /* URL → 首次下载的字节，预算只按这个算 */
+  const dup = {};          /* URL → 重复下载的字节 */
+  let total = 0, unique = 0, toLoad = 0, afterLoad = 0, lastEnd = 0, sprite = 0, spriteN = 0;
+  const spriteNames = [];
+  es.forEach(function (e) {
+    const b = bytes(e);
+    const k = ext(e.name);
+    if (!by[k]) by[k] = { n: 0, bytes: 0 };
+    by[k].n++; by[k].bytes += b;
+    top.push({ name: e.name.replace(/^.*\//, ''), bytes: b, endMs: Math.round(e.responseEnd) });
+    total += b;
+    if (firstOf[e.name] == null) { firstOf[e.name] = b; unique += b; }
+    else dup[e.name.replace(/^.*\//, '')] = (dup[e.name.replace(/^.*\//, '')] || 0) + b;
+    /* load 计时拿不到时（导航条目还没刷出）一律算首屏 —— 宁可把预算判严，
+       也不能让「没测到延后」被读成「延后是 0」。 */
+    if (!loadOk || e.responseEnd <= loadEnd) toLoad += b;
+    else {
+      afterLoad += b;
+      /* 「延后下载」不能等于「同一 tick 全发」：按 load 之后每 250ms 一格数一下载入。
+         原来七个立绘挤在 boot 后 1.2 秒那一下，这里就显示成一格里 7 张。 */
+      const bucket = Math.floor((e.responseEnd - loadEnd) / 250) * 250;
+      late[bucket] = (late[bucket] || 0) + 1;
+    }
+    if (e.responseEnd > lastEnd) lastEnd = e.responseEnd;
+    if (/\/sprite-[^/]+\.png$/.test(e.name)) {
+      sprite += b; spriteN++;
+      const f = e.name.replace(/^.*\//, '').replace(/\.png$/, '');
+      if (spriteNames.indexOf(f) === -1) { spriteNames.push(f); }
+    }
+  });
+  top.sort(function (a, b) { return b.bytes - a.bytes; });
+  const doc = nav ? bytes({ transferSize: nav.transferSize, encodedBodySize: nav.encodedBodySize }) : 0;
+  const maxBucket = Object.keys(late)
+    .map(function (k) { return { at: Number(k), n: late[k] }; })
+    .sort(function (a, b) { return b.n - a.n; })[0] || null;
+  const dupBytes = total - unique;
+  return {
+    reqs: es.length, total: total, unique: unique, doc: doc, toLoad: toLoad, afterLoad: afterLoad,
+    dup: dup, dupBytes: dupBytes,
+    by: by, top: top.slice(0, 8), loadOk: loadOk,
+    spriteBytes: sprite, spriteReqs: spriteN, spriteNames: spriteNames,
+    lastEndMs: Math.round(lastEnd), loadMs: nav ? Math.round(nav.loadEventEnd) : 0,
+    dclMs: nav ? Math.round(nav.domContentLoadedEventEnd) : 0,
+    /* 「这一屏被脚本挡住了多久」的近似值：DOM 都已经 interactive 了，DCL 却还没响 ——
+       这段差值就是解析期阻塞脚本占掉的时间。
+       留着它是因为 H-1（给 22 个脚本加 defer）就是靠这个数判死的：实测差值只有几毫秒，
+       而 701KB 的脚本是**彼此独立**的普通脚本，浏览器本来就会并行下载，
+       defer 省不下可测的首屏时间，却会把 22 个脚本的执行顺序变成要小心的东西。
+       没有这个数，下一轮还会有人凭感觉再提一次「上 defer」。 */
+    blockingMs: nav ? Math.max(0, Math.round(nav.domContentLoadedEventStart - nav.domInteractive)) : 0,
+    jsN: (by.js && by.js.n) || 0, jsBytes: (by.js && by.js.bytes) || 0,
+    fcpMs: (() => { const p = performance.getEntriesByName('first-contentful-paint')[0]; return p ? Math.round(p.startTime) : 0; })(),
+    lateWave: maxBucket,
+    /* 桌面宠物到底在不在场，直接决定这屏该付多少立绘字节 —— 探针把它读回来，
+       预算才好写「关掉助手时 sprite-* 必须是 0」这种硬话。 */
+    petVisible: (() => { const s = document.getElementById('sprite'); return !!s && !s.hidden && getComputedStyle(s).display !== 'none'; })(),
+  };
+})()`;
+
 /* ------------------------------------------------------------------ CDP */
 
 function getJson(url) { return fetch(url).then((r) => r.json()); }
+
+/* 裸 http 探一次传输压缩。不能用 fetch：undici 会自动解压并抹掉 content-encoding，
+   拿它自检压缩就等于问「你压了吗」之前先把答案吃掉。 */
+function gzipProbe(url) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (r) => { if (!settled) { settled = true; resolve(r); } };
+    let u;
+    try { u = new URL(url); } catch (e) { return done({ ok: false, detail: 'URL 不合法：' + url }); }
+    const req = http.request({
+      host: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers: { 'Accept-Encoding': 'gzip' },
+    }, (res) => {
+      const ce = String(res.headers['content-encoding'] || '');
+      const len = res.headers['content-length'];
+      res.resume();
+      try { res.destroy(); } catch (e) { /* 头部已经到手 */ }
+      done({
+        ok: /gzip/i.test(ce),
+        detail: res.statusCode + ' content-encoding=' + (ce || '（无）') +
+          (len ? ' content-length=' + len : ' 无 content-length（分块）'),
+      });
+    });
+    req.on('error', (e) => done({ ok: false, detail: '请求失败：' + e.message }));
+    req.end();
+  });
+}
 
 async function waitForDevtools(retries = 60) {
   for (let i = 0; i < retries; i++) {
@@ -448,7 +579,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     '--window-size=1600,1000', 'about:blank',
   ], { stdio: 'ignore' });
 
-  const report = { base: BASE, at: new Date().toISOString(), views: {}, perf: {}, css: {}, churn: {}, a11y: {}, contrast: [], drag: null, leak: null };
+  const report = {
+    base: BASE, at: new Date().toISOString(),
+    views: {}, perf: {}, css: {}, churn: {}, a11y: {}, contrast: [], net: {}, budgetFail: [],
+    drag: null, leak: null,
+  };
   const contrastAgg = new Map();   // "fg|bg|need" → 聚合
   const log = (...a) => console.log(...a);
 
@@ -679,6 +814,74 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       log('[css]  样式总 ' + kb(totalBytes) + ' · 未命中 ' + kb(totalBytes - usedBytes) +
         '（' + report.css.unusedPct + '%）');
     }
+    /* ============================ 5. 传输体积 / 资源预算 ============================ */
+    if (want('net')) {
+      await c.send('Network.enable');
+      /* 缓存必须关掉：headless 用临时 profile，但同一轮里三个场景会复用连接，
+         第二个场景若命中第一个的缓存，「字节」就变成「请求数」，预算再怎么也不会响。 */
+      await c.send('Network.setCacheDisabled', { cacheDisabled: true });
+      report.net = {};
+      report.budgetFail = [];
+      /* 预算数字是**压缩之后**的传输字节（NET_SCENARIOS 上面记着压实测与未压实测两组的差）。
+         同一份页面指到一台跑老代码、不压缩的服务端上会量出 2.7 倍字节、三条预算一起红，
+         现象看上去像「代码退化了」，其实是量错了对象 —— 所以先证明这台真的在压。
+         证明不了就不比字节（比了也是假红），只报这一条硬失败。 */
+      const gz = await gzipProbe(BASE + '/assets/app.js');
+      const gzOk = gz.ok;
+      if (!gzOk) {
+        report.budgetFail.push('net：' + BASE + ' 没对 /assets/app.js 返回 gzip（' + gz.detail +
+          '）—— 字节预算按压缩后算，量到没压缩的服务端等于量错对象；' +
+          '把 BASE_URL 指到用当前代码起的那台（默认 5173 常年是遗留进程）');
+      }
+      log('[net]  传输压缩自检：' + gz.detail + (gzOk ? ' ✓' : ' ✗ 字节预算本轮不参与比较'));
+      for (const sc of NET_SCENARIOS) {
+        await c.send('Page.navigate', { url: BASE + sc.url });
+        await sleep(sc.settleMs);
+        const m = await evalJs(NET_PROBE);
+        if (!m) { report.budgetFail.push(sc.key + '：资源探针没返回对象（这一屏等于没测）'); continue; }
+        const types = Object.keys(m.by)
+          .map((k) => ({ k: k, n: m.by[k].n, bytes: m.by[k].bytes }))
+          .sort((a, b) => b.bytes - a.bytes);
+        m.types = types;
+        report.net[sc.key] = m;
+        const fails = [];
+        /* 预算一律按「去重后的唯一 URL 字节」算。这一屏刻意让预热线程和 CSS 引同一批图，
+           而本段为了测出真实体积把缓存关了 —— 于是桌宠自己转个圈就会把已经下过的那张
+           再下一遍。按总字节定预算的话，预算会随「它今天想做哪个动作」上下飘 600KB，
+           闸门就成了掷骰子。重复字节单独看，不进预算。 */
+        if (gzOk && m.unique > sc.maxTotalKB * 1024) {
+          fails.push('去重后 ' + kb(m.unique) + ' 超预算 ' + sc.maxTotalKB + 'KB' +
+            '（含重复下载共 ' + kb(m.total) + '）');
+        }
+        if (gzOk && m.toLoad > sc.maxLoadKB * 1024) {
+          fails.push('到 load 为止 ' + kb(m.toLoad) + ' 超首屏预算 ' + sc.maxLoadKB + 'KB');
+        }
+        if (sc.spriteKB != null && m.spriteBytes > sc.spriteKB * 1024) {
+          fails.push('桌宠不在场却下了 ' + kb(m.spriteBytes) + ' 立绘（预算 ' + sc.spriteKB + 'KB）' +
+            ' —— 预热没受显隐控制');
+        }
+        if (m.spriteReqs < sc.minSpriteReqs) {
+          fails.push('只下了 ' + m.spriteReqs + ' 张立绘，该下至少 ' + sc.minSpriteReqs +
+            ' 张（' + (m.spriteNames || []).join(',') + '） —— 预载断了不会报错，只会拖的时候卡一下');
+        }
+        if (sc.key === 'gate' && m.petVisible) fails.push('门禁期间桌宠仍然可见（display:none 没生效）');
+        if (sc.key === 'workbench-pet-on' && !m.petVisible) fails.push('桌宠本该在场却没渲染（?pet=off 泄漏进默认路径？）');
+        fails.forEach((f) => report.budgetFail.push(sc.key + '：' + f));
+        log('[net]  ' + sc.key.padEnd(18) + ' 请求' + String(m.reqs).padStart(3) +
+          ' 去重' + kb(m.unique).padStart(9) +
+          (m.dupBytes ? '(重复' + kb(m.dupBytes) + ')' : '        ') +
+          ' 首屏' + kb(m.toLoad).padStart(8) +
+          ' 延后' + kb(m.afterLoad).padStart(8) +
+          ' 立绘' + String(m.spriteNames.length).padStart(2) + '张/' + kb(m.spriteBytes).padStart(8) +
+          ' 末张' + String(m.lastEndMs).padStart(5) + 'ms' +
+          (m.lateWave ? ' 延后最密一格 load+' + m.lateWave.at + 'ms ' + m.lateWave.n + '张' : '') +
+          (m.loadOk ? '' : ' （拿不到 load 计时，全部记作首屏）') +
+          '\n        脚本 ' + m.jsN + ' 块/' + kb(m.jsBytes) + ' 阻塞 ' + m.blockingMs + 'ms' +
+          ' · DCL ' + m.dclMs + 'ms · 最贵 ' + (m.top || []).slice(0, 3).map((t) =>
+            t.name + ' ' + kb(t.bytes) + '@' + t.endMs + 'ms').join(' · ') +
+          (fails.length ? '\n        ✗ ' + fails.join('\n        ✗ ') : ''));
+      }
+    }
   } catch (e) {
     report.fatal = String(e && e.message || e);
     console.error('审计异常：', report.fatal);
@@ -690,7 +893,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const jf = path.join(OUT, 'report.json');
   fs.writeFileSync(jf, JSON.stringify(report, null, 2), 'utf8');
   log('');
+  if (report.fatal) log('致命：' + report.fatal);
+  if (report.budgetFail.length) {
+    log('资源预算超标 ' + report.budgetFail.length + ' 项：');
+    report.budgetFail.forEach((s) => log('   ✗ ' + s));
+  } else if (Object.keys(report.net || {}).length) {
+    log('资源预算：三个场景都在预算内');
+  }
   log('报告：' + jf);
+  /* 退出码原来恒为 0 —— 审计崩了和审计通过长得一模一样，
+     而「没跑成」比「跑成红」更容易被忽略。现在异常与超预算都会退出 1；
+     可访问性 / 未命中 CSS 仍然只是描述性输出（那些是待办清单，不是断掉的闸门）。 */
+  process.exit(report.fatal || report.budgetFail.length ? 1 : 0);
 })();
 
 function byKey(metrics, k) {

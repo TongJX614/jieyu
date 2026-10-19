@@ -29,9 +29,19 @@
 
 const http = require('http');
 const fs = require('fs');
+const fsp = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const CRM = require('../assets/crm.js');
+/* 服务端判定管线：加载的是 assets/ 那**同一份**脚本（经 server/asset-runtime.js），
+   不是第二套标准。它不在这里判业务，只做闸门、频控与响应。 */
+const Pipeline = require('./pipeline.js');
+/* 落盘合并与文件锁：两台实例指向同一个 db.json 时，谁都不能拿自己那份内存覆盖对方。
+   纯函数放在 store-merge.js 里，是为了让这套语义能脱离 HTTP 单独断言（tests/store.test.js）。 */
+const StoreMerge = require('./store-merge.js');
+/* 话术效果回执的清洗与聚合也是纯函数，理由与上面那条一样：能脱离 HTTP 单独断言。 */
+const EffectStats = require('./effect-stats.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const PORT = Number(process.env.PORT || 5173);
@@ -42,7 +52,11 @@ const DEFAULT_MODEL = process.env.LLM_MODEL || 'deepseek-chat';
 const MAX_BODY = 512 * 1024;
 const MSG_BUFFER = 500;         // 服务端消息环形缓冲
 const MAX_DEDUPE = 2000;        // 幂等表上限（超出后淘汰最早插入的 id，防止长跑内存只增不减）
-
+/* 本次启动的身份：进程号 + 一个随机数，只用于 `/api/health` 的**自证**。
+   为什么需要：上一轮我在 5399 上留了一个自己起的服务，`tests/server.test.js` 的子进程
+   绑不上端口、静默失败，而 `waitHealth()` 从那台**旧进程**拿到了 200 —— 于是几十条
+   服务端断言跑在过期代码上，终端全绿。「端口有人答」不等于「我 spawn 的那台在答」。 */
+const BOOT_ID = crypto.randomBytes(6).toString('hex');
 /* 视觉模型（VLM）通道：顾客照片要让多模态模型「看一眼」才能回答「这是什么 / 妆面如何」。
    这条口的设计前提有四个，都写在这里，因为它们是**行为约定**不是实现细节：
      · 密钥只在服务端：浏览器调 `/api/vlm` 时**不带** Authorization，
@@ -164,6 +178,15 @@ function chatRateOk(key) { return rateLimitOk(chatWindows, key, CHAT_MAX_PER_WIN
 const vlmWindows = new Map();
 function vlmRateOk(key) { return rateLimitOk(vlmWindows, key, VLM_MAX_PER_WINDOW, VLM_WINDOW_MS); }
 
+/* 判定通道频控。为什么和 /api/chat 不同档：这条口**不出网、不花钱**，
+   但它要在 vm 里跑一遍八阶段管线（CPU）。演示时每条顾客消息都会打一次，
+   上限压在一个「正常坐席点不动」的量级上，超了就明确告诉调用方稍后再试，
+   而不是悄悄返回一个看起来正常的默认等级。 */
+const ANALYZE_WINDOW_MS = 60 * 1000;
+const ANALYZE_MAX_PER_WINDOW = Number(process.env.ANALYZE_MAX_RPM || 120);
+const analyzeWindows = new Map();
+function analyzeRateOk(key) { return rateLimitOk(analyzeWindows, key, ANALYZE_MAX_PER_WINDOW, ANALYZE_WINDOW_MS); }
+
 function corsHeaders(req) {
   const origin = String(req.headers.origin || '');
   if (!isLocalOrigin(origin)) return {};
@@ -208,6 +231,34 @@ function readBody(req, limit) {
 
 function readJson(req) {
   return readBody(req).then((raw) => JSON.parse(raw || '{}'));
+}
+
+/* 出网必须有超时。原来两条代理口的 fetch 都没有任何时限：一个「TCP 连上了但不回话」
+   的上游会把这条请求**永久**钉住 —— 连接、缓冲、以及屏幕前等着看结果的坐席全在等，
+   而服务端一个字节都不会再动。要防的不是「慢」，是「永远不来」，所以默认给到 60s：
+   一次长回答本来就该慢，超时值只兜住挂死的那一端。
+   用 try/catch 而不是 .then().catch()：`fetch` 在参数非法时是**同步抛**的，
+   同步抛穿不过 promise 链的 catch，却穿得过 async 函数体的 try（批次 C 撞过）。 */
+const CHAT_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 60000);
+const VLM_TIMEOUT_MS = Number(process.env.VLM_TIMEOUT_MS || 45000);
+
+async function upstreamJson(url, init, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const up = await fetch(url, Object.assign({}, init, { signal: ctrl.signal }));
+    const text = await up.text();          // 读 body 也在同一个 signal 之下：只掐头不算超时
+    return { status: up.status, text: text };
+  } catch (e) {
+    const timedOut = !!(e && e.name === 'AbortError');
+    const err = new Error(timedOut
+      ? '上游未在 ' + Math.round(ms / 1000) + ' 秒内响应，已断开'
+      : String((e && e.message) || e));
+    err.timedOut = timedOut;
+    throw err;
+  } finally {
+    clearTimeout(timer);                   // 不摘掉的话每次请求都留一个待触发的定时器
+  }
 }
 
 /* ------------------------------ 消息接入网关 ------------------------------ */
@@ -408,8 +459,15 @@ function handleOrderDetail(res, orderNo) {
    换台机器、换个浏览器，同一个工号还能接上自己的状态。
    生产环境把这一层换成真正的数据库即可，接口形状不变。 */
 
-const DATA_DIR = path.join(__dirname, 'data');
+/* 数据目录可以整体换走（测试用临时目录）。
+   以前这里写着「两台实例同时开就会互相覆盖（实测撞过：nextKb 被来回改），
+   跨进程写冲突要靠文件锁或单写者，这里不做」——那是把已知丢数据的缺陷**留在原地**的说法。
+   现在做了：落盘必须先拿到 `db.json.lock`（独占创建），在锁内重新读盘，
+   再用 store-merge.js 的三方合并把本进程的改动打在新鲜副本上。
+   测试仍然各用各的 DATA_DIR —— 那是「测试不许碰真档案」，不是「并发不用修」。 */
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(String(process.env.DATA_DIR)) : path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
+const DB_LOCK_FILE = DB_FILE + '.lock';
 const DEMO_PIN = '1234';                    // 演示口令：写在文档里，就不假装它是安全的
 const SESSION_TTL = 12 * 60 * 60 * 1000;    // 12 小时
 
@@ -445,6 +503,7 @@ function verifyPin(a, pin) {
   a.salt = crypto.randomBytes(8).toString('hex');
   a.pinHash = hashPin(pin, a.salt);
   a.pinAlg = PIN_ALG;
+  a.updAt = new Date().toISOString();   // 就地升级也要留下「本进程改过这条」的时间戳（合并靠它判新旧）
   saveDb();
   return true;
 }
@@ -479,7 +538,18 @@ function loadDb() {
   if (DB) return DB;
   let seed = null;
   try { seed = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch (e) { seed = null; }
-  if (!seed || typeof seed !== 'object') seed = {};
+  if (!seed || typeof seed !== 'object' || Array.isArray(seed)) {
+    /* 读到坏文件也要留下痕迹：这台机器上「账号注册了但重启没了」有两个完全不同的原因
+       （盘上被人写了坏 JSON / 另一个进程把我们的快照盖掉了），不能都靠猜。 */
+    if (fs.existsSync(DB_FILE)) {
+      dbCorruptReads++;
+      console.warn('  [store] 已有 db.json 但解析失败，本次从种子重建');
+    }
+    seed = {};
+  }
+  /* 合并的共同祖先必须是**真正读到的那一份**，所以在这里抓快照，在下面补种子字段之前。
+     少了这一步，「我们删掉的一条记录」会被下一次合并当成「对方新建的」从盘里捞回来 —— 复活成僵尸。 */
+  dbBase = JSON.parse(JSON.stringify(seed));
   if (!Array.isArray(seed.agents) || !seed.agents.length) {
     seed.agents = SEED_AGENTS.map((a) => {
       const salt = crypto.randomBytes(8).toString('hex');
@@ -490,28 +560,224 @@ function loadDb() {
     });
   }
   if (!Array.isArray(seed.kb)) seed.kb = [];
+  if (!Array.isArray(seed.effect)) seed.effect = [];
   if (!seed.nextKb) seed.nextKb = 1;
   DB = seed;
   saveDb();
   return DB;
 }
 
-function saveDb() {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    /* tmp 名字里必须带上 pid：原来两个实例（例如演示用的 5173 和我另起的一台）共用同一个
-       `db.json.tmp`，A 写完 rename 把 B 正在写的半成品搬走，B 再 rename 就 ENOENT ——
-       于是「原子替换只保证单机不断电」这句话在并发下不成立。
-       各写各的 tmp 之后，最坏结果退回成「后写的整份快照覆盖前一份」（丢一次更新），
-       而不是留下半个 JSON 或误搬别人的临时文件。真正的多实例写冲突要靠文件锁或单写者，
-       这里不做 —— 见 代码审查报告-2026-10-18.md 7.7。 */
-    const tmp = DB_FILE + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(DB, null, 2), 'utf8');
-    fs.renameSync(tmp, DB_FILE);   // 原子替换：写到一半断电也不会留下半个 JSON
-  } catch (e) {
-    console.warn('  [store] 写入失败：' + e.message);
+/* 落盘：锁内读盘 → 三方合并 → 原子替换。三层各治一段，少一层就有一个具体的丢法。
+
+   ① 异步（2026-10-19 批次 A）：原来是 writeFileSync + renameSync 挂在请求路径上。
+      这台机器同时养着几条 SSE 长连接，一次同步写盘把事件循环冻住，所有在线坐席的推送一起等。
+   ② 文件锁：读盘必须发生在**拿到锁之后**。少了这一层，「A 读 → B 写 → A 写」里
+      A 的合并根本没见过 B 的那条记录，照样丢 —— 合并只把损失从「整份覆盖」
+      缩小到「A 没见过 B 的那条」，把交错关掉是锁的活。
+   ③ 三方合并（store-merge.js）：拿本进程上次落盘的快照当共同祖先，
+      分清「别人删的 / 我新建的 / 我删的 / 别人新建的」四种情形。
+      它同时兜住锁保护不到的两种情况：跑旧代码的进程、以及崩在写入中途留下的陈旧锁。
+
+   `dbLoop` 非空时不再起第二轮；写飞的时候又来改动，只记一次「还欠一份」，不排队堆几十份。
+   `dbLoop = null` 紧跟在循环退出之前、中间没有 await —— 单线程下这两步之间插不进别的代码，
+   所以不存在「刚退出就被 set 脏、却没人再写」这个丢写窗口。
+   读侧不受影响：进程内读的一直是内存里那份 DB，磁盘只是重启后的恢复来源。 */
+const LOCK_WAIT_MS = 2000;      // 最多等对方写完两秒（一次写是毫秒级，等不到就是出事了）
+const LOCK_POLL_MS = 20;        // 每 20ms 试一次：锁是内存级写频控之外的跨进程互斥，不用做得客气
+const LOCK_STALE_MS = 15000;    // 锁文件 15 秒没动 = 持有者崩在写入中途，抢过来
+const STALL_RETRY_MS = 1000;    // 抢不到锁时，欠着的那份一秒后再试一轮
+
+let dbDirty = false;
+let dbLoop = null;
+let dbWrites = 0;
+let dbWriteErrors = 0;
+let dbBase = null;              // 本进程上次成功落盘 / 上次真读到的快照 = 合并的共同祖先
+let dbMerges = 0;
+let dbKeptFromDisk = 0;         // 收下对方新建的记录（这条数就是「修复生效」的直接证据）
+let dbHonoredDeletes = 0;       // 尊重了一方的删除，没有把它复活成僵尸记录
+let dbConflicts = 0;            // 同一条记录两边都改过，采纳了盘上那份
+let dbLockWaits = 0;            // 真的为锁等待过（另一台确实在写）
+let dbLockSteals = 0;           // 抢过陈旧锁（有进程崩在写入中途）
+let dbLockTimeouts = 0;         // 等到 deadline 仍没拿到锁 → 这一份还欠着
+let dbCorruptReads = 0;         // 盘上那份解析不了
+let dbStalled = false;
+let stallTimer = null;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 独占创建 `db.json.lock`（`wx` 在 NTFS 与 POSIX 上都是原子的）。
+    已存在 → 先看持有者是不是早死了（按锁文件 mtime，不按内容 —— 内容可能是半个文件）。 */
+async function acquireDbLock() {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      const fh = await fsp.open(DB_LOCK_FILE, 'wx');
+      try { await fh.write(JSON.stringify({ pid: process.pid, bootId: BOOT_ID, at: new Date().toISOString() })); }
+      finally { await fh.close(); }
+      return true;
+    } catch (e) {
+      if (e.code === 'EEXIST' || e.code === 'EPERM') {
+        dbLockWaits++;
+        const st = await fsp.stat(DB_LOCK_FILE).catch(() => null);
+        if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          await fsp.unlink(DB_LOCK_FILE).catch(() => {});
+          dbLockSteals++;
+          console.warn('  [store] 抢到陈旧锁（持有者 mtime 已超过 ' + LOCK_STALE_MS + 'ms）');
+          continue;
+        }
+        if (Date.now() >= deadline) { dbLockTimeouts++; return false; }
+        await sleep(LOCK_POLL_MS);
+        continue;
+      }
+      throw e;      // ENOENT（目录被删）之类真错误，交给上层计数，不静默重试
+    }
   }
 }
+
+async function releaseDbLock() {
+  try { await fsp.unlink(DB_LOCK_FILE); } catch (e) { /* 已经被当陈旧锁抢走：不是我们的文件了，不碰 */ }
+}
+
+/** 锁内读盘。ENOENT 是正常状态（首次落盘），解析失败单独计数。 */
+async function readDiskDb() {
+  let text;
+  try { text = await fsp.readFile(DB_FILE, 'utf8'); }
+  catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'EPERM') return { db: null, error: null };
+    throw e;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      dbCorruptReads++;
+      return { db: null, error: 'shape' };
+    }
+    return { db: parsed, error: null };
+  } catch (e) {
+    dbCorruptReads++;
+    console.warn('  [store] db.json 解析失败，本次按「无盘可合」写整份内存快照：' + e.message);
+    return { db: null, error: 'corrupt' };
+  }
+}
+
+/* 发号之前先看一眼盘上的高水位。
+   为什么单独要这一步：锁只保护「写」，而号是在写**之前**就定下来的。
+   两台各自从自己那份内存里 ++，就会发出同一个序号 —— 合并能把 nextKb 抬回去，
+   但抬不回去已经发出去过的那个 id。实测这条被抓出来过：三轮各建三条，
+   盘上 nextKb 只有 4 而不是 7。id 里还有时间戳前缀才没真的撞车，
+   但「靠时间戳不同意」不是设计，是运气。 */
+async function diskNextKb() {
+  try {
+    const disk = await readDiskDb();
+    const n = Number(disk.db && disk.db.nextKb);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch (e) {
+    return 0;      // 读不动就用自己的内存值：宁可慢一步，不要在发号这条口上把请求打挂
+  }
+}
+
+/** 一次完整落盘。返回 false 表示没写成（这份仍算欠着，由 saveDb 挂定时器再来）。 */
+/* Windows 上 rename 覆盖一个「正被别人打开」的目标文件会抛 EPERM/EBUSY（POSIX 不会）。
+   两台实例共用一个目录时，对方的 readDiskDb 恰好读着 db.json、或杀软扫了一下刚写完的文件，
+   就够把这一轮写盘记成一次错误 —— 数据不丢（脏标记还在，稍后补写），但盘上确实晚了一拍。
+   有界重试是这套原子替换在 Windows 上的标准做法：只认这几个码、只试几次，
+   ENOENT（临时文件不见了）之类的真异常一律立刻抛出去，不掩盖。 */
+const RENAME_RETRY_MS = [20, 60];
+const RENAME_RETRY_CODES = ['EPERM', 'EBUSY', 'EACCES'];
+async function renameReplace(from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fsp.rename(from, to);
+      return;
+    } catch (e) {
+      if (!RENAME_RETRY_CODES.includes(e.code) || attempt >= RENAME_RETRY_MS.length) {
+        e.message = '替换 db.json 失败（' + (e.code || '?') + '，第 ' + (attempt + 1) + ' 次）：' + e.message;
+        throw e;
+      }
+      await sleep(RENAME_RETRY_MS[attempt]);
+    }
+  }
+}
+
+async function writeOnce() {
+  await fsp.mkdir(DATA_DIR, { recursive: true });
+  if (!(await acquireDbLock())) return false;
+  try {
+    const disk = await readDiskDb();
+    const merged = StoreMerge.mergeSnapshots({ disk: disk.db, ours: DB, base: dbBase });
+    if (merged.stats.merged) {
+      dbMerges++;
+      dbKeptFromDisk += merged.stats.keptFromDisk;
+      dbHonoredDeletes += merged.stats.honoredDelete;
+      dbConflicts += merged.stats.conflicts;
+      if (merged.stats.scalarRaised) {
+        console.warn('  [store] 发号器 nextKb 由 ' + merged.db.nextKb + ' 抬到对方的值（两台实例同时在写）');
+      }
+      if (merged.stats.keptFromDisk || merged.stats.honoredDelete) {
+        console.log('  [store] 合并：收下对方 ' + merged.stats.keptFromDisk + ' 条 · 尊重删除 '
+          + merged.stats.honoredDelete + ' 条 · 采纳对方版本 ' + merged.stats.conflicts + ' 条');
+      }
+    }
+    /* 回写内存必须保身份：`agentOf(req)` 早在 await 之前就把记录对象取出去了，
+       整份换新会让它后半段的写入落在一个没人引用的孤儿对象上 —— 静默丢一次更新。 */
+    StoreMerge.reconcileInto(DB, merged.db);
+    /* tmp 名字带 pid：两台共用 `db.json.tmp` 时，A 的 rename 会把 B 正在写的半成品搬走，
+       B 再 rename 就 ENOENT —— 留下的不是「丢一次更新」而是半个 JSON 或误搬别人的临时文件。
+       只序列化**一次**：文件内容和共同祖先前必须来自同一份字符串。
+       原来这里是「写完盘再 `dbBase = clone(DB)`」，而 writeFile/rename 中间隔着两个 await，
+       落在窗口里的那次改动（实测是一条 effect 回执）进了 base 却没进文件 ——
+       下一次合并读到「base 有、盘上没有、内存也有」就判成「对方把它删了」，
+       尊重一次谁都没做过的删除，把那条记录从盘上抹掉。
+       base 的正确定义是「我上一次写进盘里的东西」，一个字都不许多。 */
+    const text = JSON.stringify(DB, null, 2);
+    const tmp = DB_FILE + '.' + process.pid + '.tmp';
+    await fsp.writeFile(tmp, text, 'utf8');
+    await renameReplace(tmp, DB_FILE);   // 原子替换：写到一半断电也不会留下半个 JSON
+    dbBase = JSON.parse(text);
+    dbWrites++;
+    return true;
+  } finally {
+    await releaseDbLock();
+  }
+}
+
+function saveDb() {
+  dbDirty = true;
+  if (dbLoop) return dbLoop;
+  dbLoop = (async () => {
+    while (dbDirty) {
+      dbDirty = false;
+      let done = false;
+      try { done = await writeOnce(); }
+      catch (e) {
+        dbWriteErrors++;
+        /* 带上 errno：这台机器上「写入失败」到底是 Windows 的 rename 占用，还是真的磁盘/权限问题，
+           只看 message 分不出来，而这两种的处理方式完全不同。 */
+        console.warn('  [store] 写入失败：' + (e.code || '?') + ' · ' + e.message);
+      }
+      if (done) { dbStalled = false; continue; }
+      /* 没写成：这份还欠着，绝不就地丢掉。标成 stalled 让 /api/health 看得见，
+         并挂一次性定时器 —— 每次放弃只挂一个，所以不会堆成轮询风暴。 */
+      dbDirty = true;
+      dbStalled = true;
+      if (!stallTimer) {
+        stallTimer = setTimeout(() => {
+          stallTimer = null;
+          if (dbDirty) saveDb();
+        }, STALL_RETRY_MS);
+        if (stallTimer.unref) stallTimer.unref();   // 别为了补一次写盘把退出流程拖住
+      }
+      break;
+    }
+    dbLoop = null;
+    return !dbDirty;
+  })();
+  return dbLoop;
+}
+
+/** 等当前这一轮写真正落到盘上。退出前、以及任何「必须看得见文件」的场合用它。
+    注意它 resolve 的是「盘上有没有欠着的写」，不是「有没有成功」——失败在 store.stalled 里看得见。 */
+function flushDb() { return dbLoop || Promise.resolve(); }
 
 function publicAgent(a) {
   return { id: a.id, name: a.name, role: a.role, level: a.level, status: a.status };
@@ -530,6 +796,34 @@ function agentOf(req) {
   if (Date.now() - s.at > SESSION_TTL) { sessions.delete(tk); return null; }
   return loadDb().agents.find((x) => x.id === s.agentId) || null;
 }
+
+/* 内存态要自己回收，否则「防爆破」和「频控」这几张表本身就成了慢泄漏：
+   · sessions 原来只在**被查到时**才判过期 —— 一个再没人用的令牌会永远留在表里；
+   · 三张频控窗口表只在条目冲破 500 时淘汰最老的一条，低频长跑攒的就是一堆早已过期的窗口；
+   · loginFails 的键是「工号@来源」，工号可以随便编，所以它同样能被刷着往上涨。
+   5 分钟一轮就够：这些表的**正确性**不依赖回收及时，只有内存占用依赖。 */
+const SWEEP_MS = 5 * 60 * 1000;
+function sweepWindows(store, now) {
+  let n = 0;
+  store.forEach((w, k) => { if (w.until <= now) { store.delete(k); n++; } });
+  return n;
+}
+function sweepMemory() {
+  const now = Date.now();
+  let dead = 0;
+  sessions.forEach((s, tk) => { if (now - s.at > SESSION_TTL) { sessions.delete(tk); dead++; } });
+  const windows = sweepWindows(chatWindows, now) + sweepWindows(vlmWindows, now) + sweepWindows(analyzeWindows, now)
+    + sweepWindows(effectWindows, now);
+  loginFails.forEach((f, k) => { if (f.until && f.until <= now) loginFails.delete(k); });
+  return { sessions: dead, windows: windows };
+}
+const sweepTimer = setInterval(() => {
+  const r = sweepMemory();
+  if (r.sessions || r.windows) {
+    console.log('  [sweep] 回收过期会话 ' + r.sessions + ' 条 · 频控窗口 ' + r.windows + ' 个');
+  }
+}, SWEEP_MS);
+if (sweepTimer.unref) sweepTimer.unref();      // 例行清扫不该成为「进程不肯退出」的理由
 
 function handleLogin(req, res) {
   readJson(req).then((p) => {
@@ -553,6 +847,7 @@ function handleLogin(req, res) {
     }
     loginFails.delete(lk);
     a.status = p.status === 'busy' || p.status === 'away' ? p.status : 'online';
+    a.updAt = new Date().toISOString();
     saveDb();
     const token = crypto.randomBytes(24).toString('hex');
     sessions.set(token, { agentId: a.id, at: Date.now() });
@@ -626,6 +921,7 @@ function handleRegister(req, res) {
       id, name, role, level: 'L1', status: 'online',
       salt, pinHash: hashPin(pin, salt), pinAlg: PIN_ALG,
       createdAt: new Date().toISOString(),
+      updAt: new Date().toISOString(),
     };
     db.agents.push(a);
     saveDb();
@@ -657,6 +953,7 @@ function handlePresence(req, res) {
       return;
     }
     a.status = s;
+    a.updAt = new Date().toISOString();
     saveDb();
     sendJson(res, 200, { ok: true, agent: publicAgent(a) });
   }).catch(() => sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' }));
@@ -679,13 +976,19 @@ function handleKbList(res) {
 }
 
 function handleKbCreate(req, res) {
-  readJson(req).then((p) => {
+  readJson(req).then(async (p) => {
     const db = loadDb();
     const text = String(p.text || '').trim();
     const cat = String(p.cat || '').trim();
     if (!text) { sendJson(res, 400, { ok: false, message: '话术正文不能为空' }); return; }
     if (text.length > KB_MAX_TEXT) { sendJson(res, 400, { ok: false, message: '正文不能超过 ' + KB_MAX_TEXT + ' 字' }); return; }
     if (!cat || cat.length > KB_MAX_CAT) { sendJson(res, 400, { ok: false, message: '分类不能为空且不超过 ' + KB_MAX_CAT + ' 字' }); return; }
+    /* 这一句 await 是这次新增的唯一一处，所以两个前提要写死：
+       · `diskNextKb()` 自己吞掉所有异常、绝不 reject —— 否则会落到下面那条 catch 里，
+         把「内部读盘出问题了」误报成「请求体不是合法 JSON」；
+       · 校验都在 await 之前做完，await 之后只剩发号与落盘。 */
+    const high = await diskNextKb();
+    if (high > db.nextKb) db.nextKb = high;
     const item = {
       id: 'kb-' + Date.now().toString(36) + '-' + (db.nextKb++),
       cat,
@@ -711,6 +1014,66 @@ function handleKbDelete(res, id) {
   if (db.kb.length === before) { sendJson(res, 404, { ok: false, message: '未找到该条话术' }); return; }
   saveDb();
   sendJson(res, 200, { ok: true });
+}
+
+/* ------------------------- 话术效果回执 -------------------------
+   「这条话术发出去之后有没有用」是客服主管唯一认的指标，所以它值得有一条自己的口。
+   三条不能少的边界（详细理由写在 server/effect-stats.js 的头注释里）：
+     · 只收结构化事实，白名单之外的键（顾客原文、姓名、手机号、token……）一律丢；
+     · 坐席归属由令牌盖章，请求体里带 `agent` 无效；
+     · 升降的判定在上报端按 policy 算，服务端**不重算等级序** —— 那等于在统一标准之外再造一把尺。
+   鉴权 posture 与 /api/kb 的写侧一致：要 Bearer 令牌。跨站脚本设不出这个头，
+   所以不需要 /api/chat 那道来源闸（那一条要的是「不许替别人烧 key」）。 */
+const EFFECT_WINDOW_MS = 60000;
+const EFFECT_MAX_PER_WINDOW = 120;      // 一次交班可能有几十条闭合，120 够用又不至于能被拿来灌库
+
+const effectWindows = new Map();
+let effectAccepted = 0;
+let effectRejected = 0;
+let effectStripped = 0;                 // 被白名单丢掉的非白名单键总数
+let effectDropped = 0;                  // 本进程按上限淘汰的条数（不是全库历史）
+
+function handleEffectCreate(req, res, agent) {
+  if (!rateLimitOk(effectWindows, String(req.socket.remoteAddress || ''), EFFECT_MAX_PER_WINDOW, EFFECT_WINDOW_MS)) {
+    sendJson(res, 429, { ok: false, message: '话术回执频率超限（每分钟 ' + EFFECT_MAX_PER_WINDOW + ' 条）' });
+    return;
+  }
+  readJson(req).then((p) => {
+    const out = EffectStats.sanitize(p, { agent: agent.id, at: new Date().toISOString() });
+    effectStripped += out.droppedKeys;
+    const need = EffectStats.REQUIRED.filter((k) => out.missing.indexOf(k) >= 0);
+    if (need.length) {
+      effectRejected++;
+      sendJson(res, 400, { ok: false, message: '回执缺少可用字段：' + need.join('、'), missing: need });
+      return;
+    }
+    const db = loadDb();
+    if (!Array.isArray(db.effect)) db.effect = [];
+    /* id 由服务端盖：`store-merge.js` 按 id 认记录，没有 id 的回执会退到「按内容去重」
+       那条兜底路上去（两条时间戳恰好相同的记录会被合成一条）。
+       随机后缀而不是发号器：这张表只追加、不发号，跨进程也不会撞。 */
+    out.rec.id = 'ef-' + Date.now().toString(36) + '-' + crypto.randomBytes(4).toString('hex');
+    const dropped = EffectStats.pushRecord(db.effect, out.rec, EffectStats.LIMIT);
+    if (dropped) {
+      effectDropped += dropped;
+      console.warn('  [effect] 超过上限 ' + EffectStats.LIMIT + ' 条，本进程已淘汰最老的 ' + dropped + ' 条');
+    }
+    effectAccepted++;
+    saveDb();
+    sendJson(res, 200, { ok: true, n: db.effect.length, suspect: !!out.rec.suspect });
+  }).catch(() => {
+    effectRejected++;
+    sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' });
+  });
+}
+
+function handleEffectList(res) {
+  const db = loadDb();
+  const stats = EffectStats.aggregate(db.effect || [], {
+    limit: EffectStats.LIMIT,
+    droppedOld: effectDropped,
+  });
+  sendJson(res, 200, { ok: true, stats: stats });
 }
 
 /* ------------------------------ LLM 代理 ------------------------------ */
@@ -760,23 +1123,66 @@ async function handleChat(req, res) {
   if (body.temperature == null) body.temperature = 0.35;
 
   try {
-    const upstream = await fetch(UPSTREAM + '/chat/completions', {
+    const up = await upstreamJson(UPSTREAM + '/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: auth,
       },
       body: JSON.stringify(body),
-    });
-    const text = await upstream.text();
-    res.writeHead(upstream.status, Object.assign({
+    }, CHAT_TIMEOUT_MS);
+    res.writeHead(up.status, Object.assign({
       'Content-Type': 'application/json; charset=utf-8',
-      'Content-Length': Buffer.byteLength(text),
+      'Content-Length': Buffer.byteLength(up.text),
     }, corsHeaders(req)));
-    res.end(text);
+    res.end(up.text);
   } catch (e) {
-    sendJson(res, 502, { error: { message: '上游调用失败：' + e.message } });
+    /* 超时和「连不上」在界面上必须是两句话：前者要提示这轮回答太大或上游在排队，
+       后者要提示检查地址与密钥。原来两条都塌成一个 502。 */
+    sendJson(res, e.timedOut ? 504 : 502, {
+      error: { message: (e.timedOut ? '上游响应超时：' : '上游调用失败：') + e.message },
+    });
   }
+}
+
+/* ------------------------------ 服务端判定 /api/analyze ------------------------------ */
+
+/* 闸门顺序：来源 → 频控 → 读体 → 结构 / 像素 → 判定。
+   与 /api/vlm 同一套排法，顺序本身就是语义：
+     · 「这台机器不接这个来源」不能被 JSON 解析错误盖掉（否则对接方永远猜不到是被来源挡了）；
+     · 「用量到了」必须在判定之前（否则频控形同虚设，每次都白跑一遍八阶段）；
+     · 像素与自报判级的拒绝放在 Pipeline.analyze 里，让它成为**可单测的纯函数行为**，
+       而不是 HTTP 层的一段临时代码 —— 换掉传输方式，闸门还在。
+   不要求 Bearer 登录态：与 /api/chat 同档（同源或本机）。要收口就两条口一起收，
+   只给一条加锁等于制造「这个项目有鉴权」的错觉。 */
+function handleAnalyze(req, res) {
+  if (!isSameOriginOrLocal(req)) {
+    sendJson(res, 403, {
+      ok: false, reason: 'origin_not_allowed',
+      message: '来源不允许：/api/analyze 仅接受同源或本机来源',
+    });
+    return;
+  }
+  if (!analyzeRateOk(String(req.socket.remoteAddress || ''))) {
+    sendJson(res, 429, {
+      ok: false, reason: 'rate_limited',
+      message: '判定频率超限（每分钟 ' + ANALYZE_MAX_PER_WINDOW + ' 次），请用界面本机的判定结果',
+    });
+    return;
+  }
+
+  readJson(req).then((payload) => Pipeline.analyze(payload)).then((out) => {
+    sendJson(res, 200, out);
+  }).catch((e) => {
+    if (e && e.status) {
+      sendJson(res, e.status, { ok: false, reason: e.reason, message: e.message });
+      return;
+    }
+    sendJson(res, 400, {
+      ok: false, reason: 'bad_request',
+      message: '请求体不是合法 JSON：' + ((e && e.message) || String(e)),
+    });
+  });
 }
 
 /* ------------------------------ 视觉模型代理 /api/vlm ------------------------------ */
@@ -891,23 +1297,46 @@ async function handleVlm(req, res) {
   }
 
   try {
-    const upstream = await fetch(VLM_UPSTREAM + '/chat/completions', {
+    const up = await upstreamJson(VLM_UPSTREAM + '/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + VLM_KEY },
       body: JSON.stringify(guarded.body),
-    });
-    const text = await upstream.text();
-    res.writeHead(upstream.status, Object.assign({
+    }, VLM_TIMEOUT_MS);
+    res.writeHead(up.status, Object.assign({
       'Content-Type': 'application/json; charset=utf-8',
-      'Content-Length': Buffer.byteLength(text),
+      'Content-Length': Buffer.byteLength(up.text),
     }, corsHeaders(req)));
-    res.end(text);
+    res.end(up.text);
   } catch (e) {
-    sendJson(res, 502, { ok: false, reason: 'upstream', error: { message: '视觉模型上游调用失败：' + e.message } });
+    /* 视觉这条口的降级路径前端是**看得见**的：超时和连不上都归到 reason=upstream_*，
+       界面据此退回本机像素统计，而不是显示一个「模型说它没看清」。 */
+    sendJson(res, e.timedOut ? 504 : 502, {
+      ok: false,
+      reason: e.timedOut ? 'upstream_timeout' : 'upstream',
+      error: { message: '视觉模型' + (e.timedOut ? '响应超时' : '调用失败') + '：' + e.message },
+    });
   }
 }
 
 /* ------------------------------ 静态资源 ------------------------------ */
+
+/* 传输压缩：首屏是 23 个脚本 + 一份 189KB 样式表，未压缩实测 958KB。
+   审计量的本来就是「传输字节」（performance 的 transferSize），压缩是它的题中之义 ——
+   加上 gzip 之后浏览器真正下载的降到四分之一左右，预算也就能跟着往下压。
+   三条边界：
+     ① 只在客户端声明支持时压。Node 里的测试客户端不声明 → 走原样路径，老断言不受影响；
+     ② ETag 带编码后缀。gzip 与 identity 是两份不同的 body，共用一个标记会让缓存
+        拿「另一个变体」去命中 304，浏览器解出来的是乱码；
+     ③ 小于阈值不压。几百字节的文件压完再加头部反而更大，白烧一次 CPU。 */
+const COMPRESSIBLE_EXT = ['.js', '.css', '.html', '.json', '.svg', '.txt'];
+const COMPRESS_MIN_BYTES = 1024;
+
+function clientAcceptsGzip(req) {
+  const ae = String(req.headers['accept-encoding'] || '').toLowerCase();
+  /* `gzip;q=0` 是显式拒绝，不能被「字符串里有 gzip」放过 */
+  if (/gzip\s*;\s*q=0(\.0+)?/.test(ae)) return false;
+  return ae.indexOf('gzip') !== -1 || ae.indexOf('*') !== -1;
+}
 
 function serveStatic(req, res, urlPath) {
   let rel = decodeURIComponent(urlPath.split('?')[0]);
@@ -967,7 +1396,11 @@ function serveStatic(req, res, urlPath) {
     /* 强校验器取 size + mtime，不取内容哈希：给 17.5MB 素材逐个算 SHA 要全读进内存，
        省下来的带宽全花在 CPU 上。本地演示场景里「同尺寸同秒改写」不会发生，
        真要内容级一致可以换成 hash，但那是服务端持久化那一轮的事。 */
-    const etag = '"' + st.size.toString(16) + '-' + mtimeMs.toString(16) + '"';
+    /* 这一份要不要压：扩展名可压 + 够大 + 客户端声明支持。三者缺一就走原样路径。 */
+    const gz = COMPRESSIBLE_EXT.indexOf(ext) !== -1
+      && st.size >= COMPRESS_MIN_BYTES
+      && clientAcceptsGzip(req);
+    const etag = '"' + st.size.toString(16) + '-' + mtimeMs.toString(16) + (gz ? '-gz' : '') + '"';
     const cacheControl = ext === '.html' ? 'no-cache' : 'public, max-age=60';
     const lastModified = new Date(mtimeMs).toUTCString();
 
@@ -992,24 +1425,69 @@ function serveStatic(req, res, urlPath) {
       return;
     }
 
-    res.writeHead(200, {
+    const headers = {
       'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Content-Length': st.size,
       'Cache-Control': cacheControl,
+      /* 变体标记：同一个 URL 现在有两种 body。不写 Vary，链路上的缓存会把
+         「发给声明了 gzip 的那份」原样回给没声明的客户端 —— 那份是乱码。
+         identity 路径也带上：今天没压不代表下一个请求没压。 */
+      Vary: 'Accept-Encoding',
       ETag: etag,
       'Last-Modified': lastModified,
-    });
+    };
+    /* 压过的分支不给 Content-Length：gzip 完多大得等压完才知道，
+       为了凑一个长度而 gzipSync 整个文件，等于把流式省下的内存全还回去。
+       浏览器按 chunked 读到结束，长度靠 `Content-Encoding` 自己解。 */
+    if (gz) headers['Content-Encoding'] = 'gzip';
+    else headers['Content-Length'] = st.size;
+
+    res.writeHead(200, headers);
     /* HEAD 只给头部：pipe 一个大文件再被 Node 丢掉 body，等于白读一遍磁盘。 */
     if (req.method === 'HEAD') { res.end(); return; }
-    fs.createReadStream(target).pipe(res);
+    /* 读流必须接 error。stat 与 open 之间文件被换掉不是理论风险 —— 这个项目自己就有
+       往 assets/ 里重写的工具。原来 `createReadStream(target).pipe(res)` 没有 error 监听，
+       读流一抛 ENOENT 就是**整个服务进程**倒下，而不是这一个请求失败。
+       压过的链路上有两个流会抛，两个都得接：gzip 那半截断在 `res` 之后没人管，
+       同样是一次未捕获异常。 */
+    const stream = fs.createReadStream(target);
+    let failed = false;
+    const fail = () => {
+      if (failed) return;                       // 两个流同时抛时只处理一次：头部不能写第二遍
+      failed = true;
+      if (res.headersSent) { try { res.destroy(); } catch (e) { /* 连接已经断了 */ } return; }
+      res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('502 读取失败：' + rel);
+    };
+    stream.on('error', fail);
+    if (!gz) { stream.pipe(res); return; }
+    const zipped = zlib.createGzip({ level: 6 });
+    zipped.on('error', fail);
+    stream.pipe(zipped).pipe(res);
   });
 }
 
 /* ------------------------------ 路由 ------------------------------ */
 
-const server = http.createServer((req, res) => {
+/** 请求目标 → URL。**不能**直接 `new URL(req.url, origin)`：
+    `GET //?x=1` 这种空 authority 的请求目标在 WHATWG 规则里是非法的，而它是浏览器真发得出来的
+    —— 实测：`BASE_URL` 带尾斜杠时 `tests/browser-check.js` 拼出的就是这个串，
+    未捕获的 TypeError 直接把整个服务进程带走（一个畸形请求 = 一次拒绝服务）。
+    所以这里退化到手工切分：先剥掉那个空 authority，剥完还解析不出来就按 `/` 处理 ——
+    宁可回一屏首页，也不许让路由层拿到一个 undefined 的 pathname。 */
+function parseRequestUrl(req) {
   const origin = 'http://' + (req.headers.host || 'localhost');
-  const url = new URL(req.url || '/', origin);
+  try { return new URL(req.url || '/', origin); } catch (e) { /* 落到下面 */ }
+  let raw = String(req.url || '/');
+  while (raw.startsWith('//')) raw = raw.slice(1);
+  if (!raw.startsWith('/')) raw = '/' + raw;
+  const q = raw.indexOf('?');
+  const path = (q < 0 ? raw : raw.slice(0, q)) || '/';
+  try { return new URL(path + (q < 0 ? '' : raw.slice(q)), origin); }
+  catch (e2) { return new URL('/', origin); }
+}
+
+const server = http.createServer((req, res) => {
+  const url = parseRequestUrl(req);
   const p = url.pathname;
 
   if (req.method === 'OPTIONS') {
@@ -1025,17 +1503,59 @@ const server = http.createServer((req, res) => {
   if (p === '/api/health') {
     sendJson(res, 200, {
       ok: true,
+      /* 我是谁：pid + 本次启动的随机数。测试拿它核对「回答我的确实是我 spawn 的那个子进程」。
+         没有这一格，端口被上一轮遗留的进程占着时，spawn 的子进程绑定失败、
+         waitHealth 照样从**旧进程**拿到 200 —— 于是整套服务端断言跑在过期代码上，
+         而终端上是全绿。这是实测撞过的（见 代码审查报告-2026-10-18.md 批次 F 一节）。 */
+      pid: process.pid, bootId: BOOT_ID,
       upstream: UPSTREAM,
       keySource: API_KEY ? 'server' : 'client',
+      /* 界面状态灯要用这三格说真话：「未配置 Key · 本地引擎」原来只看页面有没有填 Key，
+         服务端配了密钥时它照这么说，而模型通道其实是通的。
+         只给布尔与名字 —— 密钥内容一律不出这道口。 */
+      serverKey: !!API_KEY,
+      defaultModel: DEFAULT_MODEL,
+      vlmConfigured: !!VLM_UPSTREAM,
       sseClients: sseClients.size,
       msgSeq, buffered: msgBuffer.length,
       dedupe: msgIds.size, dedupeLimit: MAX_DEDUPE,
-      riskPolicy: 'server 由前端 policy.js 统一加载',
+      /* 这句以前写的是「server 由前端 policy.js 统一加载」——那是**假的**：
+         服务端那时候一份判定代码都没加载。现在它是真的，而且是**自述**而不是承诺：
+         available=false 时 /api/analyze 一律 503，不会给一个看着正常的等级。 */
+      riskPolicy: '统一标准由 server/asset-runtime.js 加载 assets/policy.js（与测试同一个加载器）',
+      analyze: Pipeline.describe(),
       /* 边界自述：界面与外部对接方都要能看到「这条口现在认什么」，
          而不是发了 curl 才发现被拒 */
       ingestMode: INGEST_TOKEN ? 'token' : 'loopback',
       chatLimit: { windowMs: CHAT_WINDOW_MS, max: CHAT_MAX_PER_WINDOW },
       staticAllow: { dirs: STATIC_ALLOW_DIRS, files: STATIC_ALLOW_FILES },
+      /* 落盘与内存态的自述。落盘改成异步之后，「响应已返回、盘还没写完」是**正常状态**，
+         所以 pending 必须看得见 —— 不然「我注册了工号，重启怎么没了」只能靠猜。
+         上游超时同理：对接方要能查到这台机器等多久算死，而不是发完请求自己数秒。
+         跨进程那几个计数是这次修复的**唯一外部证据**：`keptFromDisk` 不为 0 就说明确有
+         另一台实例的记录被我们收下过；`stalled` 为 true 表示此刻还欠着一次没写成的落盘。 */
+      store: {
+        writes: dbWrites, errors: dbWriteErrors, pending: !!dbLoop, stalled: dbStalled,
+        merges: dbMerges, keptFromDisk: dbKeptFromDisk, honoredDeletes: dbHonoredDeletes,
+        conflicts: dbConflicts, lockWaits: dbLockWaits, lockSteals: dbLockSteals,
+        lockTimeouts: dbLockTimeouts, corruptReads: dbCorruptReads,
+        limits: { waitMs: LOCK_WAIT_MS, pollMs: LOCK_POLL_MS, staleMs: LOCK_STALE_MS, retryMs: STALL_RETRY_MS },
+      },
+      upstreamTimeoutMs: { chat: CHAT_TIMEOUT_MS, vlm: VLM_TIMEOUT_MS },
+      /* 回执通道的自述。四个计数各管一件事，缺一个就有一句谎话没人拆穿：
+         `rejected` 说「有多少上报被拒」→ 前端接线错了会安静地一条都不到；
+         `stripped` 说「白名单丢掉了多少个键」→ 有人开始往上塞顾客原文时，这个数会先动；
+         `droppedOld` 只算**本进程启动以来**被淘汰的条数（跨重启的历史不在这里，界面上也不许那么说）。 */
+      effect: {
+        accepted: effectAccepted, rejected: effectRejected,
+        stripped: effectStripped, droppedOld: effectDropped,
+        kept: (loadDb().effect || []).length, limit: EffectStats.LIMIT,
+      },
+      memory: {
+        sessions: sessions.size, loginFails: loginFails.size,
+        chatWindows: chatWindows.size, vlmWindows: vlmWindows.size, analyzeWindows: analyzeWindows.size,
+        effectWindows: effectWindows.size,
+      },
       /* 视觉通道的自述：界面靠 configured 决定显示「VLM 已接」还是「离线像素统计」，
          绝不允许界面自己猜（猜错的代价是把离线结论说成模型结论）。
          这一格**不含密钥**，只有地址与模型名。 */
@@ -1119,6 +1639,18 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  /* ---- 话术效果回执 ----
+     读写都要登录态：这张表里虽然只有等级和分数，但「谁的话术有效」是绩效读数，
+     匿名可读等于让任意机器在局域网里翻别人的工号表现。 */
+  if (p === '/api/effect') {
+    const a = agentOf(req);
+    if (!a) { sendJson(res, 401, { ok: false, message: '话术回执需要登录态' }); return; }
+    if (req.method === 'POST') { handleEffectCreate(req, res, a); return; }
+    if (req.method === 'GET') { handleEffectList(res); return; }
+    sendJson(res, 405, { ok: false, message: '仅支持 GET / POST' });
+    return;
+  }
+
   if (p === '/api/customers' || p.startsWith('/api/customers/')) {
     handleCustomers(res, decodeURIComponent(p.replace('/api/customers', '').replace(/^\//, '')));
     return;
@@ -1141,6 +1673,15 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (p === '/api/analyze') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, reason: 'method_not_allowed', message: '仅支持 POST' });
+      return;
+    }
+    handleAnalyze(req, res);
+    return;
+  }
+
   if (p === '/api/vlm') {
     if (req.method !== 'POST') { sendJson(res, 405, { error: { message: '仅支持 POST' } }); return; }
     handleVlm(req, res);
@@ -1155,16 +1696,75 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res, url.pathname + url.search);
 });
 
+/* 端口被占必须**当场退出并说清是谁占的**。原来这里没接 error 事件：Node 会把
+   EADDRINUSE 抛成未捕获异常、进程在后台挂掉，而调用方（测试脚本）只看到
+   「health 起来了」—— 因为回答的是那台占着端口的旧进程。
+   失败方向要指向「停掉遗留进程」，而不是「换一个端口继续骗人」。 */
+server.on('error', (e) => {
+  if (e && e.code === 'EADDRINUSE') {
+    console.error('');
+    console.error('  server.js[' + process.pid + '/' + BOOT_ID + '] 端口 ' + PORT + ' 已被占用，退出。');
+    console.error('  如果那是上一轮遗留的服务，请先停掉它（或设 PORT= 换一台）——');
+    console.error('  否则测试与浏览器检查会跑在**过期代码**上，而终端上是全绿。');
+    console.error('');
+    process.exit(1);
+  }
+  console.error('  server.js[' + process.pid + '/' + BOOT_ID + '] 启动失败：' + ((e && e.message) || String(e)));
+  process.exit(1);
+});
+
+/* 未处理的 promise rejection 原来会把进程直接带崩（Node 15+ 默认按未捕获异常处理）。
+   这里只**记一笔**、不退出：一次后台写盘失败或一条 SSE 写炸，不该让整个工作台掉线；
+   但也不能咽掉 —— 咽掉之后，下次「界面上某个数字没跟着变」就再没有线索可查。 */
+process.on('unhandledRejection', (e) => {
+  console.error('  [warn] 未处理的 promise rejection：' + ((e && e.message) || String(e)));
+});
+
+/* 优雅退出。原来 Ctrl+C 直接掐断所有 SSE 长连接，并且把「已经改进内存、
+   但那一轮异步写盘还没落地」的账号状态丢掉 —— 落盘改成异步之后，这一步从
+   「锦上添花」变成了**必须**：没有 flush 就退出，异步写就等于不写。
+   顺序：停止接新连接 → 给在线坐席一帧 bye 再收流 → 等这一轮写盘结束。
+   1.5s 是兜底，收尾不该变成「服务赖着不走」。 */
+let shuttingDown = false;
+function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('  [stop] 收到 ' + sig + '，正在收尾…');
+  server.close();
+  for (const res of Array.from(sseClients)) {
+    try {
+      res.write('event: bye\ndata: {"reason":"server_shutdown"}\n\n');
+      res.end();
+    } catch (e) { /* 连接已经不在了 */ }
+  }
+  sseClients.clear();
+  const done = () => process.exit(0);
+  const backstop = setTimeout(done, 1500);
+  flushDb().then(() => clearTimeout(backstop)).then(done, done);
+}
+['SIGINT', 'SIGTERM'].forEach((s) => process.on(s, () => shutdown(s)));
+
 server.listen(PORT, () => {
+  /* 账号库在**启动时**就装载，而不是等第一条请求：loadDb 里那一次 readFileSync
+     落在请求路径上，等于让第一个打开页面的坐席替所有人付同步读盘的钱。 */
+  loadDb();
   const keyState = API_KEY
     ? '已注入（服务端托管，浏览器无需填写）'
-    : '未配置（将透传页面设置中填写的 Key）';
+    : '未配置（透传页面「模型与推理设置」里填写的 Key；页面也没填时这条通道不可用，界面状态灯会照实说）';
+  /* 判定通道在启动时就装配并如实报状态：词典加载失败必须**当场**看得见，
+     而不是等到第一条顾客消息判级时才 503。 */
+  const ap = Pipeline.describe();
   console.log('');
   console.log('  解语 Jieyu · 本地服务已启动');
   console.log('  ------------------------------------------');
   console.log('  访问地址   : http://localhost:' + PORT);
   console.log('  上游接口   : ' + UPSTREAM);
   console.log('  服务端密钥 : ' + keyState);
+  console.log('  服务端判定 : ' + (ap.available
+    ? '已装配（同一份 assets/ 代码 · 阶段 ' + ap.stages.length + ' · 安全闸 ' + ap.fatalStages.join('/') +
+      ' · 统一标准 v' + ap.version + ' · 仅规则/词典通道，不调模型）'
+    : '不可用（/api/analyze 将返回 503）：' + ap.error));
+  console.log('  判定频控   : 每来源 ' + ANALYZE_MAX_PER_WINDOW + ' 次 / ' + Math.round(ANALYZE_WINDOW_MS / 1000) + 's');
   console.log('  消息接入   : POST http://localhost:' + PORT + '/api/ingest');
   console.log('  接入闸门   : ' + (INGEST_TOKEN
     ? 'INGEST_TOKEN 已启用，请求须带 x-ingest-token'
